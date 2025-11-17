@@ -18,7 +18,7 @@ from typing import Protocol
 from dataclasses import asdict
 import jax.numpy as jnp
 import chex
-from flax.struct import dataclass
+from chex import dataclass
 from jaxdp.mdp import MDP as JaxdpMDP
 from jaxdp.mdp.garnet import garnet_mdp
 from jaxdp.mdp.simple_graph import graph_mdp as jaxdp_graph_mdp
@@ -36,19 +36,17 @@ class MDPSpace:
 @dataclass
 class MDPState:
     mdp: JaxdpMDP
-    last_obs: chex.Array
-    step: chex.Array
-    episode_length: chex.Array
+    last_state: chex.Array
+    step: chex.Numeric
+    episode_length: chex.Numeric
 
 
 @dataclass
-class Transition:
-    obs: chex.Array
-    act: chex.Array
+class Step:
     nobs: chex.Array
-    rew: chex.Scalar
-    term: chex.Scalar
-    tran: chex.Scalar
+    rew: chex.Numeric
+    term: chex.Numeric
+    trun: chex.Numeric
 
 
 class ConfigProtocol(Protocol):
@@ -65,7 +63,7 @@ class MDPEnv:
 
     def step(
         self, key: chex.PRNGKey, act: chex.Array, state: MDPState
-    ) -> tuple[Transition, MDPState]:
+    ) -> tuple[Step, MDPState]:
         """Step the MDP environment.
 
         Args:
@@ -74,7 +72,7 @@ class MDPEnv:
             state: Current MDP state.
 
         Returns:
-            Transition and next state.
+            Step and next state.
         """
         (
             next_obs,
@@ -86,22 +84,20 @@ class MDPEnv:
         ) = async_sample_step(
             state.mdp,
             act,
-            state.last_obs,
+            state.last_state,
             state.step,  # type: ignore[arg-type]
             state.episode_length,  # type: ignore[arg-type]
             key,
         )
         return (
-            Transition(
-                obs=state.last_obs,
-                act=act,
+            Step(
                 nobs=next_obs,
                 rew=reward,
                 term=terminal,
-                tran=timeout,
+                trun=timeout,
             ),
             state.replace(  # type: ignore[attr-defined]
-                last_obs=next_obs,
+                last_state=next_obs,
                 step=new_eps_step,
             ),
         )
@@ -116,10 +112,10 @@ class MDPEnv:
             Initial MDP state.
         """
         mdp = self.config.init_mdp(key)
-        initial_obs = mdp.init_state(key)
+        initial_state = mdp.init_state(key)
         return MDPState(
             mdp=mdp,
-            last_obs=initial_obs,
+            last_state=initial_state,
             step=jnp.array(0),
             episode_length=jnp.array(1000),
         )
