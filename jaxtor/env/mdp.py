@@ -1,0 +1,282 @@
+"""Jaxdp MDP environment utilities.
+
+Provides an interface for jaxdp MDP environments.
+
+
+>>> import jax
+>>> from jaxtor.env import mdp
+>>> key = jax.random.PRNGKey(0)
+>>> config = mdp.garnet.Config(state_size=50, action_size=10)
+>>> env = mdp.garnet.make(config)
+>>> state = env.init(key)
+
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+from dataclasses import asdict
+import jax.numpy as jnp
+import chex
+from flax.struct import dataclass
+from jaxdp.mdp import MDP as JaxdpMDP
+from jaxdp.mdp.garnet import garnet_mdp
+from jaxdp.mdp.simple_graph import graph_mdp as jaxdp_graph_mdp
+from jaxdp.mdp.grid_world import grid_world
+from jaxdp import async_sample_step
+
+
+@dataclass
+class MDPSpace:
+    shape: tuple[int]
+    low: chex.Array
+    high: chex.Array
+
+
+@dataclass
+class MDPState:
+    mdp: JaxdpMDP
+    last_obs: chex.Array
+    step: chex.Array
+    episode_length: chex.Array
+
+
+@dataclass
+class Transition:
+    obs: chex.Array
+    act: chex.Array
+    nobs: chex.Array
+    rew: chex.Scalar
+    term: chex.Scalar
+    tran: chex.Scalar
+
+
+class ConfigProtocol(Protocol):
+    """Protocol for MDP configurations."""
+
+    def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP: ...
+
+
+@dataclass
+class MDPEnv:
+    obs_space: MDPSpace
+    act_space: MDPSpace
+    config: ConfigProtocol
+
+    def step(
+        self, key: chex.PRNGKey, act: chex.Array, state: MDPState
+    ) -> tuple[Transition, MDPState]:
+        """Step the MDP environment.
+
+        Args:
+            key: JAX random key.
+            act: One-hot encoded action.
+            state: Current MDP state.
+
+        Returns:
+            Transition and next state.
+        """
+        (
+            next_obs,
+            reward,
+            terminal,
+            timeout,
+            last_obs,
+            new_eps_step,
+        ) = async_sample_step(
+            state.mdp,
+            act,
+            state.last_obs,
+            state.step,  # type: ignore[arg-type]
+            state.episode_length,  # type: ignore[arg-type]
+            key,
+        )
+        return (
+            Transition(
+                obs=state.last_obs,
+                act=act,
+                nobs=next_obs,
+                rew=reward,
+                term=terminal,
+                tran=timeout,
+            ),
+            state.replace(  # type: ignore[attr-defined]
+                last_obs=next_obs,
+                step=new_eps_step,
+            ),
+        )
+
+    def init(self, key: chex.PRNGKey) -> MDPState:
+        """Initialize the MDP environment.
+
+        Args:
+            key: JAX random key for initialization.
+
+        Returns:
+            Initial MDP state.
+        """
+        mdp = self.config.init_mdp(key)
+        initial_obs = mdp.init_state(key)
+        return MDPState(
+            mdp=mdp,
+            last_obs=initial_obs,
+            step=jnp.array(0),
+            episode_length=jnp.array(1000),
+        )
+
+
+class garnet:
+    """Garnet MDP namespace."""
+
+    @dataclass
+    class Config:
+        """Configuration for creating a Garnet MDP.
+
+        Attributes:
+            state_size: Number of states in the MDP.
+            action_size: Number of actions available.
+            branch_size: Number of successor states per state-action pair.
+            min_reward: Minimum reward value.
+            max_reward: Maximum reward value.
+        """
+
+        state_size: int = 50
+        action_size: int = 10
+        branch_size: int = 5
+        min_reward: float = 0.0
+        max_reward: float = 1.0
+
+        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+            """Initialize a Garnet MDP from this config."""
+            return garnet_mdp(**asdict(self), key=key)
+
+    @staticmethod
+    def make(config: garnet.Config) -> MDPEnv:
+        """Create a Garnet MDP environment.
+
+        Args:
+            config: Garnet MDP configuration.
+
+        Returns:
+            MDPEnv instance.
+        """
+        return MDPEnv(
+            obs_space=MDPSpace(
+                shape=(config.state_size,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            act_space=MDPSpace(
+                shape=(config.action_size,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            config=config,
+        )
+
+
+class graph:
+    """Graph MDP namespace."""
+
+    @dataclass
+    class Config:
+        """Configuration for creating a Graph MDP.
+
+        The graph MDP from 'Fastest Convergence for Q-Learning' paper.
+        This is a fixed 6-state graph with predefined edge structure.
+        """
+
+        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+            """Initialize a Graph MDP from this config."""
+            return jaxdp_graph_mdp()
+
+    @staticmethod
+    def make(config: graph.Config) -> MDPEnv:
+        """Create a Graph MDP environment.
+
+        Args:
+            config: Graph MDP configuration.
+
+        Returns:
+            MDPEnv instance.
+        """
+        return MDPEnv(
+            obs_space=MDPSpace(
+                shape=(6,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            act_space=MDPSpace(
+                shape=(6,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            config=config,
+        )
+
+
+class gridworld:
+    """GridWorld MDP namespace."""
+
+    @dataclass
+    class Config:
+        """Configuration for creating a GridWorld MDP.
+
+        Board characters:
+            '#': Impassable wall
+            'P': Initial agent position
+            '@': Terminal/goal state (positive reward)
+            '=': Absorbing state (positive reward)
+            '+': Positive reward cell
+            'X': Penalty cell
+            ' ': Regular passable space
+
+        Attributes:
+            board: List of strings representing the 2D grid layout.
+            p_slip: Probability of slipping to unintended action.
+
+        Example:
+            >>> config = gridworld.Config(
+            ...     board=[
+            ...         "#####",
+            ...         "#  @#",
+            ...         "# #X#",
+            ...         "#P  #",
+            ...         "#####"
+            ...     ],
+            ...     p_slip=0.1
+            ... )
+        """
+
+        board: list[str]
+        p_slip: float = 0.0
+
+        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+            """Initialize a GridWorld MDP from this config."""
+            return grid_world(**asdict(self))
+
+    @staticmethod
+    def make(config: gridworld.Config) -> MDPEnv:
+        """Create a GridWorld MDP environment.
+
+        Args:
+            config: GridWorld MDP configuration.
+
+        Returns:
+            MDPEnv instance.
+        """
+        temp_mdp = grid_world(**asdict(config))
+
+        return MDPEnv(
+            obs_space=MDPSpace(
+                shape=(temp_mdp.state_size,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            act_space=MDPSpace(
+                shape=(temp_mdp.action_size,),
+                low=jnp.array(0.0),
+                high=jnp.array(1.0),
+            ),
+            config=config,
+        )
