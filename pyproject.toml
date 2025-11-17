@@ -10,7 +10,6 @@ requires-python = ">=3.13"
 dependencies = [
     "chex>=0.1.91",
     "distrax>=0.1.7",
-    "flax>=0.12.0",
     "jax>=0.8.0",
     "jaxtyping>=0.3.3",
 ]
@@ -24,6 +23,7 @@ packages = ["jaxtor"]
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.407",
     "pytest>=9.0.1",
     "rich>=14.2.0",
     "ruff>=0.14.5",
