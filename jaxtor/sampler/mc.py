@@ -40,7 +40,10 @@ class Env(Protocol):
     def init(self, key: chex.PRNGKey) -> tuple[chex.Array, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
 
     def step(
-        self, key: chex.PRNGKey, act: chex.Array, env_state: chex.PyTreeDef
+        self,
+        key: chex.PRNGKey,
+        act: chex.Array,
+        env_state: chex.PyTreeDef,  # type: ignore[reportInvalidTypeForm]
     ) -> tuple[Env.Step, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
 
 
@@ -136,7 +139,7 @@ class MarkovChain:
         state = jax.tree.map(
             lambda x, y: jax.lax.select(done, x, y),
             # If done: reset and update statistics
-            state.replace(
+            state.replace(  # type: ignore[reportAttributeAccessIssue]
                 key=key,
                 eps_idx=state.eps_idx * 0,
                 eps_rew=state.eps_rew * 0,
@@ -153,7 +156,7 @@ class MarkovChain:
                 env=reset_env,
             ),
             # If not done: continue episode
-            state.replace(
+            state.replace(  # type: ignore[reportAttributeAccessIssue]
                 key=key,
                 eps_idx=state.eps_idx + 1,
                 eps_rew=state.eps_rew + transition.rew,
@@ -175,7 +178,7 @@ class MarkovChain:
         Returns:
             Updated state with cleared queue statistics.
         """
-        return state.replace(
+        return state.replace(  # type: ignore[reportAttributeAccessIssue]
             eps_rew_queue=jnp.full_like(state.eps_rew_queue, jnp.nan),
             eps_len_queue=jnp.full_like(state.eps_len_queue, jnp.nan),
         )

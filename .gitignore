@@ -26,6 +26,9 @@ venv/
 ENV/
 .venv
 
+# Exception: allow jaxtor/env module
+!jaxtor/env/
+
 # IDEs
 .vscode/
 .idea/
