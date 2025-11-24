@@ -1,13 +1,13 @@
-"""Jaxdp MDP environment utilities.
+"""Jaxdp tabular environment utilities.
 
-Provides an interface for jaxdp MDP environments.
+Provides an interface for jaxdp tabular MDP environments.
 
 
 >>> import jax
->>> from jaxtor.env import mdp
+>>> from jaxtor.env import tabular
 >>> key = jax.random.PRNGKey(0)
->>> config = mdp.garnet.Config(state_size=50, action_size=10)
->>> env = mdp.garnet.make(config)
+>>> config = tabular.garnet.Config(state_size=50, action_size=10)
+>>> env = tabular.garnet.make(config)
 >>> state = env.init(key)
 
 """
@@ -27,14 +27,14 @@ from jaxdp import async_sample_step
 
 
 @dataclass
-class MDPSpace:
+class TabularSpace:
     shape: tuple[int]
     low: chex.Array
     high: chex.Array
 
 
 @dataclass
-class MDPState:
+class TabularState:
     mdp: JaxdpMDP
     last_state: chex.Array
     step: chex.Numeric
@@ -50,26 +50,26 @@ class Step:
 
 
 class ConfigProtocol(Protocol):
-    """Protocol for MDP configurations."""
+    """Protocol for tabular MDP configurations."""
 
     def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP: ...
 
 
 @dataclass
-class MDPEnv:
-    obs_space: MDPSpace
-    act_space: MDPSpace
+class TabularEnv:
+    obs_space: TabularSpace
+    act_space: TabularSpace
     config: ConfigProtocol
 
     def step(
-        self, key: chex.PRNGKey, act: chex.Array, state: MDPState
-    ) -> tuple[Step, MDPState]:
-        """Step the MDP environment.
+        self, key: chex.PRNGKey, act: chex.Array, state: TabularState
+    ) -> tuple[Step, TabularState]:
+        """Step the tabular environment.
 
         Args:
             key: JAX random key.
             act: One-hot encoded action.
-            state: Current MDP state.
+            state: Current tabular state.
 
         Returns:
             Step and next state.
@@ -102,18 +102,18 @@ class MDPEnv:
             ),
         )
 
-    def init(self, key: chex.PRNGKey) -> MDPState:
-        """Initialize the MDP environment.
+    def init(self, key: chex.PRNGKey) -> TabularState:
+        """Initialize the tabular environment.
 
         Args:
             key: JAX random key for initialization.
 
         Returns:
-            Initial MDP state.
+            Initial tabular state.
         """
         mdp = self.config.init_mdp(key)
         initial_state = mdp.init_state(key)
-        return MDPState(
+        return TabularState(
             mdp=mdp,
             last_state=initial_state,
             step=jnp.array(0),
@@ -147,22 +147,22 @@ class garnet:
             return garnet_mdp(**asdict(self), key=key)
 
     @staticmethod
-    def make(config: garnet.Config) -> MDPEnv:
-        """Create a Garnet MDP environment.
+    def make(config: garnet.Config) -> TabularEnv:
+        """Create a Garnet tabular environment.
 
         Args:
             config: Garnet MDP configuration.
 
         Returns:
-            MDPEnv instance.
+            TabularEnv instance.
         """
-        return MDPEnv(
-            obs_space=MDPSpace(
+        return TabularEnv(
+            obs_space=TabularSpace(
                 shape=(config.state_size,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),
             ),
-            act_space=MDPSpace(
+            act_space=TabularSpace(
                 shape=(config.action_size,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),
@@ -187,22 +187,22 @@ class graph:
             return jaxdp_graph_mdp()
 
     @staticmethod
-    def make(config: graph.Config) -> MDPEnv:
-        """Create a Graph MDP environment.
+    def make(config: graph.Config) -> TabularEnv:
+        """Create a Graph tabular environment.
 
         Args:
             config: Graph MDP configuration.
 
         Returns:
-            MDPEnv instance.
+            TabularEnv instance.
         """
-        return MDPEnv(
-            obs_space=MDPSpace(
+        return TabularEnv(
+            obs_space=TabularSpace(
                 shape=(6,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),
             ),
-            act_space=MDPSpace(
+            act_space=TabularSpace(
                 shape=(6,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),
@@ -252,24 +252,24 @@ class gridworld:
             return grid_world(**asdict(self))
 
     @staticmethod
-    def make(config: gridworld.Config) -> MDPEnv:
-        """Create a GridWorld MDP environment.
+    def make(config: gridworld.Config) -> TabularEnv:
+        """Create a GridWorld tabular environment.
 
         Args:
             config: GridWorld MDP configuration.
 
         Returns:
-            MDPEnv instance.
+            TabularEnv instance.
         """
         temp_mdp = grid_world(**asdict(config))
 
-        return MDPEnv(
-            obs_space=MDPSpace(
+        return TabularEnv(
+            obs_space=TabularSpace(
                 shape=(temp_mdp.state_size,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),
             ),
-            act_space=MDPSpace(
+            act_space=TabularSpace(
                 shape=(temp_mdp.action_size,),
                 low=jnp.array(0.0),
                 high=jnp.array(1.0),

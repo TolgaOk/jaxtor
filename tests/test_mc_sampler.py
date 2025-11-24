@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from jaxtor.sampler import mc
-from jaxtor.env import mdp
+from jaxtor.env import tabular
 
 
 # ============================================================================
@@ -665,8 +665,8 @@ def test_mc_with_garnet_mdp():
     init_key, sample_key = jax.random.split(key)
 
     # Create Garnet MDP
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
 
     # Note: MDP returns Step and MDPState, but MC sampler expects different interface
     # This test verifies the protocol mismatch is handled or we need an adapter
@@ -677,8 +677,8 @@ def test_mc_with_graph_mdp():
     key = jax.random.PRNGKey(1)
 
     # Create Graph MDP
-    config = mdp.graph.Config()
-    env = mdp.graph.make(config)
+    config = tabular.graph.Config()
+    env = tabular.graph.make(config)
 
     # Graph MDP has 6 states and 6 actions
     assert env.obs_space.shape == (6,)
@@ -690,11 +690,11 @@ def test_mc_with_gridworld_mdp():
     key = jax.random.PRNGKey(2)
 
     # Create GridWorld MDP
-    config = mdp.gridworld.Config(
+    config = tabular.gridworld.Config(
         board=["#####", "#  @#", "# # #", "#P  #", "#####"],
         p_slip=0.0
     )
-    env = mdp.gridworld.make(config)
+    env = tabular.gridworld.make(config)
 
     # GridWorld should have valid state/action spaces
     assert env.obs_space.shape[0] > 0
@@ -726,8 +726,8 @@ def test_mdp_adapter_pattern():
             return step_result, next_mdp_state
 
     # Create Garnet MDP with adapter
-    config = mdp.garnet.Config(state_size=8, action_size=3)
-    mdp_env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=8, action_size=3)
+    mdp_env = tabular.garnet.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
     # Create MC sampler with adapted environment
@@ -764,8 +764,8 @@ def test_mc_full_episode_with_mdp():
             return step_result, next_mdp_state
 
     # Create environment
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    mdp_env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    mdp_env = tabular.garnet.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
     # Create sampler
@@ -807,8 +807,8 @@ def test_vmap_with_mdp_environments():
             return step_result, next_mdp_state
 
     # Create MDP environment
-    config = mdp.garnet.Config(state_size=6, action_size=3)
-    mdp_env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=6, action_size=3)
+    mdp_env = tabular.garnet.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
     # Create sampler
@@ -851,8 +851,8 @@ def test_mc_episode_statistics_with_mdp():
             return step_result, next_mdp_state
 
     # Create environment with short episodes
-    config = mdp.garnet.Config(state_size=5, action_size=2)
-    mdp_env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=5, action_size=2)
+    mdp_env = tabular.garnet.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
     # Manually set short episode length for testing
@@ -896,11 +896,11 @@ def test_gridworld_deterministic_episode():
             return step_result, next_mdp_state
 
     # Create simple GridWorld
-    config = mdp.gridworld.Config(
+    config = tabular.gridworld.Config(
         board=["###", "#P@", "###"], 
         p_slip=0.0  # Deterministic
     )
-    mdp_env = mdp.gridworld.make(config)
+    mdp_env = tabular.gridworld.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
     sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=adapted_env)

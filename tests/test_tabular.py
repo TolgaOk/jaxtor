@@ -1,9 +1,9 @@
-"""Comprehensive tests for MDP environment functionality."""
+"""Comprehensive tests for tabular environment functionality."""
 
 import jax
 import jax.numpy as jnp
 import pytest
-from jaxtor.env import mdp
+from jaxtor.env import tabular
 
 
 # ============================================================================
@@ -14,8 +14,8 @@ from jaxtor.env import mdp
 def test_garnet_init():
     """Test Garnet MDP initialization creates valid state."""
     key = jax.random.PRNGKey(0)
-    config = mdp.garnet.Config(state_size=50, action_size=10)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=50, action_size=10)
+    env = tabular.garnet.make(config)
     state = env.init(key)
 
     assert state.mdp.state_size == config.state_size
@@ -28,8 +28,8 @@ def test_garnet_init():
 def test_graph_init():
     """Test Graph MDP initialization creates valid state."""
     key = jax.random.PRNGKey(1)
-    config = mdp.graph.Config()
-    env = mdp.graph.make(config)
+    config = tabular.graph.Config()
+    env = tabular.graph.make(config)
     state = env.init(key)
 
     assert state.mdp.state_size == 6
@@ -41,10 +41,10 @@ def test_graph_init():
 def test_gridworld_init():
     """Test GridWorld MDP initialization creates valid state."""
     key = jax.random.PRNGKey(2)
-    config = mdp.gridworld.Config(
+    config = tabular.gridworld.Config(
         board=["#####", "#  @#", "# #X#", "#P  #", "#####"], p_slip=0.1
     )
-    env = mdp.gridworld.make(config)
+    env = tabular.gridworld.make(config)
     state = env.init(key)
 
     assert state.mdp.state_size == 8
@@ -63,8 +63,8 @@ def test_garnet_single_step():
     key = jax.random.PRNGKey(0)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     action = jax.nn.one_hot(0, config.action_size)
@@ -86,8 +86,8 @@ def test_graph_single_step():
     key = jax.random.PRNGKey(1)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.graph.Config()
-    env = mdp.graph.make(config)
+    config = tabular.graph.Config()
+    env = tabular.graph.make(config)
     state = env.init(init_key)
 
     action = jax.nn.one_hot(0, 6)
@@ -102,10 +102,10 @@ def test_gridworld_single_step():
     key = jax.random.PRNGKey(2)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.gridworld.Config(
+    config = tabular.gridworld.Config(
         board=["#####", "#  @#", "# # #", "#P  #", "#####"], p_slip=0.0
     )
-    env = mdp.gridworld.make(config)
+    env = tabular.gridworld.make(config)
     state = env.init(init_key)
 
     action = jax.nn.one_hot(1, 4)  # Right
@@ -125,8 +125,8 @@ def test_garnet_multiple_steps():
     key = jax.random.PRNGKey(0)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     num_steps = 10
@@ -146,8 +146,8 @@ def test_episode_accumulates_reward():
     key = jax.random.PRNGKey(42)
     init_key, rollout_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=20, action_size=5)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=20, action_size=5)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     rewards = []
@@ -180,8 +180,8 @@ def test_episode_length_limit():
 
     # Create environment with very short episode length
     episode_length = 5
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     # Manually set short episode length for testing
@@ -214,8 +214,8 @@ def test_truncation_flag():
     key = jax.random.PRNGKey(0)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     # Run many steps to potentially encounter truncation
@@ -237,10 +237,10 @@ def test_terminal_state():
     init_key, step_key = jax.random.split(key)
 
     # GridWorld has explicit terminal states
-    config = mdp.gridworld.Config(
+    config = tabular.gridworld.Config(
         board=["###", "#P@", "###"], p_slip=0.0
     )
-    env = mdp.gridworld.make(config)
+    env = tabular.gridworld.make(config)
     state = env.init(init_key)
 
     # Move right towards goal
@@ -258,8 +258,8 @@ def test_state_space_consistency():
     key = jax.random.PRNGKey(0)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     for i in range(20):
@@ -280,8 +280,8 @@ def test_action_space_validation():
     key = jax.random.PRNGKey(0)
     init_key = key
 
-    config = mdp.garnet.Config(state_size=10, action_size=4, branch_size=3)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4, branch_size=3)
+    env = tabular.garnet.make(config)
 
     # Test each action
     results = []
@@ -305,8 +305,8 @@ def test_action_space_validation():
 
 def test_stochastic_transitions():
     """Test that environment uses random keys (not deterministic without keys)."""
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
 
     # Test that the environment respects the random key
     # by checking that step() completes successfully with different keys
@@ -330,8 +330,8 @@ def test_stochastic_transitions():
 
 def test_deterministic_with_same_key():
     """Test that same key produces same results."""
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
 
     init_key = jax.random.PRNGKey(0)
     step_key = jax.random.PRNGKey(1)
@@ -367,8 +367,8 @@ def test_garnet_different_sizes(state_size, action_size):
     key = jax.random.PRNGKey(0)
     init_key, step_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=state_size, action_size=action_size)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=state_size, action_size=action_size)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     assert state.last_state.shape == (state_size,)
@@ -385,15 +385,15 @@ def test_gridworld_slip_probability():
     """Test GridWorld with slip probability affects behavior."""
     key = jax.random.PRNGKey(42)
 
-    config_no_slip = mdp.gridworld.Config(
+    config_no_slip = tabular.gridworld.Config(
         board=["#####", "#P  #", "#####"], p_slip=0.0
     )
-    config_slip = mdp.gridworld.Config(
+    config_slip = tabular.gridworld.Config(
         board=["#####", "#P  #", "#####"], p_slip=0.5
     )
 
-    env_no_slip = mdp.gridworld.make(config_no_slip)
-    env_slip = mdp.gridworld.make(config_slip)
+    env_no_slip = tabular.gridworld.make(config_no_slip)
+    env_slip = tabular.gridworld.make(config_slip)
 
     state_no_slip = env_no_slip.init(key)
     state_slip = env_slip.init(key)
@@ -413,8 +413,8 @@ def test_full_episode_rollout():
     key = jax.random.PRNGKey(42)
     init_key, rollout_key = jax.random.split(key)
 
-    config = mdp.garnet.Config(state_size=20, action_size=5, branch_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=20, action_size=5, branch_size=4)
+    env = tabular.garnet.make(config)
     state = env.init(init_key)
 
     max_steps = 1000
@@ -442,8 +442,8 @@ def test_multiple_episodes():
     """Test running multiple episodes sequentially."""
     key = jax.random.PRNGKey(0)
 
-    config = mdp.garnet.Config(state_size=10, action_size=4)
-    env = mdp.garnet.make(config)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
 
     num_episodes = 3
     episode_lengths = []
