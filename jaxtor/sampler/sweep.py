@@ -5,6 +5,7 @@ transition dynamics. Provides matrix-vector operations.
 """
 
 from __future__ import annotations
+from typing import Protocol
 
 import chex
 import jax
@@ -12,8 +13,7 @@ import jax.numpy as jnp
 from chex import dataclass
 
 
-@dataclass
-class TabularMDP:
+class TabularMDP(Protocol):
     transition: chex.Array
 
 
