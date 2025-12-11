@@ -8,17 +8,19 @@ Provides an interface for jaxdp tabular MDP environments.
 >>> key = jax.random.PRNGKey(0)
 >>> config = tabular.garnet.Config(state_size=50, action_size=10)
 >>> env = tabular.garnet.make(config)
->>> state = env.init(key)
+>>> init_key, reset_key = jax.random.split(key)
+>>> state = env.init(init_key)
+>>> obs, state = env.reset(reset_key, state)
 
 """
 
 from __future__ import annotations
 
 from typing import Protocol
-from dataclasses import asdict
 import jax.numpy as jnp
 import chex
 from chex import dataclass
+import jax
 from jaxdp.mdp import MDP as JaxdpMDP
 from jaxdp.mdp.garnet import garnet_mdp
 from jaxdp.mdp.simple_graph import graph_mdp as jaxdp_graph_mdp
@@ -38,12 +40,12 @@ class TabularState:
     mdp: JaxdpMDP
     last_state: chex.Array
     step: chex.Numeric
-    episode_length: chex.Numeric
+    max_episode_len: chex.Numeric
 
 
 @dataclass
 class Step:
-    nobs: chex.Array
+    nobs: chex.Numeric
     rew: chex.Numeric
     term: chex.Numeric
     trun: chex.Numeric
@@ -51,6 +53,8 @@ class Step:
 
 class ConfigProtocol(Protocol):
     """Protocol for tabular MDP configurations."""
+
+    max_episode_len: int
 
     def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP: ...
 
@@ -62,7 +66,7 @@ class TabularEnv:
     config: ConfigProtocol
 
     def step(
-        self, key: chex.PRNGKey, act: chex.Array, state: TabularState
+        self, key: chex.PRNGKey, act: chex.Numeric, state: TabularState
     ) -> tuple[Step, TabularState]:
         """Step the tabular environment.
 
@@ -74,50 +78,71 @@ class TabularEnv:
         Returns:
             Step and next state.
         """
+        chex.assert_rank(act, 0)
         (
             next_obs,
             reward,
             terminal,
             timeout,
-            last_obs,
+            last_state,
             new_eps_step,
         ) = async_sample_step(
             state.mdp,
-            act,
+            jax.nn.one_hot(act, state.mdp.action_size),
             state.last_state,
             state.step,  # type: ignore[arg-type]
-            state.episode_length,  # type: ignore[arg-type]
+            state.max_episode_len,  # type: ignore[arg-type]
             key,
         )
         return (
             Step(
-                nobs=next_obs,
+                nobs=jnp.argmax(next_obs),
                 rew=reward,
                 term=terminal,
                 trun=timeout,
             ),
             state.replace(  # type: ignore[attr-defined]
-                last_state=next_obs,
+                last_state=last_state,
                 step=new_eps_step,
             ),
         )
 
     def init(self, key: chex.PRNGKey) -> TabularState:
-        """Initialize the tabular environment.
+        """Initialize the tabular environment state.
 
         Args:
-            key: JAX random key for initialization.
+            key: JAX random key for MDP initialization.
 
         Returns:
-            Initial tabular state.
+            Tabular state with initialized MDP.
         """
         mdp = self.config.init_mdp(key)
-        initial_state = mdp.init_state(key)
         return TabularState(
             mdp=mdp,
-            last_state=initial_state,
+            last_state=jnp.full(mdp.state_size, jnp.nan),
             step=jnp.array(0),
-            episode_length=jnp.array(1000),
+            max_episode_len=jnp.array(self.config.max_episode_len),
+        )
+
+    def reset(
+        self, key: chex.PRNGKey, state: TabularState
+    ) -> tuple[chex.Numeric, TabularState]:
+        """Reset the environment to start a new episode.
+
+        Args:
+            key: JAX random key for sampling initial state.
+            state: Current tabular state.
+
+        Returns:
+            Initial observation and reset state.
+        """
+        initial_state = state.mdp.init_state(key)
+        return (
+            jnp.argmax(initial_state),
+            state.replace(
+                last_state=initial_state,
+                step=jnp.array(0),
+            ),
         )
 
 
@@ -134,6 +159,7 @@ class garnet:
             branch_size: Number of successor states per state-action pair.
             min_reward: Minimum reward value.
             max_reward: Maximum reward value.
+            max_episode_len: Maximum episode length before truncation.
         """
 
         state_size: int = 50
@@ -141,10 +167,18 @@ class garnet:
         branch_size: int = 5
         min_reward: float = 0.0
         max_reward: float = 1.0
+        max_episode_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a Garnet MDP from this config."""
-            return garnet_mdp(**asdict(self), key=key)
+            return garnet_mdp(
+                state_size=self.state_size,
+                action_size=self.action_size,
+                branch_size=self.branch_size,
+                min_reward=self.min_reward,
+                max_reward=self.max_reward,
+                key=key,
+            )
 
     @staticmethod
     def make(config: garnet.Config) -> TabularEnv:
@@ -180,7 +214,12 @@ class graph:
 
         The graph MDP from 'Fastest Convergence for Q-Learning' paper.
         This is a fixed 6-state graph with predefined edge structure.
+
+        Attributes:
+            max_episode_len: Maximum episode length before truncation.
         """
+
+        max_episode_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a Graph MDP from this config."""
@@ -230,6 +269,7 @@ class gridworld:
         Attributes:
             board: List of strings representing the 2D grid layout.
             p_slip: Probability of slipping to unintended action.
+            max_episode_len: Maximum episode length before truncation.
 
         Example:
             >>> config = gridworld.Config(
@@ -246,10 +286,11 @@ class gridworld:
 
         board: list[str]
         p_slip: float = 0.0
+        max_episode_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a GridWorld MDP from this config."""
-            return grid_world(**asdict(self))
+            return grid_world(board=self.board, p_slip=self.p_slip)
 
     @staticmethod
     def make(config: gridworld.Config) -> TabularEnv:
@@ -261,7 +302,7 @@ class gridworld:
         Returns:
             TabularEnv instance.
         """
-        temp_mdp = grid_world(**asdict(config))
+        temp_mdp = grid_world(board=config.board, p_slip=config.p_slip)
 
         return TabularEnv(
             obs_space=TabularSpace(
