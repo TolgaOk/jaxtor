@@ -37,7 +37,13 @@ class Env(Protocol):
         term: chex.Numeric
         trun: chex.Numeric
 
-    def init(self, key: chex.PRNGKey) -> tuple[chex.Array, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
+    def init(self, key: chex.PRNGKey) -> chex.PyTreeDef: ...  # type: ignore[reportInvalidTypeForm]
+
+    def reset(
+        self,
+        key: chex.PRNGKey,
+        env_state: chex.PyTreeDef,  # type: ignore[reportInvalidTypeForm]
+    ) -> tuple[chex.Array, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
 
     def step(
         self,
@@ -134,7 +140,7 @@ class MarkovChain:
         done = jnp.logical_or(transition.term, transition.trun)
 
         # Compute reset values (used only if done)
-        reset_obs, reset_env = self.env.init(reset_key)
+        reset_obs, reset_env = self.env.reset(reset_key, env_state)
 
         state = jax.tree.map(
             lambda x, y: jax.lax.select(done, x, y),
@@ -192,8 +198,9 @@ class MarkovChain:
         Returns:
             Initialized sampler state.
         """
-        key, reset_key = jrd.split(key, 2)
-        last_obs, env_state = self.env.init(reset_key)
+        key, init_key, reset_key = jrd.split(key, 3)
+        env_state = self.env.init(init_key)
+        last_obs, env_state = self.env.reset(reset_key, env_state)
 
         return self.State(
             key=key,
