@@ -27,11 +27,14 @@ class SimpleEnv:
         self.action_size = action_size
         self.episode_len = episode_len
 
-    def init(self, key: jax.random.PRNGKey) -> tuple[jnp.ndarray, dict]:
-        """Initialize environment with zero state."""
+    def init(self, key: jax.random.PRNGKey) -> dict:
+        """Initialize environment state."""
+        return {"step": 0}
+
+    def reset(self, key: jax.random.PRNGKey, env_state: dict) -> tuple[jnp.ndarray, dict]:
+        """Reset environment and return initial observation."""
         initial_state = jnp.zeros(self.state_size)
-        env_state = {"step": 0}
-        return initial_state, env_state
+        return initial_state, {"step": 0}
 
     def step(
         self, key: jax.random.PRNGKey, act: jnp.ndarray, env_state: dict
@@ -72,11 +75,14 @@ class StochasticEnv:
     def __init__(self, state_size: int = 4):
         self.state_size = state_size
 
-    def init(self, key: jax.random.PRNGKey) -> tuple[jnp.ndarray, dict]:
-        """Initialize with random state."""
+    def init(self, key: jax.random.PRNGKey) -> dict:
+        """Initialize environment state."""
+        return {"step": 0}
+
+    def reset(self, key: jax.random.PRNGKey, env_state: dict) -> tuple[jnp.ndarray, dict]:
+        """Reset environment with random initial state."""
         initial_state = jax.random.normal(key, (self.state_size,))
-        env_state = {"step": 0}
-        return initial_state, env_state
+        return initial_state, {"step": 0}
 
     def step(
         self, key: jax.random.PRNGKey, act: jnp.ndarray, env_state: dict
@@ -715,14 +721,24 @@ def test_mdp_adapter_pattern():
             self.mdp_env = mdp_env
 
         def init(self, key):
-            """Initialize and return (obs, env_state)."""
-            mdp_state = self.mdp_env.init(key)
-            return mdp_state.last_state, mdp_state
+            """Initialize and return env_state."""
+            return self.mdp_env.init(key)
+
+        def reset(self, key, env_state):
+            """Reset and return (obs, env_state)."""
+            obs, env_state = self.mdp_env.reset(key, env_state)
+            return jax.nn.one_hot(obs, env_state.mdp.state_size), env_state
 
         def step(self, key, act, env_state):
             """Step and return (Step, env_state)."""
-            step_result, next_mdp_state = self.mdp_env.step(key, act, env_state)
-            # step_result already is a Step object, env_state is MDPState
+            step_result, next_mdp_state = self.mdp_env.step(key, jnp.argmax(act), env_state)
+            # Convert scalar obs to one-hot for mc sampler
+            step_result = type(step_result)(
+                nobs=jax.nn.one_hot(step_result.nobs, next_mdp_state.mdp.state_size),
+                rew=step_result.rew,
+                term=step_result.term,
+                trun=step_result.trun,
+            )
             return step_result, next_mdp_state
 
     # Create Garnet MDP with adapter
@@ -756,11 +772,20 @@ def test_mc_full_episode_with_mdp():
             self.mdp_env = mdp_env
 
         def init(self, key):
-            mdp_state = self.mdp_env.init(key)
-            return mdp_state.last_state, mdp_state
+            return self.mdp_env.init(key)
+
+        def reset(self, key, env_state):
+            obs, env_state = self.mdp_env.reset(key, env_state)
+            return jax.nn.one_hot(obs, env_state.mdp.state_size), env_state
 
         def step(self, key, act, env_state):
-            step_result, next_mdp_state = self.mdp_env.step(key, act, env_state)
+            step_result, next_mdp_state = self.mdp_env.step(key, jnp.argmax(act), env_state)
+            step_result = type(step_result)(
+                nobs=jax.nn.one_hot(step_result.nobs, next_mdp_state.mdp.state_size),
+                rew=step_result.rew,
+                term=step_result.term,
+                trun=step_result.trun,
+            )
             return step_result, next_mdp_state
 
     # Create environment
@@ -799,11 +824,20 @@ def test_vmap_with_mdp_environments():
             self.mdp_env = mdp_env
 
         def init(self, key):
-            mdp_state = self.mdp_env.init(key)
-            return mdp_state.last_state, mdp_state
+            return self.mdp_env.init(key)
+
+        def reset(self, key, env_state):
+            obs, env_state = self.mdp_env.reset(key, env_state)
+            return jax.nn.one_hot(obs, env_state.mdp.state_size), env_state
 
         def step(self, key, act, env_state):
-            step_result, next_mdp_state = self.mdp_env.step(key, act, env_state)
+            step_result, next_mdp_state = self.mdp_env.step(key, jnp.argmax(act), env_state)
+            step_result = type(step_result)(
+                nobs=jax.nn.one_hot(step_result.nobs, next_mdp_state.mdp.state_size),
+                rew=step_result.rew,
+                term=step_result.term,
+                trun=step_result.trun,
+            )
             return step_result, next_mdp_state
 
     # Create MDP environment
@@ -843,19 +877,27 @@ def test_mc_episode_statistics_with_mdp():
             self.mdp_env = mdp_env
 
         def init(self, key):
-            mdp_state = self.mdp_env.init(key)
-            return mdp_state.last_state, mdp_state
+            return self.mdp_env.init(key)
+
+        def reset(self, key, env_state):
+            obs, env_state = self.mdp_env.reset(key, env_state)
+            return jax.nn.one_hot(obs, env_state.mdp.state_size), env_state
 
         def step(self, key, act, env_state):
-            step_result, next_mdp_state = self.mdp_env.step(key, act, env_state)
+            step_result, next_mdp_state = self.mdp_env.step(key, jnp.argmax(act), env_state)
+            step_result = type(step_result)(
+                nobs=jax.nn.one_hot(step_result.nobs, next_mdp_state.mdp.state_size),
+                rew=step_result.rew,
+                term=step_result.term,
+                trun=step_result.trun,
+            )
             return step_result, next_mdp_state
 
     # Create environment with short episodes
-    config = tabular.garnet.Config(state_size=5, action_size=2)
+    config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=5)
     mdp_env = tabular.garnet.make(config)
     adapted_env = MDPAdapter(mdp_env)
 
-    # Manually set short episode length for testing
     sampler = mc.MarkovChain(max_episode_len=5, queue_size=10, env=adapted_env)
     state = sampler.init(key)
 
@@ -888,16 +930,25 @@ def test_gridworld_deterministic_episode():
             self.mdp_env = mdp_env
 
         def init(self, key):
-            mdp_state = self.mdp_env.init(key)
-            return mdp_state.last_state, mdp_state
+            return self.mdp_env.init(key)
+
+        def reset(self, key, env_state):
+            obs, env_state = self.mdp_env.reset(key, env_state)
+            return jax.nn.one_hot(obs, env_state.mdp.state_size), env_state
 
         def step(self, key, act, env_state):
-            step_result, next_mdp_state = self.mdp_env.step(key, act, env_state)
+            step_result, next_mdp_state = self.mdp_env.step(key, jnp.argmax(act), env_state)
+            step_result = type(step_result)(
+                nobs=jax.nn.one_hot(step_result.nobs, next_mdp_state.mdp.state_size),
+                rew=step_result.rew,
+                term=step_result.term,
+                trun=step_result.trun,
+            )
             return step_result, next_mdp_state
 
     # Create simple GridWorld
     config = tabular.gridworld.Config(
-        board=["###", "#P@", "###"], 
+        board=["###", "#P@", "###"],
         p_slip=0.0  # Deterministic
     )
     mdp_env = tabular.gridworld.make(config)

@@ -14,43 +14,52 @@ from jaxtor.env import tabular
 def test_garnet_init():
     """Test Garnet MDP initialization creates valid state."""
     key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
     config = tabular.garnet.Config(state_size=50, action_size=10)
     env = tabular.garnet.make(config)
-    state = env.init(key)
+    state = env.init(init_key)
+    obs, state = env.reset(reset_key, state)
 
     assert state.mdp.state_size == config.state_size
     assert state.mdp.action_size == config.action_size
     assert state.last_state.shape == (config.state_size,)
     assert state.step == 0
-    assert state.episode_length == 1000
+    assert state.max_episode_len == 1000
+    assert 0 <= obs < config.state_size
 
 
 def test_graph_init():
     """Test Graph MDP initialization creates valid state."""
     key = jax.random.PRNGKey(1)
+    init_key, reset_key = jax.random.split(key)
     config = tabular.graph.Config()
     env = tabular.graph.make(config)
-    state = env.init(key)
+    state = env.init(init_key)
+    obs, state = env.reset(reset_key, state)
 
     assert state.mdp.state_size == 6
     assert state.mdp.action_size == 6
     assert state.last_state.shape == (6,)
     assert state.step == 0
+    assert 0 <= obs < 6
 
 
 def test_gridworld_init():
     """Test GridWorld MDP initialization creates valid state."""
     key = jax.random.PRNGKey(2)
+    init_key, reset_key = jax.random.split(key)
     config = tabular.gridworld.Config(
         board=["#####", "#  @#", "# #X#", "#P  #", "#####"], p_slip=0.1
     )
     env = tabular.gridworld.make(config)
-    state = env.init(key)
+    state = env.init(init_key)
+    obs, state = env.reset(reset_key, state)
 
     assert state.mdp.state_size == 8
     assert state.mdp.action_size == 4
     assert state.last_state.shape == (8,)
     assert state.step == 0
+    assert 0 <= obs < 8
 
 
 # ============================================================================
@@ -61,57 +70,57 @@ def test_gridworld_init():
 def test_garnet_single_step():
     """Test single step in Garnet MDP returns valid transition."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
 
     config = tabular.garnet.Config(state_size=10, action_size=4)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
-    action = jax.nn.one_hot(0, config.action_size)
-    transition, next_state = env.step(step_key, action, state)
+    transition, next_state = env.step(step_key, 0, state)
 
-    # Check transition structure
-    assert transition.nobs.shape == (config.state_size,)
+    # Check transition structure (nobs is a scalar index)
+    assert 0 <= transition.nobs < config.state_size
     assert isinstance(float(transition.rew), float)
     assert transition.term in [0, 1] or (0 <= transition.term <= 1)
     assert transition.trun in [0, 1] or (0 <= transition.trun <= 1)
 
     # Check state update
     assert next_state.step == state.step + 1
-    assert jnp.array_equal(next_state.last_state, transition.nobs)
+    assert jnp.argmax(next_state.last_state) == transition.nobs
 
 
 def test_graph_single_step():
     """Test single step in Graph MDP returns valid transition."""
     key = jax.random.PRNGKey(1)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
 
     config = tabular.graph.Config()
     env = tabular.graph.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
-    action = jax.nn.one_hot(0, 6)
-    transition, next_state = env.step(step_key, action, state)
+    transition, next_state = env.step(step_key, 0, state)
 
-    assert transition.nobs.shape == (6,)
+    assert 0 <= transition.nobs < 6
     assert next_state.step == state.step + 1
 
 
 def test_gridworld_single_step():
     """Test single step in GridWorld MDP returns valid transition."""
     key = jax.random.PRNGKey(2)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
 
     config = tabular.gridworld.Config(
         board=["#####", "#  @#", "# # #", "#P  #", "#####"], p_slip=0.0
     )
     env = tabular.gridworld.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
-    action = jax.nn.one_hot(1, 4)  # Right
-    transition, next_state = env.step(step_key, action, state)
+    transition, next_state = env.step(step_key, 1, state)  # Right
 
-    assert transition.nobs.shape == (8,)
+    assert 0 <= transition.nobs < 8
     assert next_state.step == state.step + 1
 
 
@@ -123,32 +132,33 @@ def test_gridworld_single_step():
 def test_garnet_multiple_steps():
     """Test multiple consecutive steps maintain consistency."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key = jax.random.split(key)
 
     config = tabular.garnet.Config(state_size=10, action_size=4)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     num_steps = 10
     for i in range(num_steps):
         step_key, key = jax.random.split(key)
         action_idx = i % config.action_size
-        action = jax.nn.one_hot(action_idx, config.action_size)
-        transition, state = env.step(step_key, action, state)
+        transition, state = env.step(step_key, action_idx, state)
 
         # Verify state is updated correctly
-        assert jnp.array_equal(state.last_state, transition.nobs)
+        assert jnp.argmax(state.last_state) == transition.nobs
         assert state.step == i + 1
 
 
 def test_episode_accumulates_reward():
     """Test that rewards accumulate correctly over an episode."""
     key = jax.random.PRNGKey(42)
-    init_key, rollout_key = jax.random.split(key)
+    init_key, reset_key, rollout_key = jax.random.split(key, 3)
 
     config = tabular.garnet.Config(state_size=20, action_size=5)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     rewards = []
     max_steps = 20
@@ -156,8 +166,7 @@ def test_episode_accumulates_reward():
     for _ in range(max_steps):
         rollout_key, action_key, step_key = jax.random.split(rollout_key, 3)
         action_idx = jax.random.randint(action_key, (), 0, state.mdp.action_size)
-        action = jax.nn.one_hot(action_idx, state.mdp.action_size)
-        transition, state = env.step(step_key, action, state)
+        transition, state = env.step(step_key, action_idx, state)
         rewards.append(float(transition.rew))
 
         if transition.term or transition.trun:
@@ -174,33 +183,30 @@ def test_episode_accumulates_reward():
 
 
 def test_episode_length_limit():
-    """Test that episodes respect the episode_length limit."""
+    """Test that episodes respect the max_episode_len limit."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key = jax.random.split(key)
 
     # Create environment with very short episode length
-    episode_length = 5
-    config = tabular.garnet.Config(state_size=10, action_size=4)
+    max_episode_len = 5
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=max_episode_len)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
-
-    # Manually set short episode length for testing
-    state = state.replace(episode_length=episode_length)
+    _, state = env.reset(reset_key, state)
 
     steps_taken = 0
     max_steps = 100  # Safety limit
 
     for i in range(max_steps):
         step_key, key = jax.random.split(key)
-        action = jax.nn.one_hot(0, config.action_size)
-        transition, state = env.step(step_key, action, state)
+        transition, state = env.step(step_key, 0, state)
         steps_taken += 1
 
         # Should truncate when reaching episode length
-        if i + 1 >= episode_length:
+        if i + 1 >= max_episode_len:
             # Note: jaxdp's async_sample_step handles truncation internally
-            # The test verifies we can run for at least episode_length steps
-            assert steps_taken >= episode_length
+            # The test verifies we can run for at least max_episode_len steps
+            assert steps_taken >= max_episode_len
             break
 
         if transition.term or transition.trun:
@@ -212,17 +218,17 @@ def test_episode_length_limit():
 def test_truncation_flag():
     """Test that truncation flag is set correctly."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key = jax.random.split(key)
 
     config = tabular.garnet.Config(state_size=10, action_size=4)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     # Run many steps to potentially encounter truncation
     for i in range(1000):
         step_key, key = jax.random.split(key)
-        action = jax.nn.one_hot(0, config.action_size)
-        transition, state = env.step(step_key, action, state)
+        transition, state = env.step(step_key, 0, state)
 
         # When episode ends, either term or trun should be set
         if transition.term or transition.trun:
@@ -234,7 +240,7 @@ def test_truncation_flag():
 def test_terminal_state():
     """Test behavior when reaching terminal state."""
     key = jax.random.PRNGKey(2)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
 
     # GridWorld has explicit terminal states
     config = tabular.gridworld.Config(
@@ -242,33 +248,34 @@ def test_terminal_state():
     )
     env = tabular.gridworld.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     # Move right towards goal
-    action = jax.nn.one_hot(1, 4)  # Right
-    transition, state = env.step(step_key, action, state)
+    transition, state = env.step(step_key, 1, state)  # Right
 
     # Should reach goal and terminate
     if transition.term:
         assert transition.term > 0
-        assert transition.nobs.shape == state.last_state.shape
+        assert 0 <= transition.nobs < state.mdp.state_size
 
 
 def test_state_space_consistency():
     """Test that observations stay within the defined state space."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key = jax.random.split(key)
 
     config = tabular.garnet.Config(state_size=10, action_size=4)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     for i in range(20):
         step_key, key = jax.random.split(key)
-        action = jax.nn.one_hot(i % config.action_size, config.action_size)
-        transition, state = env.step(step_key, action, state)
+        action_idx = i % config.action_size
+        transition, state = env.step(step_key, action_idx, state)
 
-        # Check state space consistency
-        assert transition.nobs.shape == (config.state_size,)
+        # Check state space consistency (nobs is scalar index)
+        assert 0 <= transition.nobs < config.state_size
         assert state.last_state.shape == (config.state_size,)
 
         if transition.term or transition.trun:
@@ -278,23 +285,23 @@ def test_state_space_consistency():
 def test_action_space_validation():
     """Test that different actions produce different results."""
     key = jax.random.PRNGKey(0)
-    init_key = key
+    init_key, reset_key = jax.random.split(key)
 
     config = tabular.garnet.Config(state_size=10, action_size=4, branch_size=3)
     env = tabular.garnet.make(config)
+    state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     # Test each action
     results = []
     for action_idx in range(config.action_size):
         step_key, key = jax.random.split(key)
-        state = env.init(init_key)
-        action = jax.nn.one_hot(action_idx, config.action_size)
-        transition, _ = env.step(step_key, action, state)
-        results.append(transition.nobs)
+        transition, _ = env.step(step_key, action_idx, state)
+        results.append(int(transition.nobs))
 
     # At least some actions should lead to different states
     # (with high probability for random MDP)
-    unique_states = len(set([tuple(r.tolist()) for r in results]))
+    unique_states = len(set(results))
     assert unique_states >= 2  # At least 2 different outcomes
 
 
@@ -311,17 +318,17 @@ def test_stochastic_transitions():
     # Test that the environment respects the random key
     # by checking that step() completes successfully with different keys
     init_key = jax.random.PRNGKey(0)
+    reset_key = jax.random.PRNGKey(1)
     state = env.init(init_key)
-
-    action = jax.nn.one_hot(0, config.action_size)
+    _, state = env.reset(reset_key, state)
 
     # Try multiple different keys - all should work
     for seed in range(5):
         key = jax.random.PRNGKey(seed)
-        transition, _ = env.step(key, action, state)
+        transition, _ = env.step(key, 0, state)
 
-        # Verify valid outputs
-        assert transition.nobs.shape == (config.state_size,)
+        # Verify valid outputs (nobs is scalar index)
+        assert 0 <= transition.nobs < config.state_size
         assert isinstance(float(transition.rew), float)
 
     # This test verifies the environment accepts and uses keys correctly
@@ -334,18 +341,19 @@ def test_deterministic_with_same_key():
     env = tabular.garnet.make(config)
 
     init_key = jax.random.PRNGKey(0)
-    step_key = jax.random.PRNGKey(1)
+    reset_key = jax.random.PRNGKey(1)
+    step_key = jax.random.PRNGKey(2)
 
     state1 = env.init(init_key)
+    _, state1 = env.reset(reset_key, state1)
     state2 = env.init(init_key)
+    _, state2 = env.reset(reset_key, state2)
 
-    action = jax.nn.one_hot(0, config.action_size)
-
-    transition1, next_state1 = env.step(step_key, action, state1)
-    transition2, next_state2 = env.step(step_key, action, state2)
+    transition1, next_state1 = env.step(step_key, 0, state1)
+    transition2, next_state2 = env.step(step_key, 0, state2)
 
     # Same keys should produce identical results
-    assert jnp.allclose(transition1.nobs, transition2.nobs)
+    assert transition1.nobs == transition2.nobs
     assert jnp.isclose(transition1.rew, transition2.rew)
     assert jnp.array_equal(transition1.term, transition2.term)
     assert jnp.array_equal(transition1.trun, transition2.trun)
@@ -365,25 +373,26 @@ def test_deterministic_with_same_key():
 def test_garnet_different_sizes(state_size, action_size):
     """Test Garnet MDP with various state and action space sizes."""
     key = jax.random.PRNGKey(0)
-    init_key, step_key = jax.random.split(key)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
 
     config = tabular.garnet.Config(state_size=state_size, action_size=action_size)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     assert state.last_state.shape == (state_size,)
     assert state.mdp.state_size == state_size
     assert state.mdp.action_size == action_size
 
-    action = jax.nn.one_hot(0, action_size)
-    transition, next_state = env.step(step_key, action, state)
+    transition, next_state = env.step(step_key, 0, state)
 
-    assert transition.nobs.shape == (state_size,)
+    assert 0 <= transition.nobs < state_size
 
 
 def test_gridworld_slip_probability():
     """Test GridWorld with slip probability affects behavior."""
     key = jax.random.PRNGKey(42)
+    init_key, reset_key = jax.random.split(key)
 
     config_no_slip = tabular.gridworld.Config(
         board=["#####", "#P  #", "#####"], p_slip=0.0
@@ -395,8 +404,10 @@ def test_gridworld_slip_probability():
     env_no_slip = tabular.gridworld.make(config_no_slip)
     env_slip = tabular.gridworld.make(config_slip)
 
-    state_no_slip = env_no_slip.init(key)
-    state_slip = env_slip.init(key)
+    state_no_slip = env_no_slip.init(init_key)
+    _, state_no_slip = env_no_slip.reset(reset_key, state_no_slip)
+    state_slip = env_slip.init(init_key)
+    _, state_slip = env_slip.reset(reset_key, state_slip)
 
     # Both should initialize successfully
     assert state_no_slip.mdp.state_size == state_slip.mdp.state_size
@@ -411,11 +422,12 @@ def test_gridworld_slip_probability():
 def test_full_episode_rollout():
     """Test complete episode rollout until termination."""
     key = jax.random.PRNGKey(42)
-    init_key, rollout_key = jax.random.split(key)
+    init_key, reset_key, rollout_key = jax.random.split(key, 3)
 
     config = tabular.garnet.Config(state_size=20, action_size=5, branch_size=4)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
 
     max_steps = 1000
     episode_rewards = []
@@ -424,8 +436,7 @@ def test_full_episode_rollout():
     for step_num in range(max_steps):
         rollout_key, action_key, step_key = jax.random.split(rollout_key, 3)
         action_idx = jax.random.randint(action_key, (), 0, state.mdp.action_size)
-        action = jax.nn.one_hot(action_idx, state.mdp.action_size)
-        transition, state = env.step(step_key, action, state)
+        transition, state = env.step(step_key, action_idx, state)
         episode_rewards.append(float(transition.rew))
 
         if transition.term or transition.trun:
@@ -449,8 +460,9 @@ def test_multiple_episodes():
     episode_lengths = []
 
     for episode in range(num_episodes):
-        key, init_key = jax.random.split(key)
+        key, init_key, reset_key = jax.random.split(key, 3)
         state = env.init(init_key)
+        _, state = env.reset(reset_key, state)
 
         steps = 0
         max_steps = 100
@@ -458,8 +470,7 @@ def test_multiple_episodes():
         for _ in range(max_steps):
             key, action_key, step_key = jax.random.split(key, 3)
             action_idx = jax.random.randint(action_key, (), 0, config.action_size)
-            action = jax.nn.one_hot(action_idx, config.action_size)
-            transition, state = env.step(step_key, action, state)
+            transition, state = env.step(step_key, action_idx, state)
             steps += 1
 
             if transition.term or transition.trun:
