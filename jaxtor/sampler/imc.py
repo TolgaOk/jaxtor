@@ -1,23 +1,19 @@
 """Induced Markov chain sampling utilities.
 
-Implements multi-step trajectory collection by following a policy (agent) in an
+Implements single-step trajectory collection by following a policy (agent) in an
 environment, sampling from the Markov chain induced by the agent-environment
 interaction.
 
 Example:
     >>> import jax
-    >>> from jaxtor.sampler import imc, mc
+    >>> from jaxtor.sampler import imc, mc, rollout
     >>>
     >>> # Assuming env follows mc.Env protocol and agent follows imc.Agent protocol
     >>> mc_sampler = mc.MarkovChain(max_episode_len=1000, queue_size=100, env=env)
-    >>> rollout_sampler = imc.InducedMarkovChain(agent=agent, mc=mc_sampler, seqlen=8)
+    >>> imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
     >>>
-    >>> # Initialize state
-    >>> key = jax.random.PRNGKey(0)
-    >>> state = rollout_sampler.init(mc=mc_state, agent=agent_state)
-    >>>
-    >>> # Collect a trajectory
-    >>> rollout, state = rollout_sampler.sample(state)
+    >>> # Get metrics
+    >>> metrics, state = imc_step.metrics(state)
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ from __future__ import annotations
 from typing import Protocol
 
 import chex
-import jax
+import jax.numpy as jnp
 from chex import dataclass
 
 
@@ -67,23 +63,21 @@ class Agent(Protocol):
 
 @dataclass
 class InducedMarkovChain:
-    """Induced Markov chain sampler for multi-step trajectory collection.
+    """Single-step agent-MC interaction.
 
-    Collects sequences of transitions by repeatedly applying a policy (agent) in
-    an environment, sampling from the Markov chain induced by the agent-environment
-    interaction.
+    Receives agent and mc as dependencies (doesn't own them).
+    Wires: obs -> agent.act -> action -> mc.sample -> transition
+
+    Implements the IMC protocol from rollout module, allowing it to be
+    used with Rollout for N-step trajectory collection.
 
     Attributes:
         agent: Agent instance following the Agent protocol for action selection.
         mc: Markov chain sampler following the MC protocol.
-        seqlen: Number of steps to collect per trajectory.
-        _unroll: Number of loop iterations to unroll in scan (default: 1).
     """
 
     agent: Agent
     mc: MC
-    seqlen: int
-    _unroll: int = 1
 
     @dataclass
     class State:
@@ -109,30 +103,6 @@ class InducedMarkovChain:
         avg_eps_rew: chex.Numeric
         avg_eps_len: chex.Numeric
 
-    def sample(
-        self,
-        state: InducedMarkovChain.State,
-    ) -> tuple[MC.Transition, InducedMarkovChain.State]:
-        """Collect a trajectory by rolling out the agent in the environment.
-
-        Args:
-            state: Current state of the induced Markov chain sampler.
-
-        Returns:
-            Stacked transitions with shape (seqlen, ...) and updated sampler state.
-        """
-
-        def step(carry, _):
-            ag_state, mc_state = carry
-            act, ag_state = self.agent.act(mc_state.last_obs, ag_state)
-            transition, mc_state = self.mc.sample(act, mc_state)
-            return (ag_state, mc_state), transition
-
-        (agent_state, mc_state), transitions = jax.lax.scan(
-            step, (state.agent, state.mc), length=self.seqlen, unroll=self._unroll
-        )
-        return transitions, state.replace(mc=mc_state, agent=agent_state)
-
     def init(self, mc: MC.State, agent: Agent.State) -> InducedMarkovChain.State:
         """Initialize the induced Markov chain sampler state.
 
@@ -145,6 +115,22 @@ class InducedMarkovChain:
         """
         return InducedMarkovChain.State(mc=mc, agent=agent)
 
+    def sample(
+        self,
+        state: InducedMarkovChain.State,
+    ) -> tuple[MC.Transition, InducedMarkovChain.State]:
+        """Execute one step of agent-MC interaction.
+
+        Args:
+            state: Current state of the induced Markov chain sampler.
+
+        Returns:
+            Single transition and updated sampler state.
+        """
+        act, agent_state = self.agent.act(state.mc.last_obs, state.agent)
+        transition, mc_state = self.mc.sample(act, state.mc)
+        return transition, state.replace(mc=mc_state, agent=agent_state)
+
     def metrics(
         self, state: InducedMarkovChain.State
     ) -> tuple[InducedMarkovChain.Metrics, InducedMarkovChain.State]:
@@ -156,8 +142,8 @@ class InducedMarkovChain:
         Returns:
             Computed metrics and updated state with refreshed queues.
         """
-        avg_eps_rew = jax.numpy.nanmean(state.mc.eps_rew_queue)
-        avg_eps_len = jax.numpy.nanmean(state.mc.eps_len_queue)
+        avg_eps_rew = jnp.nanmean(state.mc.eps_rew_queue)
+        avg_eps_len = jnp.nanmean(state.mc.eps_len_queue)
         return (
             InducedMarkovChain.Metrics(
                 avg_eps_rew=avg_eps_rew, avg_eps_len=avg_eps_len
