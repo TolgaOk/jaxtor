@@ -1,4 +1,21 @@
-"""Markovian step sampling utilities."""
+"""Markov chain sampling utilities.
+
+Provides environment wrappers for transition collection with episode statistics.
+
+Classes:
+    MarkovChain: Single-environment sampler with episode tracking.
+    VecMC: Vectorized sampler for multiple parallel environments.
+
+Example:
+    >>> mc_sampler = MarkovChain(max_episode_len=100, queue_size=10, env=env)
+    >>> env_state = env.init(key)
+    >>> state = mc_sampler.init(key, env_state)
+    >>> transition, state = mc_sampler.sample(action, state)
+
+    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
+    >>> state = vec_mc.init(key, env_state)
+    >>> transition, state = vec_mc.sample(batched_actions, state)
+"""
 
 from __future__ import annotations
 
@@ -156,7 +173,7 @@ class MarkovChain(Generic[EnvState]):
         )
         return transition, state
 
-    def refresh_queues(self, state: State) -> State:
+    def _refresh_queues(self, state: State) -> State:
         """Reset the episode statistics queues.
 
         Args:
@@ -183,7 +200,7 @@ class MarkovChain(Generic[EnvState]):
         avg_eps_len = jnp.nanmean(state.eps_len_queue)
         return (
             self.Metrics(avg_eps_rew=avg_eps_rew, avg_eps_len=avg_eps_len),
-            self.refresh_queues(state),
+            self._refresh_queues(state),
         )
 
     def init(self, key: chex.PRNGKey, env: EnvState) -> State:
@@ -209,3 +226,67 @@ class MarkovChain(Generic[EnvState]):
             eps_rew_queue=jnp.full(self.queue_size, jnp.nan),
             eps_len_queue=jnp.full(self.queue_size, jnp.nan),
         )
+
+
+@dataclass
+class VecMC(Generic[EnvState]):
+    """Vectorized Markov chain sampler for multiple parallel environments.
+
+    Wraps a MarkovChain and vmaps its operations over n_env environments.
+    Follows the MC protocol, composable with IMC.
+
+    Agent receives single key, batched obs (n_env, ...), and batched state.
+    Agent is responsible for key splitting if stochastic.
+
+    Attributes:
+        mc: Single-environment MarkovChain sampler.
+        n_env: Number of parallel environments.
+    """
+
+    mc: MarkovChain[EnvState]
+    n_env: int
+
+    def init(self, key: chex.PRNGKey, env: EnvState) -> MarkovChain.State:
+        """Initialize batched MC states for all environments.
+
+        Args:
+            key: Random key for initialization.
+            env: Pre-initialized environment state (shared across envs).
+
+        Returns:
+            Batched MC state with leading dimension n_env.
+        """
+        keys = jrd.split(key, self.n_env)
+        return jax.vmap(self.mc.init, in_axes=(0, None))(keys, env)
+
+    def sample(
+        self, act: chex.Array, state: MarkovChain.State
+    ) -> tuple[MarkovChain.Transition, MarkovChain.State]:
+        """Sample transitions from all environments in parallel.
+
+        Args:
+            act: Batched actions, shape (n_env, ...).
+            state: Batched MC state.
+
+        Returns:
+            Batched transitions and updated batched state.
+        """
+        return jax.vmap(self.mc.sample)(act, state)
+
+    def metrics(
+        self, state: MarkovChain.State
+    ) -> tuple[MarkovChain.Metrics, MarkovChain.State]:
+        """Compute aggregated metrics from all environments and refresh queues.
+
+        Args:
+            state: Batched MC state.
+
+        Returns:
+            Aggregated scalar metrics and state with refreshed queues.
+        """
+        per_env_metrics, refreshed_state = jax.vmap(self.mc.metrics)(state)
+        aggregated = MarkovChain.Metrics(
+            avg_eps_rew=jnp.nanmean(per_env_metrics.avg_eps_rew),
+            avg_eps_len=jnp.nanmean(per_env_metrics.avg_eps_len),
+        )
+        return aggregated, refreshed_state
