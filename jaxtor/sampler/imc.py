@@ -1,54 +1,47 @@
 """Induced Markov chain sampling utilities.
 
-Implements single-step trajectory collection by following a policy (agent) in an
-environment, sampling from the Markov chain induced by the agent-environment
-interaction.
+Wires agent action selection to environment stepping, creating the Markov chain
+induced by the agent-environment interaction.
+
+Classes:
+    InducedMarkovChain: Single-step agent-MC wiring.
 
 Example:
-    >>> import jax
-    >>> from jaxtor.sampler import imc, mc, rollout
-    >>>
-    >>> # Assuming env follows mc.Env protocol and agent follows imc.Agent protocol
-    >>> mc_sampler = mc.MarkovChain(max_episode_len=1000, queue_size=100, env=env)
-    >>> imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
-    >>>
-    >>> # Get metrics
-    >>> metrics, state = imc_step.metrics(state)
+    >>> mc_sampler = MarkovChain(max_episode_len=100, queue_size=10, env=env)
+    >>> imc = InducedMarkovChain(agent=agent, mc=mc_sampler)
+    >>> env_state = env.init(key)
+    >>> mc_state = mc_sampler.init(key, env_state)
+    >>> state = imc.init(key, mc_state, agent_state)
+    >>> transition, state = imc.sample(state)
+
+    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
+    >>> imc = InducedMarkovChain(agent=batched_agent, mc=vec_mc)
+    >>> mc_state = vec_mc.init(key, env_state)
+    >>> state = imc.init(key, mc_state, agent_state)
+    >>> transition, state = imc.sample(state)
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, TypeVar
 
+import jax.random as jrd
 import chex
-import jax.numpy as jnp
 from chex import dataclass
 
+EnvState = TypeVar("EnvState")
+Transition = TypeVar("Transition")
 
-class MC(Protocol):
+
+class MC(Protocol[EnvState, Transition]):
     class State(Protocol):
         last_obs: chex.Array
-        last_done: chex.Numeric
-        eps_rew_queue: chex.Array
-        eps_len_queue: chex.Array
 
-    class Transition(Protocol):
-        obs: chex.Array
-        act: chex.Array
-        rew: chex.Array
-        term: chex.Array
-        trun: chex.Array
-        nobs: chex.Array
-
-    def init(self, key: chex.PRNGKey) -> MC.State: ...
+    def init(self, key: chex.PRNGKey, env: EnvState) -> MC.State: ...
 
     def sample(
-        self,
-        act: chex.Array,
-        state: MC.State,
+        self, act: chex.Array, state: MC.State
     ) -> tuple[Transition, MC.State]: ...
-
-    def refresh_queues(self, state: MC.State) -> MC.State: ...
 
 
 class Agent(Protocol):
@@ -56,6 +49,7 @@ class Agent(Protocol):
 
     def act(
         self,
+        key: chex.PRNGKey,
         obs: chex.Array,
         state: Agent.State,
     ) -> tuple[chex.Array, Agent.State]: ...
@@ -88,22 +82,13 @@ class InducedMarkovChain:
             agent: Agent state for action selection.
         """
 
+        key: chex.PRNGKey
         mc: MC.State
         agent: Agent.State
 
-    @dataclass
-    class Metrics:
-        """Episode statistics metrics.
-
-        Attributes:
-            avg_eps_rew: Average episode return from the statistics queue.
-            avg_eps_len: Average episode length from the statistics queue.
-        """
-
-        avg_eps_rew: chex.Numeric
-        avg_eps_len: chex.Numeric
-
-    def init(self, mc: MC.State, agent: Agent.State) -> InducedMarkovChain.State:
+    def init(
+        self, key: chex.PRNGKey, mc: MC.State, agent: Agent.State
+    ) -> InducedMarkovChain.State:
         """Initialize the induced Markov chain sampler state.
 
         Args:
@@ -113,12 +98,12 @@ class InducedMarkovChain:
         Returns:
             Initialized sampler state.
         """
-        return InducedMarkovChain.State(mc=mc, agent=agent)
+        return InducedMarkovChain.State(key=key, mc=mc, agent=agent)
 
     def sample(
         self,
         state: InducedMarkovChain.State,
-    ) -> tuple[MC.Transition, InducedMarkovChain.State]:
+    ) -> tuple[Transition, InducedMarkovChain.State]:
         """Execute one step of agent-MC interaction.
 
         Args:
@@ -127,26 +112,7 @@ class InducedMarkovChain:
         Returns:
             Single transition and updated sampler state.
         """
-        act, agent_state = self.agent.act(state.mc.last_obs, state.agent)
+        key, act_key = jrd.split(state.key, 2)
+        act, agent_state = self.agent.act(act_key, state.mc.last_obs, state.agent)
         transition, mc_state = self.mc.sample(act, state.mc)
-        return transition, state.replace(mc=mc_state, agent=agent_state)
-
-    def metrics(
-        self, state: InducedMarkovChain.State
-    ) -> tuple[InducedMarkovChain.Metrics, InducedMarkovChain.State]:
-        """Compute metrics from the episode statistics queues and refresh them.
-
-        Args:
-            state: Current state containing episode statistics queues.
-
-        Returns:
-            Computed metrics and updated state with refreshed queues.
-        """
-        avg_eps_rew = jnp.nanmean(state.mc.eps_rew_queue)
-        avg_eps_len = jnp.nanmean(state.mc.eps_len_queue)
-        return (
-            InducedMarkovChain.Metrics(
-                avg_eps_rew=avg_eps_rew, avg_eps_len=avg_eps_len
-            ),
-            state.replace(mc=self.mc.refresh_queues(state.mc)),
-        )
+        return transition, state.replace(key=key, mc=mc_state, agent=agent_state)  # type: ignore[unresolved-attribute]
