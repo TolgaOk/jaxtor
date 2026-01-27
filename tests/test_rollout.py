@@ -53,9 +53,9 @@ def test_rollout_output_shapes():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=seqlen)
 
     env_state = env.init(key)
@@ -84,9 +84,9 @@ def test_rollout_trajectory_consistency():
     )
     env = tabular.gridworld.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=5)
 
     env_state = env.init(key)
@@ -113,9 +113,9 @@ def test_rollout_state_continuity():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=20, queue_size=10, env=env)
+    mc_sampler = mc.Mc(max_episode_len=20, queue_size=10, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=5)
 
     env_state = env.init(key)
@@ -142,9 +142,9 @@ def test_rollout_agent_state_updates():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = CountingAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=10)
 
     env_state = env.init(key)
@@ -172,9 +172,9 @@ def test_rollout_jit_compilation():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=10)
 
     env_state = env.init(key)
@@ -201,9 +201,9 @@ def test_rollout_seqlen_one():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=1)
 
     env_state = env.init(key)
@@ -228,9 +228,9 @@ def test_rollout_unroll_parameter():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     for unroll in [1, 2, 5]:
         sampler = rollout.Rollout(imc=imc_step, seqlen=10, _unroll=unroll)
@@ -246,12 +246,12 @@ def test_rollout_unroll_parameter():
 
 
 # =============================================================================
-# Rollout + VecMC Tests
+# Rollout + VecMc Tests
 # =============================================================================
 
 
 def test_rollout_with_vecmc():
-    """Test Rollout with VecMC for batched trajectory collection."""
+    """Test Rollout with VecMc for batched trajectory collection."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
     seqlen = 10
@@ -263,8 +263,8 @@ def test_rollout_with_vecmc():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -276,7 +276,7 @@ def test_rollout_with_vecmc():
             return jnp.ones(batch_size, dtype=jnp.int32), state
 
     agent = BatchedGoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=vec_mc)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
     sampler = rollout.Rollout(imc=imc_step, seqlen=seqlen)
 
     env_state = env.init(key)
@@ -293,7 +293,7 @@ def test_rollout_with_vecmc():
 
 
 def test_rollout_with_vecmc_jit():
-    """Test JIT compilation of Rollout + VecMC."""
+    """Test JIT compilation of Rollout + VecMc."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
     seqlen = 10
@@ -305,8 +305,8 @@ def test_rollout_with_vecmc_jit():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -318,7 +318,7 @@ def test_rollout_with_vecmc_jit():
             return jnp.ones(batch_size, dtype=jnp.int32), state
 
     agent = BatchedGoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=vec_mc)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
     sampler = rollout.Rollout(imc=imc_step, seqlen=seqlen)
 
     env_state = env.init(key)
@@ -334,7 +334,7 @@ def test_rollout_with_vecmc_jit():
 
 
 def test_rollout_with_vecmc_multiple_samples():
-    """Test multiple sample calls with Rollout + VecMC."""
+    """Test multiple sample calls with Rollout + VecMc."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
     seqlen = 5
@@ -346,8 +346,8 @@ def test_rollout_with_vecmc_multiple_samples():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     class BatchedCountingAgent:
         @dataclass
@@ -363,7 +363,7 @@ def test_rollout_with_vecmc_multiple_samples():
             return jnp.zeros(batch_size, dtype=jnp.int32), new_state
 
     agent = BatchedCountingAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=vec_mc)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
     sampler = rollout.Rollout(imc=imc_step, seqlen=seqlen)
 
     env_state = env.init(key)
@@ -413,9 +413,9 @@ def test_long_rollout_stability():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=100, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=100, env=env)
     agent = RandomAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=seqlen)
 
     key, agent_key = jax.random.split(key)
@@ -441,9 +441,9 @@ def test_deterministic_reproducibility():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = RandomAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
     sampler = rollout.Rollout(imc=imc_step, seqlen=20)
 
     # First run

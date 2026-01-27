@@ -1,4 +1,4 @@
-"""Tests for InducedMarkovChain sampler."""
+"""Tests for InducedMc sampler."""
 
 import chex
 import jax
@@ -52,9 +52,9 @@ def test_single_step_sample():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
@@ -82,9 +82,9 @@ def test_single_step_state_update():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = CountingAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
@@ -111,9 +111,9 @@ def test_single_step_consecutive_observations():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
@@ -139,9 +139,9 @@ def test_init_returns_correct_structure():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = CountingAgent(action_size=4)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
@@ -165,9 +165,9 @@ def test_jit_compilation_single_step():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = GoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
@@ -183,12 +183,12 @@ def test_jit_compilation_single_step():
 
 
 # =============================================================================
-# IMC + VecMC Integration Tests
+# IMC + VecMc Integration Tests
 # =============================================================================
 
 
 def test_imc_with_vecmc():
-    """Test IMC composed with VecMC for batched sampling."""
+    """Test IMC composed with VecMc for batched sampling."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -199,8 +199,8 @@ def test_imc_with_vecmc():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -212,7 +212,7 @@ def test_imc_with_vecmc():
             return jnp.ones(batch_size, dtype=jnp.int32), state
 
     agent = BatchedGoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=vec_mc)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
 
     env_state = env.init(key)
     mc_states = vec_mc.init(key, env_state)
@@ -227,7 +227,7 @@ def test_imc_with_vecmc():
 
 
 def test_imc_with_vecmc_metrics():
-    """Test metrics through IMC + VecMC."""
+    """Test metrics through IMC + VecMc."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -238,8 +238,8 @@ def test_imc_with_vecmc_metrics():
     )
     env = tabular.gridworld.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -251,7 +251,7 @@ def test_imc_with_vecmc_metrics():
             return jnp.ones(batch_size, dtype=jnp.int32), state
 
     agent = BatchedGoRightAgent()
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=vec_mc)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
 
     env_state = env.init(key)
     mc_states = vec_mc.init(key, env_state)
@@ -303,9 +303,9 @@ def test_action_coverage_with_random_policy():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=1000, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=1000, queue_size=5, env=env)
     agent = RandomAgent(action_size=action_size)
-    imc_step = imc.InducedMarkovChain(agent=agent, mc=mc_sampler)
+    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     key, agent_key = jax.random.split(key)
     env_state = env.init(key)

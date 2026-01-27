@@ -1,21 +1,21 @@
-"""Induced Markov chain sampling utilities.
+"""Induced Markov Chain (Imc) sampling utilities.
 
 Wires agent action selection to environment stepping, creating the Markov chain
 induced by the agent-environment interaction.
 
 Classes:
-    InducedMarkovChain: Single-step agent-MC wiring.
+    Imc: Induced Markov Chain - single-step agent-MC wiring.
 
 Example:
-    >>> mc_sampler = MarkovChain(max_episode_len=100, queue_size=10, env=env)
-    >>> imc = InducedMarkovChain(agent=agent, mc=mc_sampler)
+    >>> mc_sampler = Mc(max_episode_len=100, queue_size=10, env=env)
+    >>> imc = Imc(agent=agent, mc=mc_sampler)
     >>> env_state = env.init(key)
     >>> mc_state = mc_sampler.init(key, env_state)
     >>> state = imc.init(key, mc_state, agent_state)
     >>> transition, state = imc.sample(state)
 
-    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
-    >>> imc = InducedMarkovChain(agent=batched_agent, mc=vec_mc)
+    >>> vec_mc = VecMc(mc=mc_sampler, n_env=4)
+    >>> imc = Imc(agent=batched_agent, mc=vec_mc)
     >>> mc_state = vec_mc.init(key, env_state)
     >>> state = imc.init(key, mc_state, agent_state)
     >>> transition, state = imc.sample(state)
@@ -56,8 +56,8 @@ class Agent(Protocol):
 
 
 @dataclass
-class InducedMarkovChain:
-    """Single-step agent-MC interaction.
+class Imc:
+    """Induced Markov Chain - single-step agent-MC interaction.
 
     Receives agent and mc as dependencies (doesn't own them).
     Wires: obs -> agent.act -> action -> mc.sample -> transition
@@ -88,7 +88,7 @@ class InducedMarkovChain:
 
     def init(
         self, key: chex.PRNGKey, mc: MC.State, agent: Agent.State
-    ) -> InducedMarkovChain.State:
+    ) -> Imc.State:
         """Initialize the induced Markov chain sampler state.
 
         Args:
@@ -98,12 +98,12 @@ class InducedMarkovChain:
         Returns:
             Initialized sampler state.
         """
-        return InducedMarkovChain.State(key=key, mc=mc, agent=agent)
+        return Imc.State(key=key, mc=mc, agent=agent)
 
     def sample(
         self,
-        state: InducedMarkovChain.State,
-    ) -> tuple[Transition, InducedMarkovChain.State]:
+        state: Imc.State,
+    ) -> tuple[Transition, Imc.State]:
         """Execute one step of agent-MC interaction.
 
         Args:

@@ -7,13 +7,13 @@ Classes:
     Rollout: N-step trajectory collector.
 
 Example:
-    >>> imc = InducedMarkovChain(agent=agent, mc=mc_sampler)
+    >>> imc = Imc(agent=agent, mc=mc_sampler)
     >>> rollout = Rollout(imc=imc, seqlen=20)
     >>> state = imc.init(key, mc_state, agent_state)
     >>> transitions, state = rollout.sample(state)
 
-    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
-    >>> imc = InducedMarkovChain(agent=batched_agent, mc=vec_mc)
+    >>> vec_mc = VecMc(mc=mc_sampler, n_env=4)
+    >>> imc = Imc(agent=batched_agent, mc=vec_mc)
     >>> rollout = Rollout(imc=imc, seqlen=20)
     >>> mc_state = vec_mc.init(key, env_state)
     >>> state = imc.init(key, mc_state, agent_state)

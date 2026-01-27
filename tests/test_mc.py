@@ -1,4 +1,4 @@
-"""Tests for MarkovChain and VecMC samplers."""
+"""Tests for Mc and VecMc samplers."""
 
 import jax
 import jax.numpy as jnp
@@ -9,12 +9,12 @@ from jaxtor.env import tabular
 
 
 # =============================================================================
-# MarkovChain Tests
+# Mc Tests
 # =============================================================================
 
 
 def test_mc_init():
-    """Test MarkovChain initialization."""
+    """Test Mc initialization."""
     key = jax.random.PRNGKey(0)
 
     config = tabular.garnet.Config(
@@ -24,7 +24,7 @@ def test_mc_init():
     )
     env = tabular.garnet.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -45,7 +45,7 @@ def test_mc_single_sample():
     )
     env = tabular.garnet.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -69,7 +69,7 @@ def test_mc_episode_statistics():
     )
     env = tabular.gridworld.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -93,7 +93,7 @@ def test_mc_metrics():
     )
     env = tabular.gridworld.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -120,7 +120,7 @@ def test_mc_jit_compilation():
     )
     env = tabular.garnet.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -143,7 +143,7 @@ def test_mc_consecutive_observations():
     )
     env = tabular.garnet.make(config)
 
-    sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
+    sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -157,12 +157,12 @@ def test_mc_consecutive_observations():
 
 
 # =============================================================================
-# VecMC Tests
+# VecMc Tests
 # =============================================================================
 
 
 def test_vecmc_init():
-    """Test VecMC initialization produces batched states."""
+    """Test VecMc initialization produces batched states."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -173,8 +173,8 @@ def test_vecmc_init():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     env_state = env.init(key)
     state = vec_mc.init(key, env_state)
@@ -185,7 +185,7 @@ def test_vecmc_init():
 
 
 def test_vecmc_sample():
-    """Test VecMC sampling produces batched transitions."""
+    """Test VecMc sampling produces batched transitions."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -196,8 +196,8 @@ def test_vecmc_sample():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     env_state = env.init(key)
     state = vec_mc.init(key, env_state)
@@ -212,7 +212,7 @@ def test_vecmc_sample():
 
 
 def test_vecmc_metrics_aggregation():
-    """Test VecMC.metrics returns aggregated scalar metrics."""
+    """Test VecMc.metrics returns aggregated scalar metrics."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -223,8 +223,8 @@ def test_vecmc_metrics_aggregation():
     )
     env = tabular.gridworld.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=10, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     env_state = env.init(key)
     state = vec_mc.init(key, env_state)
@@ -243,7 +243,7 @@ def test_vecmc_metrics_aggregation():
 
 
 def test_vecmc_jit_compilation():
-    """Verify VecMC can be JIT compiled."""
+    """Verify VecMc can be JIT compiled."""
     key = jax.random.PRNGKey(0)
     num_envs = 4
 
@@ -254,8 +254,8 @@ def test_vecmc_jit_compilation():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     env_state = env.init(key)
     state = vec_mc.init(key, env_state)
@@ -272,7 +272,7 @@ def test_vecmc_jit_compilation():
 
 
 def test_vecmc_different_initial_states():
-    """Test VecMC environments start with different states."""
+    """Test VecMc environments start with different states."""
     key = jax.random.PRNGKey(0)
     num_envs = 8
 
@@ -283,8 +283,8 @@ def test_vecmc_different_initial_states():
     )
     env = tabular.garnet.make(config)
 
-    mc_sampler = mc.MarkovChain(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
 
     env_state = env.init(key)
     state = vec_mc.init(key, env_state)
