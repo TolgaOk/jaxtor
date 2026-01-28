@@ -6,7 +6,7 @@ sampler.
 Example:
     >>> imc = Imc(agent=agent, mc=mc_sampler)
     >>> roll = Roll(imc=imc, seqlen=20)
-    >>> state = Imc.State(key=key, mc=mc_state, agent=agent_state)
+    >>> state = Imc.State(mc=mc_state, agent=agent_state)
     >>> transitions, state = roll.sample(state)
 """
 

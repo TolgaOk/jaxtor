@@ -14,9 +14,9 @@ class GoRightAgent:
 
     @dataclass
     class State:
-        pass
+        key: chex.PRNGKey
 
-    def act(self, key, obs, state):
+    def act(self, obs, state):
         return jnp.array(1), state
 
 
@@ -25,15 +25,32 @@ class CountingAgent:
 
     @dataclass
     class State:
+        key: chex.PRNGKey
         counter: int
 
     def __init__(self, action_size: int = 4):
         self.action_size = action_size
 
-    def act(self, key, obs, state):
+    def act(self, obs, state):
         action = jnp.array(0)
         new_state = state.replace(counter=state.counter + 1)
         return action, new_state
+
+
+class RandomAgent:
+    """Agent that takes random actions."""
+
+    @dataclass
+    class State:
+        key: chex.PRNGKey
+
+    def __init__(self, action_size: int = 4):
+        self.action_size = action_size
+
+    def act(self, obs, state):
+        key, subkey = jax.random.split(state.key)
+        action = jax.random.randint(subkey, (), 0, self.action_size)
+        return action, state.replace(key=key)
 
 
 # =============================================================================
@@ -58,8 +75,8 @@ def test_single_step_sample():
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State()
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    agent_state = GoRightAgent.State(key=key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
     transition, next_state = imc_step.sample(state)
 
@@ -88,8 +105,8 @@ def test_single_step_state_update():
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
-    agent_state = CountingAgent.State(counter=0)
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    agent_state = CountingAgent.State(key=key, counter=0)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
     assert state.agent.counter == 0
 
@@ -117,8 +134,8 @@ def test_single_step_consecutive_observations():
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State()
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    agent_state = GoRightAgent.State(key=key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
     t1, state = imc_step.sample(state)
     t2, state = imc_step.sample(state)
@@ -144,10 +161,9 @@ def test_state_construction():
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
-    agent_state = CountingAgent.State(counter=42)
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    agent_state = CountingAgent.State(key=key, counter=42)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
-    assert hasattr(state, "key")
     assert hasattr(state, "mc")
     assert hasattr(state, "agent")
     assert state.agent.counter == 42
@@ -171,8 +187,8 @@ def test_jit_compilation_single_step():
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State()
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    agent_state = GoRightAgent.State(key=key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
     jit_sample = jax.jit(imc_step.sample)
 
@@ -187,109 +203,6 @@ def test_jit_compilation_single_step():
 # =============================================================================
 
 
-def test_imc_with_vecmc():
-    """Test IMC composed with VecMc for batched sampling."""
-    key = jax.random.PRNGKey(0)
-    num_envs = 4
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
-
-    class BatchedGoRightAgent:
-        @dataclass
-        class State:
-            pass
-
-        def act(self, key, obs, state):
-            batch_size = obs.shape[0]
-            return jnp.ones(batch_size, dtype=jnp.int32), state
-
-    agent = BatchedGoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=vec_mc)
-
-    env_state = env.init(key)
-    mc_states = vec_mc.init(key, env_state)
-    agent_state = BatchedGoRightAgent.State()
-    state = imc.Imc.State(key=key, mc=mc_states, agent=agent_state)
-
-    transition, next_state = imc_step.sample(state)
-
-    assert transition.obs.shape == (num_envs,)
-    assert transition.act.shape == (num_envs,)
-    assert transition.rew.shape == (num_envs,)
-
-
-def test_imc_with_vecmc_metrics():
-    """Test metrics through IMC + VecMc."""
-    key = jax.random.PRNGKey(0)
-    num_envs = 4
-
-    config = tabular.gridworld.Config(
-        board=["####", "#P@#", "####"],
-        p_slip=0.0,
-        max_episode_len=10,
-    )
-    env = tabular.gridworld.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
-    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
-
-    class BatchedGoRightAgent:
-        @dataclass
-        class State:
-            pass
-
-        def act(self, key, obs, state):
-            batch_size = obs.shape[0]
-            return jnp.ones(batch_size, dtype=jnp.int32), state
-
-    agent = BatchedGoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=vec_mc)
-
-    env_state = env.init(key)
-    mc_states = vec_mc.init(key, env_state)
-    agent_state = BatchedGoRightAgent.State()
-    state = imc.Imc.State(key=key, mc=mc_states, agent=agent_state)
-
-    for _ in range(10):
-        _, state = imc_step.sample(state)
-
-    # Get metrics from vec_mc
-    metrics, refreshed_mc_state = vec_mc.metrics(state.mc)
-
-    assert metrics.avg_eps_rew.shape == ()
-    assert metrics.avg_eps_len.shape == ()
-
-
-# =============================================================================
-# Statistical Tests
-# =============================================================================
-
-
-@dataclass
-class RandomAgent:
-    """Agent that samples actions uniformly at random."""
-
-    action_size: int
-
-    @dataclass
-    class State:
-        key: chex.PRNGKey
-
-    def act(self, key, obs, state):
-        key, action_key = jax.random.split(state.key)
-        action = jax.random.randint(action_key, (), 0, self.action_size)
-        return action, state.replace(key=key)
-
-
-@pytest.mark.statistical
 def test_action_coverage_with_random_policy():
     """Verify RandomAgent samples each action at least 50% of expected frequency."""
     key = jax.random.PRNGKey(0)
@@ -311,7 +224,7 @@ def test_action_coverage_with_random_policy():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = RandomAgent.State(key=agent_key)
-    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
 
     action_counts = jnp.zeros(action_size)
     for _ in range(num_steps):

@@ -7,7 +7,7 @@ Example:
     >>> mc = Mc(max_episode_len=100, queue_size=10, env=env)
     >>> imc = Imc(agent=agent, mc=mc)
     >>> mc_state = mc.init(key, env.init(key))
-    >>> state = Imc.State(key=key, mc=mc_state, agent=agent_state)
+    >>> state = Imc.State(mc=mc_state, agent=agent_state)
     >>> transition, state = imc.sample(state)
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Protocol, TypeVar
 
-import jax.random as jrd
 import chex
 from chex import dataclass
 
@@ -37,7 +36,6 @@ class Agent(Protocol):
 
     def act(
         self,
-        key: chex.PRNGKey,
         obs: chex.Array,
         state: Agent.State,
     ) -> tuple[chex.Array, Agent.State]: ...
@@ -62,12 +60,10 @@ class Imc:
         """State of the induced Markov chain.
 
         Attributes:
-            key: Random key for sampling.
             mc: Underlying Markov chain state.
             agent: Agent state.
         """
 
-        key: chex.PRNGKey
         mc: MC.State
         agent: Agent.State
 
@@ -83,7 +79,6 @@ class Imc:
         Returns:
             Transition and updated state.
         """
-        key, act_key = jrd.split(state.key, 2)
-        act, agent_state = self.agent.act(act_key, state.mc.last_obs, state.agent)
+        act, agent_state = self.agent.act(state.mc.last_obs, state.agent)
         transition, mc_state = self.mc.sample(act, state.mc)
-        return transition, state.replace(key=key, mc=mc_state, agent=agent_state)  # type: ignore[unresolved-attribute]
+        return transition, state.replace(mc=mc_state, agent=agent_state)  # type: ignore[unresolved-attribute]
