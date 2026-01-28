@@ -1,23 +1,13 @@
-"""N-step trajectory collection utilities.
+"""N-step trajectory collection.
 
-Collects fixed-length trajectories using jax.lax.scan over any IMC-compatible
+Collects fixed-length trajectories using jax.lax.scan over any Imc-compatible
 sampler.
-
-Classes:
-    Rollout: N-step trajectory collector.
 
 Example:
     >>> imc = Imc(agent=agent, mc=mc_sampler)
-    >>> rollout = Rollout(imc=imc, seqlen=20)
-    >>> state = imc.init(key, mc_state, agent_state)
-    >>> transitions, state = rollout.sample(state)
-
-    >>> vec_mc = VecMc(mc=mc_sampler, n_env=4)
-    >>> imc = Imc(agent=batched_agent, mc=vec_mc)
-    >>> rollout = Rollout(imc=imc, seqlen=20)
-    >>> mc_state = vec_mc.init(key, env_state)
-    >>> state = imc.init(key, mc_state, agent_state)
-    >>> transitions, state = rollout.sample(state)
+    >>> roll = Roll(imc=imc, seqlen=20)
+    >>> state = Imc.State(key=key, mc=mc_state, agent=agent_state)
+    >>> transitions, state = roll.sample(state)
 """
 
 from __future__ import annotations
@@ -31,23 +21,21 @@ Transition = TypeVar("Transition")
 ImcState = TypeVar("ImcState")
 
 
-class IMC(Protocol[Transition, ImcState]):
+class Imc(Protocol[Transition, ImcState]):
     def sample(self, state: ImcState) -> tuple[Transition, ImcState]: ...
 
 
 @dataclass
-class Rollout(Generic[Transition, ImcState]):
+class Roll(Generic[Transition, ImcState]):
     """N-step trajectory collector.
 
-    Works with any single-step sampler implementing the IMC protocol.
-
     Attributes:
-        imc: Single-step sampler following the IMC protocol.
+        imc: Single-step sampler following the Imc protocol.
         seqlen: Number of steps to collect per trajectory.
-        _unroll: Number of loop iterations to unroll in scan (default: 1).
+        _unroll: Loop unroll factor for jax.lax.scan.
     """
 
-    imc: IMC
+    imc: Imc
     seqlen: int
     _unroll: int = 1
 
@@ -55,7 +43,7 @@ class Rollout(Generic[Transition, ImcState]):
         """Collect seqlen transitions.
 
         Args:
-            state: Current IMC state.
+            state: Current Imc state.
 
         Returns:
             Stacked transitions with shape (seqlen, ...) and updated state.

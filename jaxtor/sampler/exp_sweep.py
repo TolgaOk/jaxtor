@@ -19,7 +19,7 @@ class TabularMDP(Protocol):
 
 
 @dataclass
-class ExpectedSweep:
+class ExpSweep:
     """N-step propagation using exact/expected transition dynamics.
 
     Attributes:

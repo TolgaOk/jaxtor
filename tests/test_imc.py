@@ -59,7 +59,7 @@ def test_single_step_sample():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = GoRightAgent.State()
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
     transition, next_state = imc_step.sample(state)
 
@@ -89,7 +89,7 @@ def test_single_step_state_update():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = CountingAgent.State(counter=0)
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
     assert state.agent.counter == 0
 
@@ -118,7 +118,7 @@ def test_single_step_consecutive_observations():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = GoRightAgent.State()
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
     t1, state = imc_step.sample(state)
     t2, state = imc_step.sample(state)
@@ -128,8 +128,8 @@ def test_single_step_consecutive_observations():
         assert jnp.allclose(t1.nobs, t2.obs)
 
 
-def test_init_returns_correct_structure():
-    """Test that init returns correct IMC State structure."""
+def test_state_construction():
+    """Test that Imc.State can be constructed directly."""
     key = jax.random.PRNGKey(0)
 
     config = tabular.garnet.Config(
@@ -141,13 +141,13 @@ def test_init_returns_correct_structure():
 
     mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
     agent = CountingAgent(action_size=4)
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
 
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = CountingAgent.State(counter=42)
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
+    assert hasattr(state, "key")
     assert hasattr(state, "mc")
     assert hasattr(state, "agent")
     assert state.agent.counter == 42
@@ -172,7 +172,7 @@ def test_jit_compilation_single_step():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = GoRightAgent.State()
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
     jit_sample = jax.jit(imc_step.sample)
 
@@ -200,7 +200,7 @@ def test_imc_with_vecmc():
     env = tabular.garnet.make(config)
 
     mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
+    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -217,7 +217,7 @@ def test_imc_with_vecmc():
     env_state = env.init(key)
     mc_states = vec_mc.init(key, env_state)
     agent_state = BatchedGoRightAgent.State()
-    state = imc_step.init(key, mc_states, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_states, agent=agent_state)
 
     transition, next_state = imc_step.sample(state)
 
@@ -239,7 +239,7 @@ def test_imc_with_vecmc_metrics():
     env = tabular.gridworld.make(config)
 
     mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
-    vec_mc = mc.VecMc(mc=mc_sampler, n_env=num_envs)
+    vec_mc = mc.VecMC(mc=mc_sampler, n_env=num_envs)
 
     class BatchedGoRightAgent:
         @dataclass
@@ -256,7 +256,7 @@ def test_imc_with_vecmc_metrics():
     env_state = env.init(key)
     mc_states = vec_mc.init(key, env_state)
     agent_state = BatchedGoRightAgent.State()
-    state = imc_step.init(key, mc_states, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_states, agent=agent_state)
 
     for _ in range(10):
         _, state = imc_step.sample(state)
@@ -311,7 +311,7 @@ def test_action_coverage_with_random_policy():
     env_state = env.init(key)
     mc_state = mc_sampler.init(key, env_state)
     agent_state = RandomAgent.State(key=agent_key)
-    state = imc_step.init(key, mc_state, agent_state)
+    state = imc.Imc.State(key=key, mc=mc_state, agent=agent_state)
 
     action_counts = jnp.zeros(action_size)
     for _ in range(num_steps):
