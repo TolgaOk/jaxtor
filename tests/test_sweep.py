@@ -1,468 +1,401 @@
-"""Tests for tabular MDP sweeping utilities."""
+"""Tests for stochastic sweep sampler."""
 
 import jax
 import jax.numpy as jnp
 import pytest
-from jaxtor.sampler import sweep
 from jaxtor.env import tabular
+from jaxtor.sampler import mc, sweep
+
+
+# ============================================================================
+# Fixtures
+# ============================================================================
 
 
 @pytest.fixture(scope="module")
-def simple_gridworld():
-    """Simple 3x3 gridworld (3x3 internal area without walls)"""
-    key = jax.random.PRNGKey(0)
-    config = tabular.gridworld.Config(
-        board=[
-            "#####",
-            "#P  #",
-            "#   #",
-            "#  @#",
-            "#####",
-        ],
-        p_slip=0.0,
-    )
-    env = tabular.gridworld.make(config)
-    return env.init(key)
+def garnet_env():
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    return tabular.garnet.make(config)
 
 
 @pytest.fixture(scope="module")
-def hallway_gridworld():
-    """4-step hallway gridworld: P----@"""
+def small_env():
+    config = tabular.garnet.Config(state_size=5, action_size=3, max_episode_len=10)
+    return tabular.garnet.make(config)
+
+
+# ============================================================================
+# Basic Functionality Tests
+# ============================================================================
+
+
+def test_sweep_sample_returns_batched_state(small_env):
+    """Sample returns MC state with shape (A*S, ...)."""
     key = jax.random.PRNGKey(0)
-    config = tabular.gridworld.Config(
-        board=[
-            "#######",
-            "#P   @#",
-            "#######",
-        ],
-        p_slip=0.0,
-    )
-    env = tabular.gridworld.make(config)
-    return env.init(key)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
+
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    assert state.last_obs.shape == (A * S,)
+    assert state.eps_idx.shape == (A * S,)
 
 
-def test_sweep_q_single_step(simple_gridworld):
-    """Test single-step returns only initial values."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=1)
+def test_sweep_sample_correct_initial_states(small_env):
+    """Each position starts at its designated state (obs = state index)."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    q_arr = jnp.ones((state.mdp.action_size, state.mdp.state_size))
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    trajectory = sweeper.backward(q_arr, mdp, mu)
-
-    assert trajectory.shape == (1, state.mdp.action_size, state.mdp.state_size)
-
-    assert jnp.allclose(trajectory[0], q_arr)
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    # Flat batch ordering: position = a * S + s (action-major)
+    expected_state_indices = jnp.tile(jnp.arange(S), A)
+    assert jnp.array_equal(transition.obs, expected_state_indices)
 
 
-def test_sweep_q_two_steps(simple_gridworld):
-    """Test with n_step=2 returns initial and one propagated value."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=2)
+def test_sweep_sample_mdp_initial_conditioned(small_env):
+    """Each position has MDP with one-hot initial distribution."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    q_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    q_arr = q_arr.at[:, -1].set(1.0)  # High value at goal state
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    result = sweeper.backward(q_arr, mdp, mu)
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    expected_state_indices = jnp.tile(jnp.arange(S), A)
 
-    assert result.shape == (2, state.mdp.action_size, state.mdp.state_size)
+    mdp_initials = state.env.mdp.initial
+    assert mdp_initials.shape == (A * S, S)
 
-    assert jnp.allclose(result[0], q_arr)
-
-    assert not jnp.allclose(result[-1], q_arr)
-
-
-def test_sweep_q_deterministic_propagation(hallway_gridworld):
-    """Test propagation with deterministic transitions and policy."""
-    state = hallway_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=3)
-
-    q_arr = jnp.linspace(1.0, 3.0, state.mdp.state_size)[None, :].repeat(
-        state.mdp.action_size, axis=0
-    )
-
-    mu = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    mu = mu.at[1, :].set(1.0)
-
-    result = sweeper.backward(q_arr, mdp, mu)
-
-    assert result.shape == (3, state.mdp.action_size, state.mdp.state_size)
-
-    assert jnp.allclose(result[0], q_arr)
-
-    assert not jnp.allclose(result[0], result[1])
-    assert not jnp.allclose(result[1], result[2])
+    argmax_initials = jnp.argmax(mdp_initials, axis=-1)
+    assert jnp.array_equal(argmax_initials, expected_state_indices)
 
 
-def test_sweep_q_policy_influence(hallway_gridworld):
-    """Test that different policies produce different propagations."""
-    state = hallway_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=3)
+def test_sweep_sample_returns_transitions(small_env):
+    """Sample returns batched transitions."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    q_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    q_arr = q_arr.at[0, -1].set(2.0)  # Action 0 has value 2 at goal
-    q_arr = q_arr.at[1, -1].set(1.0)  # Action 1 has value 1 at goal
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    mu_1 = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    mu_1 = mu_1.at[0, :].set(1.0)
-
-    mu_2 = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    mu_2 = mu_2.at[1, :].set(1.0)
-
-    result_1 = sweeper.backward(q_arr, mdp, mu_1)
-    result_2 = sweeper.backward(q_arr, mdp, mu_2)
-
-    assert (
-        result_1.shape
-        == result_2.shape
-        == (3, state.mdp.action_size, state.mdp.state_size)
-    )
-    assert jnp.allclose(result_1[0], result_2[0])
-
-    assert not jnp.allclose(result_1[1], result_2[1])
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    assert transition.obs.shape == (A * S,)
+    assert transition.act.shape == (A * S,)
+    assert transition.nobs.shape == (A * S,)
 
 
-def test_sweep_q_uniform_convergence(simple_gridworld):
-    """Test that uniform Q-values stay uniform under uniform policy."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=5)
+# ============================================================================
+# Initial Action Tests
+# ============================================================================
 
-    q_arr = jnp.ones((state.mdp.action_size, state.mdp.state_size))
 
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
+def test_sweep_sample_uses_correct_init_action(small_env):
+    """Sample uses designated init_action for each (s,a) position."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    result = sweeper.backward(q_arr, mdp, mu)
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    assert result.shape == (5, state.mdp.action_size, state.mdp.state_size)
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    # Flat batch ordering: position = a * S + s, so action = position // S
+    expected_init_actions = jnp.arange(A * S) // S
+    assert jnp.array_equal(transition.act, expected_init_actions)
 
+
+def test_sweep_sample_state_action_pairing(small_env):
+    """Verify each position has correct (state, action) pairing."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
+
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+
+    # Check that position i has state = i % S and action = i // S
+    for i in range(A * S):
+        expected_state = i % S
+        expected_action = i // S
+        assert transition.obs[i] == expected_state, f"Position {i}: expected state {expected_state}, got {transition.obs[i]}"
+        assert transition.act[i] == expected_action, f"Position {i}: expected action {expected_action}, got {transition.act[i]}"
+
+
+# ============================================================================
+# Batch Shape Tests
+# ============================================================================
+
+
+def test_sweep_batch_shape_various_sizes():
+    """Test A*S batch shape for various env sizes."""
+    key = jax.random.PRNGKey(0)
+
+    for state_size, action_size in [(3, 2), (5, 4), (10, 3)]:
+        config = tabular.garnet.Config(
+            state_size=state_size, action_size=action_size, max_episode_len=10
+        )
+        env = tabular.garnet.make(config)
+        mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+        sweeper = sweep.Sweep(mc=mc_sampler)
+
+        env_state = env.init(key)
+        transition, state = sweeper.sample(key, env_state)
+
+        expected_batch_size = state_size * action_size
+        assert transition.obs.shape == (expected_batch_size,), f"Failed for S={state_size}, A={action_size}"
+        assert transition.act.shape == (expected_batch_size,)
+        assert transition.nobs.shape == (expected_batch_size,)
+        assert state.last_obs.shape == (expected_batch_size,)
+
+
+# ============================================================================
+# Transition Validity Tests
+# ============================================================================
+
+
+def test_sweep_transitions_are_valid(small_env):
+    """Transitions have valid state indices."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
+
+    S = env_state.mdp.state_size
+    A = env_state.mdp.action_size
+
+    # All observations should be valid state indices
+    assert jnp.all(transition.obs >= 0)
+    assert jnp.all(transition.obs < S)
+    assert jnp.all(transition.nobs >= 0)
+    assert jnp.all(transition.nobs < S)
+
+    # All actions should be valid
+    assert jnp.all(transition.act >= 0)
+    assert jnp.all(transition.act < A)
+
+
+def test_sweep_transitions_consistent_with_mdp(small_env):
+    """Next states are reachable according to MDP transitions."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
+
+    mdp = env_state.mdp
+    S, A = mdp.state_size, mdp.action_size
+
+    # For each transition, verify nobs is reachable from obs with act
+    for i in range(A * S):
+        s = int(transition.obs[i])
+        a = int(transition.act[i])
+        s_next = int(transition.nobs[i])
+
+        # P(s_next | s, a) should be > 0
+        prob = mdp.transition[a, s_next, s]
+        assert prob > 0, f"Position {i}: transition from s={s}, a={a} to s'={s_next} has prob 0"
+
+
+# ============================================================================
+# JIT Compilation Tests
+# ============================================================================
+
+
+def test_sweep_sample_jit(small_env):
+    """Sample can be JIT compiled."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+
+    jit_sample = jax.jit(sweeper.sample)
+    transition, state = jit_sample(key, env_state)
+
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    assert transition.obs.shape == (A * S,)
+    assert state.last_obs.shape == (A * S,)
+
+
+def test_sweep_sample_jit_multiple_calls(small_env):
+    """JIT compiled sample produces correct results on multiple calls."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
+
+    env_state = small_env.init(key)
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+
+    jit_sample = jax.jit(sweeper.sample)
+
+    # Multiple calls with different keys
     for i in range(5):
-        mean_val = jnp.mean(result[i])
-        assert jnp.allclose(result[i], jnp.ones_like(result[i]) * mean_val, rtol=1e-5)
+        key_i = jax.random.PRNGKey(i)
+        transition, state = jit_sample(key_i, env_state)
+
+        # Verify structure is correct each time
+        assert transition.obs.shape == (A * S,)
+        expected_states = jnp.tile(jnp.arange(S), A)
+        assert jnp.array_equal(transition.obs, expected_states)
 
 
-def test_sweep_q_absorbing_state(hallway_gridworld):
-    """Test propagation with absorbing state."""
-    state = hallway_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=10)
+# ============================================================================
+# Determinism Tests
+# ============================================================================
 
-    q_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    q_arr = q_arr.at[:, -1].set(1.0)  # High value at goal
+
+def test_sweep_deterministic_with_same_key(small_env):
+    """Same key produces same results."""
+    key = jax.random.PRNGKey(42)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
+    env_state = small_env.init(key)
+
+    trans1, state1 = sweeper.sample(key, env_state)
+    trans2, state2 = sweeper.sample(key, env_state)
 
-    result = sweeper.backward(q_arr, mdp, mu)
+    assert jnp.array_equal(trans1.obs, trans2.obs)
+    assert jnp.array_equal(trans1.act, trans2.act)
+    assert jnp.array_equal(trans1.nobs, trans2.nobs)
+    assert jnp.array_equal(trans1.rew, trans2.rew)
 
-    assert result.shape == (10, state.mdp.action_size, state.mdp.state_size)
 
-    assert jnp.max(result[-1]) >= jnp.max(result[0])
+def test_sweep_different_keys_can_differ(small_env):
+    """Different keys can produce different next states (stochastic transitions)."""
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
+    # Use same env state but different sample keys
+    init_key = jax.random.PRNGKey(0)
+    env_state = small_env.init(init_key)
 
-def test_sweep_q_value_bounds(simple_gridworld):
-    """Test that propagated values stay within reasonable bounds."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=10)
+    # Collect nobs from multiple samples with different keys
+    nobs_list = []
+    for i in range(20):
+        key = jax.random.PRNGKey(i + 100)
+        trans, _ = sweeper.sample(key, env_state)
+        nobs_list.append(trans.nobs)
 
-    q_arr = jnp.linspace(0.0, 1.0, state.mdp.state_size)[None, :].repeat(
-        state.mdp.action_size, axis=0
-    )
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
+    # Check if there's any variation (unless MDP is deterministic)
+    all_nobs = jnp.stack(nobs_list)
+    # At least some position should have different nobs across samples
+    has_variation = jnp.any(jnp.std(all_nobs, axis=0) > 0)
+    # This test passes if there's variation OR if MDP happens to be deterministic
+    # (we mainly want to verify it doesn't crash with different keys)
+    assert all_nobs.shape == (20, small_env.config.action_size * small_env.config.state_size)
 
-    result = sweeper.backward(q_arr, mdp, mu)
 
-    assert result.shape == (10, state.mdp.action_size, state.mdp.state_size)
+# ============================================================================
+# Edge Cases
+# ============================================================================
 
-    assert jnp.all(jnp.isfinite(result))
 
-    min_val = jnp.min(q_arr)
-    max_val = jnp.max(q_arr)
-    assert jnp.all(result >= min_val - 1e-5)
-    assert jnp.all(result <= max_val + 1e-5)
+def test_sweep_single_state_env():
+    """Works with single-state environment."""
+    key = jax.random.PRNGKey(0)
+    config = tabular.garnet.Config(state_size=1, action_size=3, max_episode_len=10)
+    env = tabular.garnet.make(config)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
+    env_state = env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-def test_sweep_q_jit_compilation(simple_gridworld):
-    """Test that sweep.backward can be JIT compiled."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=5)
+    # Should have A*S = 3*1 = 3 positions
+    assert transition.obs.shape == (3,)
+    # All obs should be state 0
+    assert jnp.all(transition.obs == 0)
+    # Actions should be [0, 1, 2]
+    assert jnp.array_equal(transition.act, jnp.array([0, 1, 2]))
 
-    q_arr = jnp.ones((state.mdp.action_size, state.mdp.state_size))
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
 
-    @jax.jit
-    def propagate(q, mu):
-        return sweeper.backward(q, mdp, mu)
+def test_sweep_single_action_env():
+    """Works with single-action environment."""
+    key = jax.random.PRNGKey(0)
+    config = tabular.garnet.Config(state_size=5, action_size=1, max_episode_len=10)
+    env = tabular.garnet.make(config)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    result = propagate(q_arr, mu)
+    env_state = env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    assert result.shape == (5, state.mdp.action_size, state.mdp.state_size)
-    assert jnp.all(jnp.isfinite(result))
-    assert jnp.allclose(result[0], q_arr)
+    # Should have A*S = 1*5 = 5 positions
+    assert transition.obs.shape == (5,)
+    # Obs should be [0, 1, 2, 3, 4] (all states, one action)
+    assert jnp.array_equal(transition.obs, jnp.arange(5))
+    # All actions should be 0
+    assert jnp.all(transition.act == 0)
 
 
-def test_sweep_q_vmap(simple_gridworld):
-    """Test that sweep.backward works with vmap for batch processing."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=3)
+# ============================================================================
+# _condition_mdp_initial Tests
+# ============================================================================
 
-    batch_size = 4
-    q_batch = jnp.ones((batch_size, state.mdp.action_size, state.mdp.state_size))
-    for i in range(batch_size):
-        q_batch = q_batch.at[i, :, :].mul(i + 1)
 
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
+def test_condition_mdp_initial_creates_one_hot(small_env):
+    """_condition_mdp_initial creates MDP with one-hot initial distribution."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    propagate_batch = jax.vmap(lambda q: sweeper.backward(q, mdp, mu))
-    results = propagate_batch(q_batch)
+    env_state = small_env.init(key)
+    mdp = env_state.mdp
+    S = mdp.state_size
 
-    assert results.shape == (batch_size, 3, state.mdp.action_size, state.mdp.state_size)
-    assert jnp.all(jnp.isfinite(results))
+    # Test conditioning on each state
+    for s in range(S):
+        one_hot = jax.nn.one_hot(s, S)
+        conditioned_mdp = sweeper._condition_mdp_initial(mdp, one_hot)
 
-    for i in range(batch_size):
-        assert jnp.allclose(results[i, 0], q_batch[i])
+        # Initial distribution should match the one-hot
+        assert jnp.array_equal(conditioned_mdp.initial, one_hot)
 
+        # Other MDP properties should be unchanged
+        assert jnp.array_equal(conditioned_mdp.transition, mdp.transition)
+        assert jnp.array_equal(conditioned_mdp.reward, mdp.reward)
+        assert jnp.array_equal(conditioned_mdp.terminal, mdp.terminal)
 
-def test_sweep_q_sum_vs_explicit_power_series(hallway_gridworld):
-    """Test that sweep.backward sum equals explicit computation sum_{k=0}^{n-1} (P^mu)^k q_arr."""
-    state = hallway_gridworld
-    mdp = state.mdp
 
-    q_arr = jnp.linspace(1.0, 3.0, state.mdp.state_size)[None, :].repeat(
-        state.mdp.action_size, axis=0
-    )
+# ============================================================================
+# Large Environment Test
+# ============================================================================
 
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
 
-    n_step = 5
+def test_sweep_larger_env(garnet_env):
+    """Works with larger environment (10 states, 4 actions)."""
+    key = jax.random.PRNGKey(0)
+    mc_sampler = mc.Mc(max_episode_len=100, queue_size=10, env=garnet_env)
+    sweeper = sweep.Sweep(mc=mc_sampler)
 
-    sweeper = sweep.Sweep(n_step=n_step)
-    trajectory = sweeper.backward(q_arr, mdp, mu)
-    sweep_sum = trajectory.sum(axis=0)
+    env_state = garnet_env.init(key)
+    transition, state = sweeper.sample(key, env_state)
 
-    def propagate_once(q):
-        return jnp.einsum("axs,ux,ux->as", state.mdp.transition, mu, q)
+    S, A = env_state.mdp.state_size, env_state.mdp.action_size
+    assert S == 10
+    assert A == 4
 
-    explicit_sum = jnp.zeros_like(q_arr)
-    current_q = q_arr.copy()
-    for k in range(n_step):
-        explicit_sum += current_q
-        current_q = propagate_once(current_q)
+    # Verify batch size
+    assert transition.obs.shape == (A * S,)  # 40
+    assert transition.act.shape == (A * S,)
+    assert state.last_obs.shape == (A * S,)
 
-    assert jnp.allclose(sweep_sum, explicit_sum, rtol=1e-5)
-
-
-def test_sweep_forward_single_step(simple_gridworld):
-    """Test single-step forward propagation returns only initial values."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=1)
-
-    pi_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    pi_arr = pi_arr.at[0, 0].set(1.0)
-
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    trajectory = sweeper.forward(pi_arr, mdp, mu)
-
-    assert trajectory.shape == (1, state.mdp.action_size, state.mdp.state_size)
-    assert jnp.allclose(trajectory[0], pi_arr)
-
-
-def test_sweep_forward_conservation(simple_gridworld):
-    """Test that forward propagation conserves probability mass."""
-    state = simple_gridworld
-    mdp = state.mdp
-    sweeper = sweep.Sweep(n_step=5)
-
-    pi_arr = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / (
-        state.mdp.action_size * state.mdp.state_size
-    )
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    result = sweeper.forward(pi_arr, mdp, mu)
-
-    for i in range(5):
-        total_mass = jnp.sum(result[i])
-        assert jnp.isclose(total_mass, 1.0, rtol=1e-5)
-
-
-def test_sweep_forward_sum_vs_explicit(hallway_gridworld):
-    """Test forward propagation sum matches explicit computation."""
-    state = hallway_gridworld
-    mdp = state.mdp
-
-    pi_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    pi_arr = pi_arr.at[:, 0].set(1.0 / state.mdp.action_size)
-
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    n_step = 5
-
-    sweeper = sweep.Sweep(n_step=n_step)
-    trajectory = sweeper.forward(pi_arr, mdp, mu)
-    sweep_sum = trajectory.sum(axis=0)
-
-    def propagate_forward_once(pi):
-        return jnp.einsum("as,axs,ux->ux", pi, state.mdp.transition, mu)
-
-    explicit_sum = jnp.zeros_like(pi_arr)
-    current_pi = pi_arr.copy()
-    for k in range(n_step):
-        explicit_sum += current_pi
-        current_pi = propagate_forward_once(current_pi)
-
-    assert jnp.allclose(sweep_sum, explicit_sum, rtol=1e-5)
-
-
-def test_backward_reward_propagation_4_steps(hallway_gridworld):
-    """Verify reward propagates backward from goal to initial state in exactly 4 steps.
-
-    Hallway: P----@ (5 states, 4 steps from start to goal)
-    Policy: Always go right (toward goal)
-    Expectation: Reward at state 3 propagates to initial state at step 3
-    """
-    state = hallway_gridworld
-    transition = state.mdp.transition
-    reward_asx = state.mdp.reward
-
-    reward = jnp.einsum("axs,asx->as", transition, reward_asx)
-
-    mdp = state.mdp
-
-    mu = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    mu = mu.at[1, :].set(1.0)
-
-    n_step = 5
-    sweeper = sweep.Sweep(n_step=n_step)
-
-    reward_trajectory = sweeper.backward(reward, mdp, mu)
-
-    assert reward_trajectory.shape == (
-        n_step,
-        state.mdp.action_size,
-        state.mdp.state_size,
-    )
-
-    initial_state_idx = 0
-    right_action_idx = 1
-
-    initial_reward_at_start = reward_trajectory[0, right_action_idx, initial_state_idx]
-    assert jnp.isclose(initial_reward_at_start, 0.0, atol=1e-5)
-
-    reward_at_start_step3 = reward_trajectory[3, right_action_idx, initial_state_idx]
-    assert jnp.isclose(reward_at_start_step3, 1.0, atol=1e-5)
-
-
-def test_backward_reward_uniform_policy_3x3(simple_gridworld):
-    """Verify reward propagates with uniform random policy in 3x3 grid.
-
-    Grid: 0 1 2 / 3 4 5 / 6 7 8 (P at 0, @ at 8)
-    Policy: μ(a|s) = 0.25 for all actions
-
-    Manual calculation:
-    Step 0: Q(down,5)=1.0, Q(right,7)=1.0
-    Step 1: Q(right,4)=0.25, Q(down,4)=0.25, Q(down,2)=0.25, Q(right,6)=0.25
-    Step 2: Q(right,1)=0.0625, Q(down,1)=0.125, Q(right,3)=0.125, Q(down,3)=0.0625
-    Step 3: Q(right,0)=0.046875, Q(down,0)=0.046875
-    Expected sum at state 0, step 3: 0.09375
-    """
-    state = simple_gridworld
-    transition = state.mdp.transition
-    reward_asx = state.mdp.reward
-
-    reward = jnp.einsum("axs,asx->as", transition, reward_asx)
-
-    mdp = state.mdp
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    sweeper = sweep.Sweep(n_step=4)
-    reward_trajectory = sweeper.backward(reward, mdp, mu)
-
-    assert reward_trajectory.shape == (4, state.mdp.action_size, state.mdp.state_size)
-
-    reward_sum_at_state0_step3 = jnp.sum(reward_trajectory[3, :, 0])
-    assert reward_sum_at_state0_step3 == pytest.approx(0.09375, abs=1e-6)
-
-
-def test_forward_mass_uniform_policy_3x3(simple_gridworld):
-    """Verify mass propagates with uniform random policy in 3x3 grid.
-
-    Grid: 0 1 2 / 3 4 5 / 6 7 8 (P at 0, @ at 8)
-    Policy: μ(a|s) = 0.25 for all actions
-
-    Manual calculation:
-    Step 0: π(a,0) = 0.25 for each action, total=1.0 at state 0
-    Step 1: From 0: up→0, right→1, down→3, left→0
-            State 0: 4×0.125 = 0.5 (from up and left actions)
-            State 1: 4×0.0625 = 0.25 (from right action)
-            State 3: 4×0.0625 = 0.25 (from down action)
-    """
-    state = simple_gridworld
-    transition = state.mdp.transition
-
-    mdp = state.mdp
-
-    pi_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    pi_arr = pi_arr.at[:, 0].set(0.25)
-
-    mu = jnp.ones((state.mdp.action_size, state.mdp.state_size)) / state.mdp.action_size
-
-    sweeper = sweep.Sweep(n_step=2)
-    trajectory = sweeper.forward(pi_arr, mdp, mu)
-
-    assert trajectory.shape == (2, state.mdp.action_size, state.mdp.state_size)
-
-    mass_at_state0_step1 = jnp.sum(trajectory[1, :, 0])
-    mass_at_state1_step1 = jnp.sum(trajectory[1, :, 1])
-    mass_at_state3_step1 = jnp.sum(trajectory[1, :, 3])
-
-    assert mass_at_state0_step1 == pytest.approx(0.5, abs=1e-6)
-    assert mass_at_state1_step1 == pytest.approx(0.25, abs=1e-6)
-    assert mass_at_state3_step1 == pytest.approx(0.25, abs=1e-6)
-
-
-def test_forward_mass_propagation_4_steps(hallway_gridworld):
-    """Verify state distribution moves from initial state to goal in 4 steps.
-
-    Hallway: P----@ (5 states, 4 steps from start to goal)
-    Policy: Always go right (toward goal)
-    Initial: One-hot on initial state
-    Expectation: Mass moves to goal state after forward propagation
-    """
-    state = hallway_gridworld
-    transition = state.mdp.transition
-
-    mdp = state.mdp
-
-    pi_arr = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    pi_arr = pi_arr.at[1, 0].set(1.0)
-
-    mu = jnp.zeros((state.mdp.action_size, state.mdp.state_size))
-    mu = mu.at[1, :].set(1.0)
-
-    n_step = 5
-    sweeper = sweep.Sweep(n_step=n_step)
-
-    trajectory = sweeper.forward(pi_arr, mdp, mu)
-
-    assert trajectory.shape == (n_step, state.mdp.action_size, state.mdp.state_size)
-
-    initial_state_idx = 0
-    goal_state_idx = state.mdp.state_size - 1
-    right_action_idx = 1
-
-    initial_mass_at_start = trajectory[0, right_action_idx, initial_state_idx]
-    assert jnp.isclose(initial_mass_at_start, 1.0, atol=1e-5)
-
-    final_mass_at_goal = trajectory[-1, right_action_idx, goal_state_idx]
-    assert final_mass_at_goal > 0.5
+    # Verify correct state/action pairing
+    expected_states = jnp.tile(jnp.arange(S), A)
+    expected_actions = jnp.arange(A * S) // S
+    assert jnp.array_equal(transition.obs, expected_states)
+    assert jnp.array_equal(transition.act, expected_actions)

@@ -1,107 +1,103 @@
-"""MDP state-space sweeping utilities.
+"""Stochastic sweep sampler for tabular MDPs.
 
-Implements n-step value propagation operators for tabular MDPs using exact
-transition dynamics. Provides matrix-vector operations.
+Sweep over all (s,a) pairs using stochastic transitions.
+
+Example:
+    >>> from jaxtor.env import tabular
+    >>> from jaxtor.sampler import mc, sweep
+    >>> config = tabular.garnet.Config(state_size=10, action_size=4)
+    >>> env = tabular.garnet.make(config)
+    >>> mc_sampler = mc.Mc(max_episode_len=100, queue_size=10, env=env)
+    >>> sweeper = sweep.Sweep(mc=mc_sampler)
+    >>> env_state = env.init(key)
+    >>> transition, mc_state = sweeper.sample(key, env_state)
 """
 
 from __future__ import annotations
-from typing import Protocol
 
-import chex
+from typing import Protocol, TypeVar
+
 import jax
 import jax.numpy as jnp
+import jax.random as jrd
+import chex
 from chex import dataclass
+from jaxdp.mdp import MDP
+
+Transition = TypeVar("Transition")
 
 
-class TabularMDP(Protocol):
-    transition: chex.Array
+class Env(Protocol):
+    class State(Protocol):
+        mdp: MDP
+
+
+class Mc(Protocol):
+    class State(Protocol): ...
+
+    def init(self, key: chex.PRNGKey, env: Env.State) -> Mc.State: ...
+    def sample(
+        self, act: chex.Array, state: Mc.State
+    ) -> tuple[Transition, Mc.State]: ...
 
 
 @dataclass
 class Sweep:
-    """N-step propagation for tabular MDPs.
+    """Sweep over all (s,a) pairs with stochastic transitions.
+
+    Flat batch ordering: position = a * S + s (action-major).
 
     Attributes:
-        n_step: Number of propagation steps to perform.
-        _unroll: Number of loop iterations to unroll in scan (default: 1).
+        mc: Mc instance for single-environment sampling.
     """
 
-    n_step: int
-    _unroll: int = 1
+    mc: Mc
 
-    def backward(
-        self, q_arr: chex.Array, mdp: TabularMDP, mu: chex.Array
-    ) -> chex.Array:
-        """Apply n-step backward propagation.
-
-        Iteratively propagates value-like arrays backward through transition dynamics under
-        policy μ, returning the sequence from initial to most propagated values.
-
-        N-step backward propagation trajectory:
-            Q_prop(a,s) = Σ_s' P(s'|s,a) · [Σ_u μ(u|s') · Q(u,s')]  (single propagation)
-            Q^(0) = q_arr  (initial, no propagation)
-            Q^(k) = (P^μ)^k q_arr  for k = 1, ..., n_step-1
-            Q^(n_step-1) = (P^μ)^(n_step-1) q_arr  (most propagated)
-
-        Returns: [Q^(0), Q^(1), ..., Q^(n_step-1)]
+    def _condition_mdp_initial(self, mdp: MDP, init_dist: chex.Array) -> MDP:
+        """Create an MDP with a modified initial distribution.
 
         Args:
-            q_arr: Initial values (Q-values, returns, etc.).
-                Shape: (A, S)
-            mdp: TabularMDP with transition matrix P(s'|s,a).
-                Shape: (A, S', S) where A=actions, S=states, S'=next_states
-            mu: Policy distribution μ(a|s).
-                Shape: (A, S)
+            mdp: Original MDP.
+            init_dist: New initial state distribution (typically one-hot).
 
         Returns:
-            Trajectory of values from initial to most propagated.
-            Shape: (n_step, A, S)
+            MDP with the new initial distribution, sharing other arrays.
         """
-
-        def _scan_body(carry, _):
-            prop_arr = jnp.einsum("axs,ux,ux->as", mdp.transition, mu, carry)
-            return prop_arr, prop_arr
-
-        _, seq = jax.lax.scan(
-            _scan_body,
-            q_arr,
-            length=self.n_step - 1,
-            unroll=self._unroll,
+        return MDP(
+            transition=mdp.transition,
+            reward=mdp.reward,
+            initial=init_dist,
+            terminal=mdp.terminal,
+            features=mdp.features,
+            name=mdp.name,
+            validate=False,
         )
-        return jnp.concatenate([q_arr[None], seq], axis=0)
 
-    def forward(
-        self, pi_arr: chex.Array, mdp: TabularMDP, mu: chex.Array
-    ) -> chex.Array:
-        """Apply n-step forward propagation.
+    def sample(self, key: chex.PRNGKey, env: Env.State) -> tuple[Transition, Mc.State]:
+        """Sample one transition from each (s,a) pair.
 
-        Iteratively propagates distribution-like arrays forward through transition dynamics
-        under policy μ, returning the sequence of arrays at each step starting from the initial input.
-
-        N-step forward propagation trajectory:
-            π^(0) = pi_arr (initial)
-            π^(k+1)(a',s') = Σ_s Σ_a π^(k)(a,s) · P(s'|s,a) · μ(a'|s')  for k = 0, ..., n_step-2
-
-        Returns: [π^(0), π^(1), ..., π^(n_step-1)]
+        Initializes A*S parallel MC states with conditioned initial distributions,
+        then samples with the designated initial action for each position.
 
         Args:
-            pi_arr: Initial distribution (state-action occupancy, etc.).
-                Shape: (A, S)
-            mdp: TabularMDP with transition matrix P(s'|s,a).
-                Shape: (A, S', S) where A=actions, S=states, S'=next_states
-            mu: Policy distribution μ(a|s).
-                Shape: (A, S)
+            key: Random key for initialization and sampling.
+            env: Environment state (template).
 
         Returns:
-            Trajectory of distributions from step 0 to step n_step-1.
-            Shape: (n_step, A, S)
+            Batched transitions and MC states with shape (A*S, ...).
         """
+        S, A = env.mdp.state_size, env.mdp.action_size
 
-        def _scan_body(carry, _):
-            prop_arr = jnp.einsum("as,axs,ux->ux", carry, mdp.transition, mu)
-            return prop_arr, prop_arr
+        state_indices = jnp.tile(jnp.arange(S), A)
+        init_dists = jax.nn.one_hot(state_indices, S)
 
-        _, seq = jax.lax.scan(
-            _scan_body, pi_arr, length=self.n_step - 1, unroll=self._unroll
-        )
-        return jnp.concatenate([pi_arr[None], seq], axis=0)
+        def condition_env_state(init_dist: chex.Array) -> Env.State:
+            new_mdp = self._condition_mdp_initial(env.mdp, init_dist)
+            return env.replace(mdp=new_mdp)  # type: ignore[attr-defined]
+
+        conditioned_env_states = jax.vmap(condition_env_state)(init_dists)
+
+        keys = jrd.split(key, A * S)
+        mc_state = jax.vmap(self.mc.init)(keys, conditioned_env_states)
+        init_action = jnp.arange(A * S) // S
+        return jax.vmap(self.mc.sample)(init_action, mc_state)

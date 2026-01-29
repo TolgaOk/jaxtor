@@ -1,60 +1,53 @@
-"""Markovian step sampling utilities.
+"""Markov chain sampling utilities.
 
-Implements functions for collecting individual transitions from environments
-and managing episode statistics.
+Provides environment wrappers for transition collection with episode statistics.
+
+Classes:
+    Mc: Single-environment sampler with episode tracking.
+    VecMC: Vectorized sampler for multiple parallel environments.
 
 Example:
-    >>> import jax
-    >>> from jaxtor.sampler import mc
-    >>>
-    >>> # Assuming env follows mc.Env protocol
-    >>> sampler = mc.MarkovChain(max_episode_len=1000, queue_size=100, env=env)
-    >>>
-    >>> # Initialize sampler state
-    >>> key = jax.random.PRNGKey(0)
-    >>> state = sampler.init(key)
-    >>>
-    >>> # Sample a transition
-    >>> key, act_key = jax.random.split(key)
-    >>> act = jax.random.uniform(act_key, (10,))
-    >>> transition, state = sampler.sample(act, state)
+    >>> mc_sampler = Mc(max_episode_len=100, queue_size=10, env=env)
+    >>> env_state = env.init(key)
+    >>> state = mc_sampler.init(key, env_state)
+    >>> transition, state = mc_sampler.sample(action, state)
+
+    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
+    >>> state = vec_mc.init(key, env_state)
+    >>> transition, state = vec_mc.sample(batched_actions, state)
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
+
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
 import chex
 from chex import dataclass
 
+EnvState = TypeVar("EnvState")
 
-class Env(Protocol):
+
+class Env(Protocol[EnvState]):
     class Step(Protocol):
         nobs: chex.Array
         rew: chex.Numeric
         term: chex.Numeric
         trun: chex.Numeric
 
-    def init(self, key: chex.PRNGKey) -> chex.PyTreeDef: ...  # type: ignore[reportInvalidTypeForm]
-
     def reset(
-        self,
-        key: chex.PRNGKey,
-        env_state: chex.PyTreeDef,  # type: ignore[reportInvalidTypeForm]
-    ) -> tuple[chex.Array, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
+        self, key: chex.PRNGKey, env: EnvState
+    ) -> tuple[chex.Array, EnvState]: ...
 
     def step(
-        self,
-        key: chex.PRNGKey,
-        act: chex.Array,
-        env_state: chex.PyTreeDef,  # type: ignore[reportInvalidTypeForm]
-    ) -> tuple[Env.Step, chex.PyTreeDef]: ...  # type: ignore[reportInvalidTypeForm]
+        self, key: chex.PRNGKey, act: chex.Array, env: EnvState
+    ) -> tuple[Step, EnvState]: ...
 
 
 @dataclass
-class MarkovChain:
+class Mc(Generic[EnvState]):
     """Markov chain sampler for collecting transitions from environments.
 
     Provides a uniform interface for interacting with environments and tracking
@@ -86,7 +79,7 @@ class MarkovChain:
         """
 
         key: chex.PRNGKey
-        env: chex.PyTreeDef  # type: ignore[reportInvalidTypeForm]
+        env: EnvState
         last_obs: chex.Array
         last_done: chex.Numeric
         eps_idx: chex.Numeric
@@ -113,6 +106,11 @@ class MarkovChain:
         term: chex.Array
         trun: chex.Array
         nobs: chex.Array
+
+    @dataclass
+    class Metrics:
+        avg_eps_rew: chex.Numeric
+        avg_eps_len: chex.Numeric
 
     def sample(self, act: chex.Array, state: State) -> tuple[Transition, State]:
         """Sample a transition from the environment.
@@ -175,7 +173,7 @@ class MarkovChain:
         )
         return transition, state
 
-    def refresh_queues(self, state: State) -> State:
+    def _refresh_queues(self, state: State) -> State:
         """Reset the episode statistics queues.
 
         Args:
@@ -189,18 +187,34 @@ class MarkovChain:
             eps_len_queue=jnp.full_like(state.eps_len_queue, jnp.nan),
         )
 
-    def init(self, key: chex.PRNGKey) -> State:
+    def metrics(self, state: State) -> tuple[Metrics, State]:
+        """Compute metrics from episode statistics queues and refresh them.
+
+        Args:
+            state: Current state containing episode statistics queues.
+
+        Returns:
+            Computed metrics and updated state with refreshed queues.
+        """
+        avg_eps_rew = jnp.nanmean(state.eps_rew_queue)
+        avg_eps_len = jnp.nanmean(state.eps_len_queue)
+        return (
+            self.Metrics(avg_eps_rew=avg_eps_rew, avg_eps_len=avg_eps_len),
+            self._refresh_queues(state),
+        )
+
+    def init(self, key: chex.PRNGKey, env: EnvState) -> State:
         """Initialize the state of the Markov chain sampler.
 
         Args:
             key: Random key for initialization.
+            env: Pre-initialized environment state.
 
         Returns:
             Initialized sampler state.
         """
-        key, init_key, reset_key = jrd.split(key, 3)
-        env_state = self.env.init(init_key)
-        last_obs, env_state = self.env.reset(reset_key, env_state)
+        key, reset_key = jrd.split(key, 2)
+        last_obs, env_state = self.env.reset(reset_key, env)
 
         return self.State(
             key=key,
