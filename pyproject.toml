@@ -39,5 +39,10 @@ jaxdp = [
 venvPath = "."
 venv = ".venv"
 
+[tool.pytest.ini_options]
+markers = [
+    "statistical: marks tests as statistical (verify probabilistic properties)",
+]
+
 [tool.ruff]
 line-length = 88

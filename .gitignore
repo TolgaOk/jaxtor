@@ -68,3 +68,4 @@ dev/
 
 # agent
 .claude/
+.gemini/
