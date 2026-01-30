@@ -18,14 +18,19 @@ def test_garnet_init():
     config = tabular.garnet.Config(state_size=50, action_size=10)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
-    obs, state = env.reset(reset_key, state)
 
+    # After init, s=-1 (invalid until reset)
     assert state.mdp.state_size == config.state_size
     assert state.mdp.action_size == config.action_size
-    assert state.last_state.shape == (config.state_size,)
+    assert state.s == -1
     assert state.step == 0
     assert state.max_episode_len == 1000
+
+    # After reset, s is a valid index
+    obs, state = env.reset(reset_key, state)
     assert 0 <= obs < config.state_size
+    assert 0 <= state.s < config.state_size
+    assert state.step == 0
 
 
 def test_graph_init():
@@ -35,13 +40,15 @@ def test_graph_init():
     config = tabular.graph.Config()
     env = tabular.graph.make(config)
     state = env.init(init_key)
-    obs, state = env.reset(reset_key, state)
 
     assert state.mdp.state_size == 6
     assert state.mdp.action_size == 6
-    assert state.last_state.shape == (6,)
+    assert state.s == -1
     assert state.step == 0
+
+    obs, state = env.reset(reset_key, state)
     assert 0 <= obs < 6
+    assert 0 <= state.s < 6
 
 
 def test_gridworld_init():
@@ -53,13 +60,63 @@ def test_gridworld_init():
     )
     env = tabular.gridworld.make(config)
     state = env.init(init_key)
-    obs, state = env.reset(reset_key, state)
 
     assert state.mdp.state_size == 8
     assert state.mdp.action_size == 4
-    assert state.last_state.shape == (8,)
+    assert state.s == -1
     assert state.step == 0
+
+    obs, state = env.reset(reset_key, state)
     assert 0 <= obs < 8
+    assert 0 <= state.s < 8
+
+
+def test_init_returns_invalid_state_index():
+    """Test that init returns state with s=-1 (invalid until reset)."""
+    key = jax.random.PRNGKey(0)
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+    state = env.init(key)
+
+    # s=-1 indicates not yet reset
+    assert state.s == -1
+    assert state.step == 0
+
+
+def test_reset_samples_from_initial_distribution():
+    """Test that reset samples from MDP initial distribution."""
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+    state = env.init(init_key)
+
+    # Multiple resets should give valid indices from initial distribution
+    states_seen = set()
+    for i in range(20):
+        reset_key, subkey = jax.random.split(reset_key)
+        obs, _ = env.reset(subkey, state)
+        assert 0 <= obs < config.state_size
+        states_seen.add(int(obs))
+
+    # Should see some variety (probabilistic, but likely with 20 samples)
+    assert len(states_seen) >= 2
+
+
+def test_obs_returns_state_index():
+    """Test that obs() returns state.s."""
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+    state = env.init(init_key)
+    obs, state = env.reset(reset_key, state)
+
+    # obs() should return state.s
+    assert env.obs(state) == state.s
+    assert env.obs(state) == obs
 
 
 # ============================================================================
@@ -87,7 +144,7 @@ def test_garnet_single_step():
 
     # Check state update
     assert next_state.step == state.step + 1
-    assert jnp.argmax(next_state.last_state) == transition.nobs
+    assert next_state.s == transition.nobs
 
 
 def test_graph_single_step():
@@ -104,6 +161,7 @@ def test_graph_single_step():
 
     assert 0 <= transition.nobs < 6
     assert next_state.step == state.step + 1
+    assert next_state.s == transition.nobs
 
 
 def test_gridworld_single_step():
@@ -122,6 +180,28 @@ def test_gridworld_single_step():
 
     assert 0 <= transition.nobs < 8
     assert next_state.step == state.step + 1
+    assert next_state.s == transition.nobs
+
+
+def test_step_returns_valid_index():
+    """Test that step returns valid state index in nobs."""
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
+
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+    state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
+
+    # Run multiple steps
+    for i in range(10):
+        step_key, subkey = jax.random.split(step_key)
+        transition, state = env.step(subkey, i % config.action_size, state)
+
+        # nobs should always be a valid index
+        assert 0 <= transition.nobs < config.state_size
+        # state.s should match nobs
+        assert state.s == transition.nobs
 
 
 # ============================================================================
@@ -146,7 +226,7 @@ def test_garnet_multiple_steps():
         transition, state = env.step(step_key, action_idx, state)
 
         # Verify state is updated correctly
-        assert jnp.argmax(state.last_state) == transition.nobs
+        assert state.s == transition.nobs
         assert state.step == i + 1
 
 
@@ -178,8 +258,43 @@ def test_episode_accumulates_reward():
 
 
 # ============================================================================
-# Edge Case Tests
+# Truncation Tests
 # ============================================================================
+
+
+def test_truncation_at_max_episode_len():
+    """Test that truncation flag is set at max_episode_len."""
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+
+    # Create environment with very short episode length
+    max_episode_len = 5
+    config = tabular.garnet.Config(
+        state_size=10, action_size=4, max_episode_len=max_episode_len
+    )
+    env = tabular.garnet.make(config)
+    state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
+
+    # Run until truncation
+    truncated = False
+    for i in range(max_episode_len + 5):
+        step_key, key = jax.random.split(key)
+        transition, state = env.step(step_key, 0, state)
+
+        # Check truncation at correct step
+        if i == max_episode_len - 1:
+            # At step max_episode_len-1, trun should be True
+            assert transition.trun, f"Expected truncation at step {i}"
+            truncated = True
+            break
+
+        if transition.term:
+            # Terminal state reached before truncation
+            break
+
+    # Either we hit truncation or terminal
+    assert truncated or transition.term
 
 
 def test_episode_length_limit():
@@ -189,7 +304,9 @@ def test_episode_length_limit():
 
     # Create environment with very short episode length
     max_episode_len = 5
-    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=max_episode_len)
+    config = tabular.garnet.Config(
+        state_size=10, action_size=4, max_episode_len=max_episode_len
+    )
     env = tabular.garnet.make(config)
     state = env.init(init_key)
     _, state = env.reset(reset_key, state)
@@ -202,17 +319,11 @@ def test_episode_length_limit():
         transition, state = env.step(step_key, 0, state)
         steps_taken += 1
 
-        # Should truncate when reaching episode length
-        if i + 1 >= max_episode_len:
-            # Note: jaxdp's async_sample_step handles truncation internally
-            # The test verifies we can run for at least max_episode_len steps
-            assert steps_taken >= max_episode_len
-            break
-
         if transition.term or transition.trun:
             break
 
-    assert steps_taken <= max_steps
+    # Should have stopped at or before max_episode_len
+    assert steps_taken <= max_episode_len
 
 
 def test_truncation_flag():
@@ -243,9 +354,7 @@ def test_terminal_state():
     init_key, reset_key, step_key = jax.random.split(key, 3)
 
     # GridWorld has explicit terminal states
-    config = tabular.gridworld.Config(
-        board=["###", "#P@", "###"], p_slip=0.0
-    )
+    config = tabular.gridworld.Config(board=["###", "#P@", "###"], p_slip=0.0)
     env = tabular.gridworld.make(config)
     state = env.init(init_key)
     _, state = env.reset(reset_key, state)
@@ -276,7 +385,8 @@ def test_state_space_consistency():
 
         # Check state space consistency (nobs is scalar index)
         assert 0 <= transition.nobs < config.state_size
-        assert state.last_state.shape == (config.state_size,)
+        # state.s is now a scalar index, not one-hot
+        assert 0 <= state.s < config.state_size
 
         if transition.term or transition.trun:
             break
@@ -364,12 +474,15 @@ def test_deterministic_with_same_key():
 # ============================================================================
 
 
-@pytest.mark.parametrize("state_size,action_size", [
-    (5, 3),
-    (10, 5),
-    (50, 10),
-    (100, 20),
-])
+@pytest.mark.parametrize(
+    "state_size,action_size",
+    [
+        (5, 3),
+        (10, 5),
+        (50, 10),
+        (100, 20),
+    ],
+)
 def test_garnet_different_sizes(state_size, action_size):
     """Test Garnet MDP with various state and action space sizes."""
     key = jax.random.PRNGKey(0)
@@ -378,9 +491,14 @@ def test_garnet_different_sizes(state_size, action_size):
     config = tabular.garnet.Config(state_size=state_size, action_size=action_size)
     env = tabular.garnet.make(config)
     state = env.init(init_key)
+
+    # After init, s=-1
+    assert state.s == -1
+
     _, state = env.reset(reset_key, state)
 
-    assert state.last_state.shape == (state_size,)
+    # After reset, s is valid index
+    assert 0 <= state.s < state_size
     assert state.mdp.state_size == state_size
     assert state.mdp.action_size == action_size
 
@@ -412,6 +530,107 @@ def test_gridworld_slip_probability():
     # Both should initialize successfully
     assert state_no_slip.mdp.state_size == state_slip.mdp.state_size
     assert state_no_slip.mdp.action_size == state_slip.mdp.action_size
+
+
+# ============================================================================
+# JIT Compatibility Tests
+# ============================================================================
+
+
+def test_jit_init():
+    """Test that init is JIT-compatible."""
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+
+    jit_init = jax.jit(env.init)
+
+    key = jax.random.PRNGKey(0)
+    state = jit_init(key)
+
+    assert state.s == -1
+    assert state.step == 0
+    assert state.mdp.state_size == 10
+
+
+def test_jit_reset():
+    """Test that reset is JIT-compatible."""
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+
+    jit_reset = jax.jit(env.reset)
+
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+    state = env.init(init_key)
+
+    obs, new_state = jit_reset(reset_key, state)
+
+    assert 0 <= obs < 10
+    assert 0 <= new_state.s < 10
+    assert new_state.step == 0
+
+
+def test_jit_step():
+    """Test that step is JIT-compatible."""
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+
+    jit_step = jax.jit(env.step)
+
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key, step_key = jax.random.split(key, 3)
+    state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
+
+    transition, new_state = jit_step(step_key, 0, state)
+
+    assert 0 <= transition.nobs < 10
+    assert new_state.s == transition.nobs
+    assert new_state.step == 1
+
+
+def test_jit_obs():
+    """Test that obs is JIT-compatible."""
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+
+    jit_obs = jax.jit(env.obs)
+
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+    state = env.init(init_key)
+    _, state = env.reset(reset_key, state)
+
+    obs = jit_obs(state)
+    assert obs == state.s
+
+
+def test_jit_full_episode():
+    """Test running a full episode with JIT-compiled functions."""
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=20)
+    env = tabular.garnet.make(config)
+
+    jit_init = jax.jit(env.init)
+    jit_reset = jax.jit(env.reset)
+    jit_step = jax.jit(env.step)
+
+    key = jax.random.PRNGKey(0)
+    init_key, reset_key = jax.random.split(key)
+
+    state = jit_init(init_key)
+    obs, state = jit_reset(reset_key, state)
+
+    total_reward = 0.0
+    for i in range(30):
+        step_key, key = jax.random.split(key)
+        action = i % config.action_size
+        transition, state = jit_step(step_key, action, state)
+        total_reward += float(transition.rew)
+
+        if transition.term or transition.trun:
+            break
+
+    assert isinstance(total_reward, float)
 
 
 # ============================================================================
@@ -481,3 +700,17 @@ def test_multiple_episodes():
     assert len(episode_lengths) == num_episodes
     assert all(length > 0 for length in episode_lengths)
     assert all(length <= 100 for length in episode_lengths)
+
+
+def test_env_only_has_config_field():
+    """Test that TabularEnv only has config field."""
+    config = tabular.garnet.Config(state_size=10, action_size=4)
+    env = tabular.garnet.make(config)
+
+    # Only config field exists
+    assert hasattr(env, "config")
+    assert env.config == config
+
+    # No obs_space or act_space
+    assert not hasattr(env, "obs_space")
+    assert not hasattr(env, "act_space")
