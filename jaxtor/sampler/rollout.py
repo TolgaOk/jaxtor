@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Generic, Protocol, TypeVar
 
 import jax
+import jax.numpy as jnp
 from chex import dataclass
 
 Transition = TypeVar("Transition")
@@ -32,11 +33,13 @@ class Roll(Generic[Transition, ImcState]):
     Attributes:
         imc: Single-step sampler following the Imc protocol.
         seqlen: Number of steps to collect per trajectory.
+        seq_axis: Axis for the sequence dimension in output transitions.
         _unroll: Loop unroll factor for jax.lax.scan.
     """
 
     imc: Imc
     seqlen: int
+    seq_axis: int = 0
     _unroll: int = 1
 
     def sample(self, state: ImcState) -> tuple[Transition, ImcState]:
@@ -46,7 +49,9 @@ class Roll(Generic[Transition, ImcState]):
             state: Current Imc state.
 
         Returns:
-            Stacked transitions with shape (seqlen, ...) and updated state.
+            Stacked transitions and updated state. Sequence dimension is
+            placed at seq_axis (default 0). With VecMc, set seq_axis=1
+            to get (n_env, seqlen, ...) instead of (seqlen, n_env, ...).
         """
 
         def step(state, _):
@@ -56,4 +61,8 @@ class Roll(Generic[Transition, ImcState]):
         state, transitions = jax.lax.scan(
             step, state, length=self.seqlen, unroll=self._unroll
         )
+        if self.seq_axis != 0:
+            transitions = jax.tree.map(
+                lambda x: jnp.moveaxis(x, 0, self.seq_axis), transitions
+            )
         return transitions, state
