@@ -58,8 +58,23 @@ class ConfigProtocol(Protocol):
 
 @dataclass
 class TabularEnv:
+    """Index-based tabular MDP environment.
+
+    Attributes:
+        config: MDP configuration following ConfigProtocol.
+    """
+
     @dataclass
     class State:
+        """Environment state.
+
+        Attributes:
+            mdp: Underlying jaxdp MDP instance.
+            s: Current state index.
+            step: Current step within the episode.
+            max_episode_len: Maximum episode length before truncation.
+        """
+
         mdp: JaxdpMDP
         s: chex.Numeric
         step: chex.Numeric
@@ -67,6 +82,15 @@ class TabularEnv:
 
     @dataclass
     class Step:
+        """Single-step transition result.
+
+        Attributes:
+            nobs: Next observation (state index).
+            rew: Reward.
+            term: Natural termination flag.
+            trun: Truncation flag.
+        """
+
         nobs: chex.Numeric
         rew: chex.Numeric
         term: chex.Numeric
