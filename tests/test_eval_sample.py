@@ -39,26 +39,19 @@ class GoLeftAgent:
 
 
 # =============================================================================
-# Sample Eval Tests
+# Helpers
 # =============================================================================
 
 
-def test_sample_init_state():
-    """init() produces state with step=0."""
-    key = jax.random.PRNGKey(10)
+def _make_eval_imc_state(key, mc, agent_state, env_state):
+    """Build an Imc.State for evaluation."""
+    mc_state = mc.init(key, env_state)
+    return Imc.State(mc=mc_state, agent=agent_state)
 
-    config = tabular.garnet.Config(
-        state_size=5, action_size=2, max_episode_len=10
-    )
-    env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=5, env=env)
-    imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=3)
-
-    state = evaluator.init(key)
-
-    assert state.step == 0
+# =============================================================================
+# Sample Eval Tests
+# =============================================================================
 
 
 def test_sample_deterministic_one_step_goal():
@@ -76,42 +69,18 @@ def test_sample_deterministic_one_step_goal():
     mc = Mc(max_episode_len=10, queue_size=20, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=5)
+    evaluator = SampleEval(imc=imc, episode_len=50)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert jnp.allclose(metrics.avg_eps_len, 1.0, atol=0.1)
     assert jnp.allclose(metrics.avg_eps_rew, 1.0, atol=0.1)
     assert metrics.n_episodes >= 5
-
-
-def test_sample_step_counter_increments():
-    """Step counter advances after each metric call."""
-    key = jax.random.PRNGKey(12)
-
-    config = tabular.garnet.Config(
-        state_size=5, action_size=2, max_episode_len=10
-    )
-    env = tabular.garnet.make(config)
-
-    mc = Mc(max_episode_len=10, queue_size=5, env=env)
-    imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=2)
-
-    init_key, env_key = jrd.split(key)
-    env_state = env.init(env_key)
-    state = evaluator.init(init_key)
-    agent_state = GoRightAgent.State(key=key)
-
-    state, _ = evaluator.metric(state, agent_state, env_state)
-    assert state.step == 1
-
-    state, _ = evaluator.metric(state, agent_state, env_state)
-    assert state.step == 2
 
 
 def test_sample_truncation_rate_dead_end():
@@ -128,19 +97,20 @@ def test_sample_truncation_rate_dead_end():
 
     mc = Mc(max_episode_len=5, queue_size=20, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=4)
+    evaluator = SampleEval(imc=imc, episode_len=20)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoLeftAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert jnp.allclose(metrics.trun_rate, 1.0, atol=0.01)
 
 
-def test_sample_multi_env_more_episodes():
-    """Multiple environments collect more episodes than a single one."""
+def test_sample_more_episodes_gives_more_data():
+    """More n_episodes collects more completed episodes."""
     key = jax.random.PRNGKey(14)
 
     config = tabular.gridworld.Config(
@@ -150,24 +120,24 @@ def test_sample_multi_env_more_episodes():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=10, env=env)
+    mc = Mc(max_episode_len=10, queue_size=20, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
-    eval_1 = SampleEval(imc=imc, n_episodes=3, n_envs=1)
-    eval_4 = SampleEval(imc=imc, n_episodes=3, n_envs=4)
+    eval_short = SampleEval(imc=imc, episode_len=30)
+    eval_long = SampleEval(imc=imc, episode_len=100)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key1, mc_key2 = jrd.split(key, 3)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
 
-    state_1 = eval_1.init(init_key)
-    _, metrics_1 = eval_1.metric(state_1, agent_state, env_state)
+    imc_state_1 = _make_eval_imc_state(mc_key1, mc, agent_state, env_state)
+    metrics_short = eval_short.metric(imc_state_1)
 
-    state_4 = eval_4.init(init_key)
-    _, metrics_4 = eval_4.metric(state_4, agent_state, env_state)
+    imc_state_2 = _make_eval_imc_state(mc_key2, mc, agent_state, env_state)
+    metrics_long = eval_long.metric(imc_state_2)
 
-    assert metrics_4.n_episodes >= metrics_1.n_episodes
+    assert metrics_long.n_episodes >= metrics_short.n_episodes
 
 
 def test_sample_jit_compilation():
@@ -181,22 +151,21 @@ def test_sample_jit_compilation():
 
     mc = Mc(max_episode_len=10, queue_size=5, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=2)
+    evaluator = SampleEval(imc=imc, episode_len=20)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
 
     jit_metric = jax.jit(evaluator.metric)
-    state, metrics = jit_metric(state, agent_state, env_state)
+    metrics = jit_metric(imc_state)
 
-    assert state.step == 1
     assert metrics.avg_eps_rew.shape == ()
 
 
 def test_sample_key_determinism():
-    """Same key produces identical metrics."""
+    """Same imc_state produces identical metrics."""
     key = jax.random.PRNGKey(16)
 
     config = tabular.garnet.Config(
@@ -206,17 +175,15 @@ def test_sample_key_determinism():
 
     mc = Mc(max_episode_len=10, queue_size=5, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=2)
+    evaluator = SampleEval(imc=imc, episode_len=20)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
 
-    state_a = evaluator.init(init_key)
-    _, metrics_a = evaluator.metric(state_a, agent_state, env_state)
-
-    state_b = evaluator.init(init_key)
-    _, metrics_b = evaluator.metric(state_b, agent_state, env_state)
+    metrics_a = evaluator.metric(imc_state)
+    metrics_b = evaluator.metric(imc_state)
 
     assert jnp.array_equal(metrics_a.avg_eps_rew, metrics_b.avg_eps_rew)
     assert jnp.array_equal(metrics_a.avg_eps_len, metrics_b.avg_eps_len)
@@ -240,13 +207,14 @@ def test_sample_truncation_rate_zero_when_all_terminate():
 
     mc = Mc(max_episode_len=10, queue_size=20, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=5)
+    evaluator = SampleEval(imc=imc, episode_len=50)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert jnp.allclose(metrics.trun_rate, 0.0, atol=0.01)
 
@@ -265,13 +233,14 @@ def test_sample_dead_end_episode_length_equals_max():
 
     mc = Mc(max_episode_len=max_len, queue_size=20, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=3)
+    evaluator = SampleEval(imc=imc, episode_len=max_len * 3)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoLeftAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert jnp.allclose(metrics.avg_eps_len, max_len, atol=0.1)
 
@@ -289,13 +258,14 @@ def test_sample_std_zero_for_identical_episodes():
 
     mc = Mc(max_episode_len=10, queue_size=20, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=5)
+    evaluator = SampleEval(imc=imc, episode_len=50)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert jnp.allclose(metrics.std_eps_rew, 0.0, atol=1e-5)
     assert jnp.allclose(metrics.min_eps_rew, metrics.max_eps_rew, atol=1e-5)
@@ -315,13 +285,14 @@ def test_sample_queue_overflow_keeps_recent():
 
     mc = Mc(max_episode_len=10, queue_size=3, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=10)
+    evaluator = SampleEval(imc=imc, episode_len=100)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     # Queue is full (3 entries), no NaN — all episodes have reward 1
     assert metrics.n_episodes == 3
@@ -400,9 +371,9 @@ def test_sample_done_count_matches_expected():
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
-    evaluator = SampleEval(imc=imc, n_episodes=5)
+    evaluator = SampleEval(imc=imc, episode_len=50)
 
-    # The rollout runs for max_episode_len * n_episodes = 10 * 5 = 50 steps
+    # The rollout runs for episode_len = 50 steps
     # Each episode is 1 step, so done_count should be 50
     init_key, env_key, agent_key = jrd.split(key, 3)
     env_state = env.init(env_key)
@@ -427,13 +398,14 @@ def test_sample_metrics_all_scalar():
 
     mc = Mc(max_episode_len=10, queue_size=5, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, n_episodes=2)
+    evaluator = SampleEval(imc=imc, episode_len=20)
 
-    init_key, env_key = jrd.split(key)
+    env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
-    state = evaluator.init(init_key)
     agent_state = GoRightAgent.State(key=key)
-    state, metrics = evaluator.metric(state, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+
+    metrics = evaluator.metric(imc_state)
 
     assert metrics.avg_eps_rew.shape == ()
     assert metrics.avg_eps_len.shape == ()
@@ -442,4 +414,3 @@ def test_sample_metrics_all_scalar():
     assert metrics.max_eps_rew.shape == ()
     assert metrics.n_episodes.shape == ()
     assert metrics.trun_rate.shape == ()
-    assert metrics.iteration == 1
