@@ -90,6 +90,8 @@ class Sweep:
 
         state_indices = jnp.tile(jnp.arange(S), A)
         init_dists = jax.nn.one_hot(state_indices, S)
+        chex.assert_shape(state_indices, (A * S,))
+        chex.assert_shape(init_dists, (A * S, S))
 
         def condition_env_state(init_dist: chex.Array) -> Env.State:
             new_mdp = self._condition_mdp_initial(env.mdp, init_dist)
@@ -100,4 +102,5 @@ class Sweep:
         keys = jrd.split(key, A * S)
         mc_state = jax.vmap(self.mc.init)(keys, conditioned_env_states)
         init_action = jnp.arange(A * S) // S
+        chex.assert_shape(init_action, (A * S,))
         return jax.vmap(self.mc.sample)(init_action, mc_state)

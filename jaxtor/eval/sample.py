@@ -93,6 +93,7 @@ class Eval:
 
         def step_fn(carry, _):
             transition, imc_state = self.imc.sample(carry.imc)
+            chex.assert_equal_shape([transition.term, transition.trun])
             done = jnp.logical_or(transition.term, transition.trun)
             return (
                 carry.replace(

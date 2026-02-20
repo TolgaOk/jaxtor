@@ -111,6 +111,9 @@ class Eval:
         new_q = self.agent.q_vals(agent_state, all_states)
         prev_q = self.agent.q_vals(state.prev_agent, all_states)
 
+        chex.assert_rank([new_q, prev_q], 2)
+        chex.assert_equal_shape([new_q, prev_q, opt_q])
+
         non_term = (1 - self.mdp.terminal)[None, :]  # (1, S)
         n_non_term = jnp.sum(non_term)
 

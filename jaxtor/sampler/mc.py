@@ -125,6 +125,10 @@ class Mc(Generic[EnvState]):
         """
         key, step_key, reset_key = jrd.split(state.key, 3)
         result, env_state = self.env.step(step_key, act, state.env)
+
+        chex.assert_rank([result.rew, result.term, result.trun], 0)
+        chex.assert_equal_shape([state.last_obs, result.nobs])
+
         trun = jnp.logical_or(result.trun, state.eps_idx == self.max_episode_len - 1)
 
         transition = self.Transition(
@@ -266,6 +270,7 @@ class VecMc(Generic[EnvState]):
         Returns:
             Batched transitions and updated batched state.
         """
+        chex.assert_equal_shape_prefix([act, state.key], 1)
         return jax.vmap(self.mc.sample)(act, state)
 
     def metrics(self, state: Mc.State) -> tuple[Mc.Metrics, Mc.State]:
