@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "chex>=0.1.91",
-    "distrax>=0.1.7",
     "jax>=0.8.0",
     "jaxtyping>=0.3.3",
 ]
@@ -30,6 +29,12 @@ dev = [
 ]
 gpu = [
     "jax[cuda12]>=0.8.0",
+]
+example = [
+    "equinox>=0.13.4",
+    "gymnax>=0.0.9",
+    "rlax>=0.1.8",
+    "tyro>=1.0.6",
 ]
 jaxdp = [
     "jaxdp @ git+https://github.com/TolgaOk/jaxdp",
