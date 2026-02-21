@@ -237,3 +237,160 @@ def test_action_coverage_with_random_policy():
 
     assert bool(jnp.all(action_counts >= min_threshold))
     assert bool(jnp.all(action_counts < num_steps * 0.5))
+
+
+# =============================================================================
+# VecMc + Vector Observations Tests
+# =============================================================================
+
+
+class VectorObsEnv:
+    """Fake environment with vector observations."""
+
+    def __init__(self, obs_dim: int = 4, action_size: int = 2):
+        self.obs_dim = obs_dim
+        self.action_size = action_size
+
+    @dataclass
+    class State:
+        key: chex.PRNGKey
+
+    @dataclass
+    class Step:
+        nobs: chex.Array
+        rew: chex.Numeric
+        term: chex.Numeric
+        trun: chex.Numeric
+
+    def init(self, key):
+        return self.State(key=key)
+
+    def reset(self, key, state):
+        obs = jax.random.normal(key, (self.obs_dim,))
+        return obs, state.replace(key=key)
+
+    def step(self, key, act, state):
+        k1, k2 = jax.random.split(key)
+        nobs = jax.random.normal(k1, (self.obs_dim,))
+        return (
+            self.Step(
+                nobs=nobs,
+                rew=jnp.float32(0.0),
+                term=jnp.bool_(False),
+                trun=jnp.bool_(False),
+            ),
+            state.replace(key=k2),
+        )
+
+
+class VecObsAgent:
+    """Agent that handles vector observations, returns scalar action per env."""
+
+    def __init__(self, action_size: int = 2):
+        self.action_size = action_size
+
+    @dataclass
+    class State:
+        key: chex.PRNGKey
+
+    def act(self, obs, state):
+        key, subkey = jax.random.split(state.key)
+        batch_shape = obs.shape[:-1]
+        action = jax.random.randint(subkey, batch_shape, 0, self.action_size)
+        return action, state.replace(key=key)
+
+
+def test_vecmc_vector_obs_single_step():
+    """Test Imc with VecMc and vector observations."""
+    key = jax.random.PRNGKey(0)
+    n_env = 4
+    obs_dim = 4
+
+    env = VectorObsEnv(obs_dim=obs_dim, action_size=2)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler)
+    agent = VecObsAgent(action_size=2)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
+
+    key, env_key = jax.random.split(key)
+    env_state = env.init(env_key)
+    mc_keys = jax.random.split(key, n_env)
+    mc_state = vec_mc.init(mc_keys, env_state)
+
+    key, agent_key = jax.random.split(key)
+    agent_state = VecObsAgent.State(key=agent_key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
+
+    transition, next_state = imc_step.sample(state)
+
+    assert transition.obs.shape == (n_env, obs_dim)
+    assert transition.act.shape == (n_env,)
+    assert transition.rew.shape == (n_env,)
+    assert transition.nobs.shape == (n_env, obs_dim)
+
+
+def test_vecmc_vector_obs_jit():
+    """Verify Imc with VecMc and vector observations works under JIT."""
+    key = jax.random.PRNGKey(1)
+    n_env = 4
+    obs_dim = 4
+
+    env = VectorObsEnv(obs_dim=obs_dim, action_size=2)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler)
+    agent = VecObsAgent(action_size=2)
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
+
+    key, env_key = jax.random.split(key)
+    env_state = env.init(env_key)
+    mc_keys = jax.random.split(key, n_env)
+    mc_state = vec_mc.init(mc_keys, env_state)
+
+    key, agent_key = jax.random.split(key)
+    agent_state = VecObsAgent.State(key=agent_key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
+
+    jit_sample = jax.jit(imc_step.sample)
+    transition, next_state = jit_sample(state)
+
+    assert transition.obs.shape == (n_env, obs_dim)
+    assert transition.act.shape == (n_env,)
+
+
+# =============================================================================
+# Chex Shape Assertion Tests
+# =============================================================================
+
+
+class WrongBatchAgent:
+    """Agent that returns action with mismatched batch dimension."""
+
+    @dataclass
+    class State:
+        key: chex.PRNGKey
+
+    def act(self, obs, state):
+        return jnp.zeros(3), state
+
+
+def test_chex_imc_mismatched_batch_action():
+    """Assert Imc raises on mismatched batch dimension between obs and action."""
+    key = jax.random.PRNGKey(0)
+    n_env = 4
+
+    env = VectorObsEnv(obs_dim=4, action_size=2)
+    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
+    vec_mc = mc.VecMc(mc=mc_sampler)
+    agent = WrongBatchAgent()
+    imc_step = imc.Imc(agent=agent, mc=vec_mc)
+
+    key, env_key = jax.random.split(key)
+    env_state = env.init(env_key)
+    mc_keys = jax.random.split(key, n_env)
+    mc_state = vec_mc.init(mc_keys, env_state)
+
+    agent_state = WrongBatchAgent.State(key=key)
+    state = imc.Imc.State(mc=mc_state, agent=agent_state)
+
+    with pytest.raises(AssertionError):
+        imc_step.sample(state)

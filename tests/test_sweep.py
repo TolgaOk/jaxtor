@@ -1,10 +1,13 @@
-"""Tests for stochastic sweep sampler."""
+"""Tests for stochastic sweep sampler and expected sweep."""
 
+import chex
 import jax
 import jax.numpy as jnp
 import pytest
+from chex import dataclass
 from jaxtor.env import tabular
 from jaxtor.sampler import mc, sweep
+from jaxtor.sampler.exp_sweep import ExpSweep
 
 
 # ============================================================================
@@ -399,3 +402,58 @@ def test_sweep_larger_env(garnet_env):
     expected_actions = jnp.arange(A * S) // S
     assert jnp.array_equal(transition.obs, expected_states)
     assert jnp.array_equal(transition.act, expected_actions)
+
+
+# ============================================================================
+# ExpSweep Chex Shape Assertion Tests
+# ============================================================================
+
+
+@dataclass
+class FakeMDP:
+    transition: chex.Array
+
+
+def test_chex_exp_sweep_wrong_rank_q():
+    """Assert ExpSweep.backward raises when q_arr has wrong rank."""
+    A, S = 3, 5
+    exp = ExpSweep(n_step=3)
+    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
+    mu = jnp.ones((A, S)) / A
+
+    with pytest.raises(AssertionError):
+        exp.backward(jnp.ones((A,)), mdp, mu)
+
+
+def test_chex_exp_sweep_wrong_rank_mu():
+    """Assert ExpSweep.forward raises when mu has wrong rank."""
+    A, S = 3, 5
+    exp = ExpSweep(n_step=3)
+    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
+    q = jnp.ones((A, S))
+
+    with pytest.raises(AssertionError):
+        exp.forward(q, mdp, jnp.ones((A * S,)))
+
+
+def test_chex_exp_sweep_shape_mismatch_q_mu():
+    """Assert ExpSweep.backward raises when q_arr and mu have different shapes."""
+    A, S = 3, 5
+    exp = ExpSweep(n_step=3)
+    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
+    mu = jnp.ones((A, S)) / A
+
+    with pytest.raises(AssertionError):
+        exp.backward(jnp.ones((A + 1, S)), mdp, mu)
+
+
+def test_chex_exp_sweep_transition_dim_mismatch():
+    """Assert ExpSweep.backward raises when transition dims don't match q_arr."""
+    A, S = 3, 5
+    exp = ExpSweep(n_step=3)
+    mdp = FakeMDP(transition=jnp.ones((A, S + 1, S)))
+    mu = jnp.ones((A, S)) / A
+    q = jnp.ones((A, S))
+
+    with pytest.raises(AssertionError):
+        exp.backward(q, mdp, mu)

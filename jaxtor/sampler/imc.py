@@ -6,8 +6,7 @@ induced by the agent-environment interaction.
 Example:
     >>> mc = Mc(max_episode_len=100, queue_size=10, env=env)
     >>> imc = Imc(agent=agent, mc=mc)
-    >>> mc_state = mc.init(key, env.init(key))
-    >>> state = Imc.State(mc=mc_state, agent=agent_state)
+    >>> state = Imc.State(mc=mc.init(key, env_state), agent=agent_state)
     >>> transition, state = imc.sample(state)
 """
 
@@ -18,11 +17,10 @@ from typing import Protocol, TypeVar
 import chex
 from chex import dataclass
 
-EnvState = TypeVar("EnvState")
 Transition = TypeVar("Transition")
 
 
-class MC(Protocol[EnvState, Transition]):
+class MC(Protocol[Transition]):
     class State(Protocol):
         last_obs: chex.Array
 
@@ -66,6 +64,18 @@ class Imc:
 
         mc: MC.State
         agent: Agent.State
+
+    def init(self, mc: MC.State, agent: Agent.State) -> Imc.State:
+        """Initialize the induced Markov chain state.
+
+        Args:
+            mc: Pre-initialized Markov chain state.
+            agent: Pre-initialized agent state.
+
+        Returns:
+            Initialized Imc state.
+        """
+        return self.State(mc=mc, agent=agent)
 
     def sample(
         self,

@@ -1,54 +1,51 @@
-"""Jaxdp tabular environment utilities.
+"""Tabular MDP environment.
 
-Provides an interface for jaxdp tabular MDP environments.
+Index-based interface for jaxdp tabular MDPs (no one-hot encoding).
 
-
->>> import jax
->>> from jaxtor.env import tabular
->>> key = jax.random.PRNGKey(0)
->>> config = tabular.garnet.Config(state_size=50, action_size=10)
->>> env = tabular.garnet.make(config)
->>> init_key, reset_key = jax.random.split(key)
->>> state = env.init(init_key)
->>> obs, state = env.reset(reset_key, state)
-
+Example:
+    >>> import jax
+    >>> from jaxtor.env import tabular
+    >>> key = jax.random.PRNGKey(0)
+    >>> config = tabular.garnet.Config(state_size=50, action_size=10)
+    >>> env = tabular.garnet.make(config)
+    >>> init_key, reset_key = jax.random.split(key)
+    >>> state = env.init(init_key)
+    >>> obs, state = env.reset(reset_key, state)
 """
 
 from __future__ import annotations
 
 from typing import Protocol
+
 import jax.numpy as jnp
+import jax.random as jrd
 import chex
 from chex import dataclass
-import jax
 from jaxdp.mdp import MDP as JaxdpMDP
 from jaxdp.mdp.garnet import garnet_mdp
 from jaxdp.mdp.simple_graph import graph_mdp as jaxdp_graph_mdp
 from jaxdp.mdp.grid_world import grid_world
-from jaxdp import async_sample_step
 
 
-@dataclass
-class TabularSpace:
-    shape: tuple[int]
-    low: chex.Array
-    high: chex.Array
+def _sample_transition(
+    key: chex.PRNGKey, mdp: JaxdpMDP, s: chex.Numeric, a: chex.Numeric
+) -> tuple[chex.Numeric, chex.Numeric, chex.Numeric]:
+    """Sample transition from MDP using indices.
 
+    Args:
+        key: Random key.
+        mdp: MDP with transition[A, S', S] and reward[A, S, S'].
+        s: Current state index.
+        a: Action index.
 
-@dataclass
-class TabularState:
-    mdp: JaxdpMDP
-    last_state: chex.Array
-    step: chex.Numeric
-    max_episode_len: chex.Numeric
-
-
-@dataclass
-class Step:
-    nobs: chex.Numeric
-    rew: chex.Numeric
-    term: chex.Numeric
-    trun: chex.Numeric
+    Returns:
+        (next_state, reward, terminal) tuple.
+    """
+    probs = mdp.transition[a, :, s]
+    s_next = jrd.choice(key, mdp.state_size, p=probs)
+    rew = mdp.reward[a, s, s_next]
+    term = mdp.terminal[s_next]
+    return s_next, rew, term
 
 
 class ConfigProtocol(Protocol):
@@ -61,89 +58,110 @@ class ConfigProtocol(Protocol):
 
 @dataclass
 class TabularEnv:
-    obs_space: TabularSpace
-    act_space: TabularSpace
+    """Index-based tabular MDP environment.
+
+    Attributes:
+        config: MDP configuration following ConfigProtocol.
+    """
+
+    @dataclass
+    class State:
+        """Environment state.
+
+        Attributes:
+            mdp: Underlying jaxdp MDP instance.
+            s: Current state index.
+            step: Current step within the episode.
+            max_episode_len: Maximum episode length before truncation.
+        """
+
+        mdp: JaxdpMDP
+        s: chex.Numeric
+        step: chex.Numeric
+        max_episode_len: chex.Numeric
+
+    @dataclass
+    class Step:
+        """Single-step transition result.
+
+        Attributes:
+            nobs: Next observation (state index).
+            rew: Reward.
+            term: Natural termination flag.
+            trun: Truncation flag.
+        """
+
+        nobs: chex.Numeric
+        rew: chex.Numeric
+        term: chex.Numeric
+        trun: chex.Numeric
+
     config: ConfigProtocol
 
     def step(
-        self, key: chex.PRNGKey, act: chex.Numeric, state: TabularState
-    ) -> tuple[Step, TabularState]:
-        """Step the tabular environment.
+        self, key: chex.PRNGKey, act: chex.Numeric, state: State
+    ) -> tuple[Step, State]:
+        """Step the environment.
 
         Args:
-            key: JAX random key.
-            act: One-hot encoded action.
-            state: Current tabular state.
+            key: Random key.
+            act: Action index.
+            state: Current state.
 
         Returns:
-            Step and next state.
+            Step result and next state.
         """
-        chex.assert_rank(act, 0)
-        (
-            next_obs,
-            reward,
-            terminal,
-            timeout,
-            last_state,
-            new_eps_step,
-        ) = async_sample_step(
-            state.mdp,
-            jax.nn.one_hot(act, state.mdp.action_size),
-            state.last_state,
-            state.step,  # type: ignore[arg-type]
-            state.max_episode_len,  # type: ignore[arg-type]
-            key,
-        )
+        s_next, rew, term = _sample_transition(key, state.mdp, state.s, act)
+        trun = state.step >= state.max_episode_len - 1
+        new_state = state.replace(s=s_next, step=state.step + 1)  # type: ignore[attr-defined]
         return (
-            Step(
-                nobs=jnp.argmax(next_obs),
-                rew=reward,
-                term=terminal,
-                trun=timeout,
-            ),
-            state.replace(  # type: ignore[attr-defined]
-                last_state=last_state,
-                step=new_eps_step,
-            ),
+            TabularEnv.Step(nobs=s_next, rew=rew, term=term, trun=trun),
+            new_state,
         )
 
-    def init(self, key: chex.PRNGKey) -> TabularState:
-        """Initialize the tabular environment state.
+    def init(self, key: chex.PRNGKey) -> TabularEnv.State:
+        """Initialize the environment state.
 
         Args:
-            key: JAX random key for MDP initialization.
+            key: Random key for MDP initialization.
 
         Returns:
-            Tabular state with initialized MDP.
+            Initialized state.
         """
         mdp = self.config.init_mdp(key)
-        return TabularState(
+        return TabularEnv.State(
             mdp=mdp,
-            last_state=jnp.full(mdp.state_size, jnp.nan),
+            s=jnp.array(-1),
             step=jnp.array(0),
             max_episode_len=jnp.array(self.config.max_episode_len),
         )
 
-    def reset(
-        self, key: chex.PRNGKey, state: TabularState
-    ) -> tuple[chex.Numeric, TabularState]:
-        """Reset the environment to start a new episode.
+    def obs(self, state: TabularEnv.State) -> chex.Numeric:
+        """Get observation from state.
 
         Args:
-            key: JAX random key for sampling initial state.
-            state: Current tabular state.
+            state: Current state.
+
+        Returns:
+            State index.
+        """
+        return state.s
+
+    def reset(
+        self, key: chex.PRNGKey, state: TabularEnv.State
+    ) -> tuple[chex.Numeric, TabularEnv.State]:
+        """Reset to a new episode.
+
+        Args:
+            key: Random key for sampling initial state.
+            state: Current state.
 
         Returns:
             Initial observation and reset state.
         """
-        initial_state = state.mdp.init_state(key)
-        return (
-            jnp.argmax(initial_state),
-            state.replace(
-                last_state=initial_state,
-                step=jnp.array(0),
-            ),
-        )
+        s = jrd.choice(key, state.mdp.state_size, p=state.mdp.initial)
+        new_state = state.replace(s=s, step=jnp.array(0))  # type: ignore[attr-defined]
+        return (s, new_state)
 
 
 class garnet:
@@ -190,19 +208,7 @@ class garnet:
         Returns:
             TabularEnv instance.
         """
-        return TabularEnv(
-            obs_space=TabularSpace(
-                shape=(config.state_size,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            act_space=TabularSpace(
-                shape=(config.action_size,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            config=config,
-        )
+        return TabularEnv(config=config)
 
 
 class graph:
@@ -235,19 +241,7 @@ class graph:
         Returns:
             TabularEnv instance.
         """
-        return TabularEnv(
-            obs_space=TabularSpace(
-                shape=(6,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            act_space=TabularSpace(
-                shape=(6,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            config=config,
-        )
+        return TabularEnv(config=config)
 
 
 class gridworld:
@@ -302,18 +296,4 @@ class gridworld:
         Returns:
             TabularEnv instance.
         """
-        temp_mdp = grid_world(board=config.board, p_slip=config.p_slip)
-
-        return TabularEnv(
-            obs_space=TabularSpace(
-                shape=(temp_mdp.state_size,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            act_space=TabularSpace(
-                shape=(temp_mdp.action_size,),
-                low=jnp.array(0.0),
-                high=jnp.array(1.0),
-            ),
-            config=config,
-        )
+        return TabularEnv(config=config)

@@ -4,7 +4,7 @@ Provides environment wrappers for transition collection with episode statistics.
 
 Classes:
     Mc: Single-environment sampler with episode tracking.
-    VecMC: Vectorized sampler for multiple parallel environments.
+    VecMc: Vectorized sampler for multiple parallel environments.
 
 Example:
     >>> mc_sampler = Mc(max_episode_len=100, queue_size=10, env=env)
@@ -12,8 +12,9 @@ Example:
     >>> state = mc_sampler.init(key, env_state)
     >>> transition, state = mc_sampler.sample(action, state)
 
-    >>> vec_mc = VecMC(mc=mc_sampler, n_env=4)
-    >>> state = vec_mc.init(key, env_state)
+    >>> vec_mc = VecMc(mc=mc_sampler)
+    >>> keys = jax.random.split(key, 4)
+    >>> state = vec_mc.init(keys, env_state)
     >>> transition, state = vec_mc.sample(batched_actions, state)
 """
 
@@ -124,6 +125,10 @@ class Mc(Generic[EnvState]):
         """
         key, step_key, reset_key = jrd.split(state.key, 3)
         result, env_state = self.env.step(step_key, act, state.env)
+
+        chex.assert_rank([result.rew, result.term, result.trun], 0)
+        chex.assert_equal_shape([state.last_obs, result.nobs])
+
         trun = jnp.logical_or(result.trun, state.eps_idx == self.max_episode_len - 1)
 
         transition = self.Transition(
@@ -225,4 +230,63 @@ class Mc(Generic[EnvState]):
             eps_rew=0.0,
             eps_rew_queue=jnp.full(self.queue_size, jnp.nan),
             eps_len_queue=jnp.full(self.queue_size, jnp.nan),
+        )
+
+
+@dataclass
+class VecMc(Generic[EnvState]):
+    """Vectorized Markov chain sampler.
+
+    Wraps Mc with internal vmap for parallel environment sampling.
+    Plugs directly into Imc and Roll without external vmap.
+
+    Attributes:
+        mc: Single-environment Mc sampler.
+    """
+
+    mc: Mc
+
+    def init(self, keys: chex.Array, env: EnvState) -> Mc.State:
+        """Initialize parallel sampler states.
+
+        Args:
+            keys: Batch of random keys with shape (n_env, ...).
+            env: Pre-initialized environment state (broadcast to all envs).
+
+        Returns:
+            Batched Mc.State with leading dimension n_env.
+        """
+        return jax.vmap(self.mc.init, in_axes=(0, None))(keys, env)
+
+    def sample(
+        self, act: chex.Array, state: Mc.State
+    ) -> tuple[Mc.Transition, Mc.State]:
+        """Sample transitions from all environments in parallel.
+
+        Args:
+            act: Batched actions with shape (n_env, ...).
+            state: Batched Mc.State.
+
+        Returns:
+            Batched transitions and updated batched state.
+        """
+        chex.assert_equal_shape_prefix([act, state.key], 1)
+        return jax.vmap(self.mc.sample)(act, state)
+
+    def metrics(self, state: Mc.State) -> tuple[Mc.Metrics, Mc.State]:
+        """Aggregate metrics across all environments and refresh queues.
+
+        Args:
+            state: Batched Mc.State.
+
+        Returns:
+            Aggregated metrics (scalar) and updated batched state.
+        """
+        per_env, state = jax.vmap(self.mc.metrics)(state)
+        return (
+            Mc.Metrics(
+                avg_eps_rew=jnp.nanmean(per_env.avg_eps_rew),
+                avg_eps_len=jnp.nanmean(per_env.avg_eps_len),
+            ),
+            state,
         )

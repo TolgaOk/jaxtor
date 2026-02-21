@@ -59,6 +59,13 @@ class ExpSweep:
             Shape: (n_step, A, S)
         """
 
+        chex.assert_rank([q_arr, mu], 2)
+        chex.assert_rank(mdp.transition, 3)
+        chex.assert_equal_shape([q_arr, mu])
+        chex.assert_axis_dimension(mdp.transition, 0, q_arr.shape[0])
+        chex.assert_axis_dimension(mdp.transition, 1, q_arr.shape[1])
+        chex.assert_axis_dimension(mdp.transition, 2, q_arr.shape[1])
+
         def _scan_body(carry, _):
             prop_arr = jnp.einsum("axs,ux,ux->as", mdp.transition, mu, carry)
             return prop_arr, prop_arr
@@ -97,6 +104,13 @@ class ExpSweep:
             Trajectory of distributions from step 0 to step n_step-1.
             Shape: (n_step, A, S)
         """
+
+        chex.assert_rank([pi_arr, mu], 2)
+        chex.assert_rank(mdp.transition, 3)
+        chex.assert_equal_shape([pi_arr, mu])
+        chex.assert_axis_dimension(mdp.transition, 0, pi_arr.shape[0])
+        chex.assert_axis_dimension(mdp.transition, 1, pi_arr.shape[1])
+        chex.assert_axis_dimension(mdp.transition, 2, pi_arr.shape[1])
 
         def _scan_body(carry, _):
             prop_arr = jnp.einsum("as,axs,ux->ux", carry, mdp.transition, mu)
