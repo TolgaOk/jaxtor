@@ -24,6 +24,26 @@ from jaxdp.base import greedy_policy, policy_evaluation
 from jaxdp.mdp import MDP
 
 
+def optimal_q(mdp: MDP, gamma: float, n_iters: int = 20) -> chex.Array:
+    """Compute optimal Q-values via policy iteration.
+
+    Alternates greedy policy extraction and exact policy evaluation
+    for n_iters steps, converging to Q*.
+
+    Args:
+        mdp: Tabular MDP instance.
+        gamma: Discount factor.
+        n_iters: Number of policy iteration steps.
+
+    Returns:
+        Optimal Q-values with shape (A, S).
+    """
+    q = jnp.zeros((mdp.action_size, mdp.state_size))
+    for _ in range(n_iters):
+        q = policy_evaluation.q(mdp, greedy_policy.q(q), gamma)
+    return q
+
+
 class Agent(Protocol):
     class State(Protocol): ...
 
@@ -58,6 +78,17 @@ class Eval:
 
         prev_agent: Agent.State
         step: int
+
+    def init(self, agent_state: Agent.State) -> Eval.State:
+        """Initialize the evaluator state.
+
+        Args:
+            agent_state: Initial agent state used as the baseline for diffs.
+
+        Returns:
+            Initialized evaluator state.
+        """
+        return self.State(prev_agent=agent_state, step=0)
 
     @dataclass
     class Metrics:
@@ -96,7 +127,7 @@ class Eval:
         state: Eval.State,
         opt_q: chex.Array,
         agent_state: Agent.State,
-    ) -> tuple[Eval.State, Eval.Metrics]:
+    ) -> tuple[Eval.Metrics, Eval.State]:
         """Compute convergence metrics for the current agent state.
 
         Args:
@@ -105,7 +136,7 @@ class Eval:
             agent_state: Current agent state to evaluate.
 
         Returns:
-            Updated evaluator state and computed metrics.
+            Computed metrics and updated evaluator state.
         """
         all_states = jnp.arange(self.mdp.state_size)
         new_q = self.agent.q_vals(agent_state, all_states)
@@ -146,7 +177,6 @@ class Eval:
         pi_eval_rho = jnp.sum(self.mdp.initial * greedy_v)
 
         return (
-            state.replace(step=state.step + 1, prev_agent=agent_state),
             Eval.Metrics(
                 diff_l1=diff_l1,
                 diff_linf=diff_linf,
@@ -161,4 +191,5 @@ class Eval:
                 pi_diff_linf=pi_diff_linf,
                 iteration=state.step + 1,
             ),
+            state.replace(step=state.step + 1, prev_agent=agent_state),
         )
