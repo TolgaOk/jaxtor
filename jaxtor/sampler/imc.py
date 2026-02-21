@@ -65,6 +65,18 @@ class Imc:
         mc: MC.State
         agent: Agent.State
 
+    def init(self, mc: MC.State, agent: Agent.State) -> Imc.State:
+        """Initialize the induced Markov chain state.
+
+        Args:
+            mc: Pre-initialized Markov chain state.
+            agent: Pre-initialized agent state.
+
+        Returns:
+            Initialized Imc state.
+        """
+        return self.State(mc=mc, agent=agent)
+
     def sample(
         self,
         state: Imc.State,
