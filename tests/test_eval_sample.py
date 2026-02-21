@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import jax.random as jrd
 from chex import dataclass
 from jaxtor.env import tabular
-from jaxtor.eval.sample import Eval as SampleEval
+from jaxtor.eval.mc import Eval as SampleEval
 from jaxtor.sampler.mc import Mc
 from jaxtor.sampler.imc import Imc
 
