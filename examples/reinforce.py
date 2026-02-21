@@ -36,7 +36,7 @@ from rich import print
 from rich.progress import track
 
 from jaxtor.env.gymnax import make
-from jaxtor.eval.sample import Eval as Evaluator
+from jaxtor.eval.mc import Eval as Evaluator
 from jaxtor.sampler import Mc, VecMc, Imc, Roll
 
 
