@@ -4,7 +4,7 @@ Provides environment wrappers for transition collection with episode statistics.
 
 Classes:
     Mc: Single-environment sampler with episode tracking.
-    VecMC: Vectorized sampler for multiple parallel environments.
+    VecMc: Vectorized sampler for multiple parallel environments.
 
 Example:
     >>> mc_sampler = Mc(max_episode_len=100, queue_size=10, env=env)
@@ -12,7 +12,7 @@ Example:
     >>> state = mc_sampler.init(key, env_state)
     >>> transition, state = mc_sampler.sample(action, state)
 
-    >>> vec_mc = VecMC(mc=mc_sampler)
+    >>> vec_mc = VecMc(mc=mc_sampler)
     >>> keys = jax.random.split(key, 4)
     >>> state = vec_mc.init(keys, env_state)
     >>> transition, state = vec_mc.sample(batched_actions, state)
