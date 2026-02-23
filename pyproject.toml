@@ -10,7 +10,6 @@ requires-python = ">=3.13"
 dependencies = [
     "chex>=0.1.91",
     "jax>=0.8.0",
-    "jaxdp @ git+https://github.com/TolgaOk/jaxdp",
     "jaxtyping>=0.3.3",
 ]
 
@@ -25,6 +24,12 @@ allow-direct-references = true
 packages = ["jaxtor"]
 
 [dependency-groups]
+env = [
+    "distrax>=0.1.7",
+    "gymnasium[mujoco]>=1.2.3",
+    "gymnax>=0.0.9",
+    "jaxdp",
+]
 dev = [
     "pyright>=1.1.407",
     "pytest>=9.0.1",
@@ -49,3 +54,6 @@ markers = [
 
 [tool.ruff]
 line-length = 88
+
+[tool.uv.sources]
+jaxdp = { git = "https://github.com/TolgaOk/jaxdp", rev = "v0.3.0" }

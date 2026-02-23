@@ -238,7 +238,6 @@ class VecMc(Generic[EnvState]):
     """Vectorized Markov chain sampler.
 
     Wraps Mc with internal vmap for parallel environment sampling.
-    Plugs directly into Imc and Roll without external vmap.
 
     Attributes:
         mc: Single-environment Mc sampler.
