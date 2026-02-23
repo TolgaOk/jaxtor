@@ -496,6 +496,7 @@ env = [
 example = [
     { name = "equinox" },
     { name = "gymnax" },
+    { name = "optax" },
     { name = "rich" },
     { name = "rlax" },
     { name = "tyro" },
@@ -523,6 +524,7 @@ env = [
 example = [
     { name = "equinox", specifier = ">=0.13.4" },
     { name = "gymnax", specifier = ">=0.0.9" },
+    { name = "optax", specifier = ">=0.2.7" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "rlax", specifier = ">=0.1.8" },
     { name = "tyro", specifier = ">=1.0.6" },

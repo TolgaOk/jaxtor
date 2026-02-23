@@ -38,6 +38,7 @@ dev = [
 example = [
     "equinox>=0.13.4",
     "gymnax>=0.0.9",
+    "optax>=0.2.7",
     "rich>=14.2.0",
     "rlax>=0.1.8",
     "tyro>=1.0.6",
