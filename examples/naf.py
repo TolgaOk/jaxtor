@@ -3,10 +3,10 @@
 Normalized Advantage Functions from Gu et al. (2016) "Continuous Deep
 Q-Learning with Model-based Acceleration", arXiv:1603.00748.
 
-Q(s,a) = V_θ(s) - ½(a - μ_φ(s))ᵀ P_θ(s) (a - μ_φ(s))
+Q(s,a) = V_θ(s) - ½ Σᵢ pᵢ(s) (aᵢ - μᵢ(s))²
 
-where P(s) = L(s)L(s)ᵀ + εI is PSD, with L lower-triangular (exp diagonal).
-Exploration: a = μ(s) + σ · P(s)^{-½} ε,  ε ~ N(0, I).
+where p(s) = softplus(net(s)) + ε is a diagonal precision vector.
+Exploration: aᵢ = μᵢ(s) + σ / √pᵢ(s) · εᵢ,  ε ~ N(0, I).
 
 Training:
 1. Collect large rollout with scaled P⁻¹-shaped exploration noise
@@ -17,7 +17,7 @@ Training:
 - jaxtor:
   - rollout sampler: GymEnv -> Mc -> VecMc -> Imc -> Roll
   - evaluation: GymEnv -> Mc -> VecMc -> Imc -> Eval
-- equinox: V, μ, L networks (separate MLPs).
+- equinox: V, μ, p networks (separate MLPs).
 - optax: Adam optimizer with gradient clipping and LR annealing.
 - rlax: general_off_policy_returns_from_q_and_v.
 
@@ -65,7 +65,7 @@ class Config:
 
     v_hiddens: tuple[int, ...] = (128, 128)
     mu_hiddens: tuple[int, ...] = (64, 64)
-    a_hiddens: tuple[int, ...] = (128, 128)
+    p_hiddens: tuple[int, ...] = (128, 128)
 
     lr: float = 3e-4
     lr_schedule: Literal["constant", "linear"] = "linear"
@@ -74,7 +74,7 @@ class Config:
     gamma: float = 0.99
     target_update_freq: int = 10
     trace_lambda: float = 0.9
-    noise_eps: float = 1e-2
+    noise_eps: float = 0.1
     noise_scale: float = 0.5
 
     n_epochs: int = 10
@@ -147,17 +147,17 @@ class MLP(eqx.Module):
 class Agent:
     """Deterministic policy agent for NAF.
 
-    Q(s,a) = V(s) - ½(a - μ(s))ᵀ P(s) (a - μ(s))
+    Q(s,a) = V(s) - ½ Σᵢ pᵢ(s) (aᵢ - μᵢ(s))²
 
-    where P(s) = L(s)L(s)ᵀ + εI is PSD, L lower-triangular with exp diagonal.
+    where p(s) = softplus(net(s)) + ε, a diagonal precision vector.
 
     Action sampling:
-        deterministic=False: a = μ(s) + σ · P(s)^{-½} ε,  ε ~ N(0, I).
+        deterministic=False: a = μ(s) + σ / √p(s) · ε,  ε ~ N(0, I).
         deterministic=True:  a = μ(s).
     """
 
     deterministic: bool = False
-    noise_eps: float = 1e-2
+    noise_eps: float = 0.1
     noise_scale: float = 0.5
     obs_norm: RunningStats | None = None
 
@@ -166,28 +166,12 @@ class Agent:
         key: jax.Array
         v_net: MLP
         mu_net: MLP
-        a_net: MLP
+        p_net: MLP
         obs_stats: RunningStats.State
 
-    def _lower_tri(
-        self, obs: chex.Array, act_dim: int, state: Agent.State
-    ) -> jax.Array:
-        """Lower-triangular L with exp diagonal from network output."""
-        raw = state.a_net(obs)
-        batch_shape = raw.shape[:-1]
-        L = jnp.zeros((*batch_shape, act_dim, act_dim))
-        idx = jnp.tril_indices(act_dim)
-        L = L.at[..., idx[0], idx[1]].set(raw)
-        diag = jnp.arange(act_dim)
-        L = L.at[..., diag, diag].set(jnp.exp(L[..., diag, diag]))
-        return L
-
-    def _psd(
-        self, obs: chex.Array, act_dim: int, state: Agent.State
-    ) -> jax.Array:
-        """P = LLᵀ + εI, guaranteed strictly PD."""
-        L = self._lower_tri(obs, act_dim, state)
-        return L @ L.mT + self.noise_eps * jnp.eye(act_dim)
+    def _precision(self, obs: chex.Array, state: Agent.State) -> jax.Array:
+        """Diagonal precision p = softplus(net(s)) + ε."""
+        return jax.nn.softplus(state.p_net(obs)) + self.noise_eps
 
     def act(self, obs: chex.Array, state: Agent.State):
         if self.obs_norm is not None:
@@ -197,24 +181,21 @@ class Agent:
             action = mu
         else:
             key, k = jrd.split(state.key)
-            P = self._psd(obs, mu.shape[-1], state)
-            L_chol = jnp.linalg.cholesky(P)
+            p = self._precision(obs, state)
             eps = jrd.normal(k, mu.shape)
-            noise = jnp.linalg.solve(L_chol, eps[..., None]).squeeze(-1)
-            action = mu + self.noise_scale * noise
+            action = mu + self.noise_scale * eps / jnp.sqrt(p)
             state = state.replace(key=key)
         return action, state
 
     def q_val(
         self, obs: chex.Array, act: chex.Array, state: Agent.State
     ) -> jax.Array:
-        """Q(s,a) = V(s) - ½(a-μ)ᵀP(a-μ)."""
+        """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
         v = state.v_net(obs).squeeze(-1)
         mu = state.mu_net(obs)
-        act_dim = act.shape[-1]
-        P = self._psd(obs, act_dim, state)
+        p = self._precision(obs, state)
         diff = act - mu
-        return v - 0.5 * jnp.einsum("...i,...ij,...j", diff, P, diff)
+        return v - 0.5 * jnp.sum(p * diff ** 2, axis=-1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -310,11 +291,11 @@ def train_step(
                 lambda x: jax.lax.dynamic_slice_in_dim(x, start, mb_size),
                 shuffled,
             )
-            params = (state.agent.v_net, state.agent.mu_net, state.agent.a_net)
+            params = (state.agent.v_net, state.agent.mu_net, state.agent.p_net)
 
             def loss_fn(params):
-                v_net, mu_net, a_net = params
-                s = state.agent.replace(v_net=v_net, mu_net=mu_net, a_net=a_net)
+                v_net, mu_net, p_net = params
+                s = state.agent.replace(v_net=v_net, mu_net=mu_net, p_net=p_net)
                 q = jax.vmap(lambda o, a: agent.q_val(o, a, s))(mb.obs, mb.act)
                 loss = jnp.mean((q - mb.ret) ** 2)
                 return loss, dict(
@@ -323,9 +304,9 @@ def train_step(
 
             (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
             updates, opt_state = tx.update(grads, state.opt, params)
-            new_v, new_mu, new_a = eqx.apply_updates(params, updates)
+            new_v, new_mu, new_p = eqx.apply_updates(params, updates)
             return state.replace(
-                agent=state.agent.replace(v_net=new_v, mu_net=new_mu, a_net=new_a),
+                agent=state.agent.replace(v_net=new_v, mu_net=new_mu, p_net=new_p),
                 opt=opt_state,
             ), info
 
@@ -421,11 +402,11 @@ def train(cfg: Config) -> State:
         layer_norm=cfg.layer_norm,
         key=mu_key,
     )
-    a_net = MLP(
+    p_net = MLP(
         obs_dim,
-        cfg.a_hiddens,
-        act_dim * (act_dim + 1) // 2,
-        output_gain=1.0 / jnp.sqrt(act_dim),
+        cfg.p_hiddens,
+        act_dim,
+        output_gain=1.0,
         layer_norm=cfg.layer_norm,
         key=a_key,
     )
@@ -434,7 +415,7 @@ def train(cfg: Config) -> State:
         key=agent_key,
         v_net=v_net,
         mu_net=mu_net,
-        a_net=a_net,
+        p_net=p_net,
         obs_stats=RunningStats.State(
             mean=jnp.zeros(obs_dim),
             var=jnp.ones(obs_dim),
@@ -453,7 +434,7 @@ def train(cfg: Config) -> State:
                 count=jnp.float32(1e-4),
             ),
         ),
-        opt=tx.init((v_net, mu_net, a_net)),
+        opt=tx.init((v_net, mu_net, p_net)),
     )
 
     @jax.jit
