@@ -5,17 +5,19 @@ Q-Learning with Model-based Acceleration", arXiv:1603.00748.
 
 Q(s,a) = V_θ(s) - ½(a - μ_φ(s))ᵀ P_θ(s) (a - μ_φ(s))
 
-where P(s) = A(s)A(s)ᵀ + εI is PSD, with A output by a neural network.
+where P(s) = L(s)L(s)ᵀ + εI is PSD, with L lower-triangular (exp diagonal).
+Exploration: a = μ(s) + σ · P(s)^{-½} ε,  ε ~ N(0, I).
 
 Training:
-1. Collect large rollout with P⁻¹-shaped exploration noise
-2. Compute off-policy Q(λ) returns once per rollout
+1. Collect large rollout with scaled P⁻¹-shaped exploration noise
+2. Compute off-policy Q(λ) returns using target network
 3. Train Q via MSE over multiple epochs
+4. Polyak-update target network
 
 - jaxtor:
   - rollout sampler: GymEnv -> Mc -> VecMc -> Imc -> Roll
   - evaluation: GymEnv -> Mc -> VecMc -> Imc -> Eval
-- equinox: V, μ, A networks (separate MLPs).
+- equinox: V, μ, L networks (separate MLPs).
 - optax: Adam optimizer with gradient clipping and LR annealing.
 - rlax: general_off_policy_returns_from_q_and_v.
 
@@ -24,6 +26,7 @@ Training:
 from __future__ import annotations
 
 import time
+from typing import Literal
 
 import chex
 import equinox as eqx
@@ -65,11 +68,14 @@ class Config:
     a_hiddens: tuple[int, ...] = (128, 128)
 
     lr: float = 3e-4
+    lr_schedule: Literal["constant", "linear"] = "linear"
     max_grad_norm: float = 0.5
 
     gamma: float = 0.99
+    target_update_freq: int = 10
     trace_lambda: float = 0.9
-    noise_eps: float = 1.0
+    noise_eps: float = 1e-2
+    noise_scale: float = 0.5
 
     n_epochs: int = 10
     n_minibatches: int = 32
@@ -141,26 +147,18 @@ class MLP(eqx.Module):
 class Agent:
     """Deterministic policy agent for NAF.
 
-    Q(s,a) = V(s) - ½(a - μ(s))ᵀ P(s) (a - μ(s))  [+ ½d if not greedy]
+    Q(s,a) = V(s) - ½(a - μ(s))ᵀ P(s) (a - μ(s))
 
-    where P(s) = A(s)A(s)ᵀ + εI is PSD, d = act_dim.
-
-    Greedy (is_greedy=True):
-        V(s) = max_a Q(s,a) = Q(s, μ(s)). V represents the deterministic
-        policy value. E_π[Q] = V - ½d under stochastic policy π = N(μ, P⁻¹).
-
-    Stochastic (is_greedy=False):
-        E_π[Q] = V by adding the correction ½Tr(PΣ) = ½d. V represents the
-        stochastic policy value. Q(s, μ(s)) = V + ½d.
+    where P(s) = L(s)L(s)ᵀ + εI is PSD, L lower-triangular with exp diagonal.
 
     Action sampling:
-        deterministic=False: a ~ N(μ(s), P(s)⁻¹) via Cholesky, satisfies Imc.
-        deterministic=True:  a = μ(s), satisfies Imc.
+        deterministic=False: a = μ(s) + σ · P(s)^{-½} ε,  ε ~ N(0, I).
+        deterministic=True:  a = μ(s).
     """
 
     deterministic: bool = False
-    is_greedy: bool = True
-    noise_eps: float = 1.0
+    noise_eps: float = 1e-2
+    noise_scale: float = 0.5
     obs_norm: RunningStats | None = None
 
     @dataclass
@@ -171,39 +169,52 @@ class Agent:
         a_net: MLP
         obs_stats: RunningStats.State
 
-    def _a_mat(self, obs: chex.Array, act_dim: int, state: Agent.State) -> jax.Array:
-        a_out = state.a_net(obs)
-        return a_out.reshape(*a_out.shape[:-1], act_dim, act_dim)
+    def _lower_tri(
+        self, obs: chex.Array, act_dim: int, state: Agent.State
+    ) -> jax.Array:
+        """Lower-triangular L with exp diagonal from network output."""
+        raw = state.a_net(obs)
+        batch_shape = raw.shape[:-1]
+        L = jnp.zeros((*batch_shape, act_dim, act_dim))
+        idx = jnp.tril_indices(act_dim)
+        L = L.at[..., idx[0], idx[1]].set(raw)
+        diag = jnp.arange(act_dim)
+        L = L.at[..., diag, diag].set(jnp.exp(L[..., diag, diag]))
+        return L
 
-    def _psd(self, obs: chex.Array, act_dim: int, state: Agent.State) -> jax.Array:
-        """P = AAᵀ + εI, guaranteed strictly PD."""
-        A = self._a_mat(obs, act_dim, state)
-        return A @ A.mT + self.noise_eps * jnp.eye(act_dim)
+    def _psd(
+        self, obs: chex.Array, act_dim: int, state: Agent.State
+    ) -> jax.Array:
+        """P = LLᵀ + εI, guaranteed strictly PD."""
+        L = self._lower_tri(obs, act_dim, state)
+        return L @ L.mT + self.noise_eps * jnp.eye(act_dim)
 
     def act(self, obs: chex.Array, state: Agent.State):
         if self.obs_norm is not None:
             obs = self.obs_norm.normalize(obs, state.obs_stats)
         mu = state.mu_net(obs)
         if self.deterministic:
-            return mu, state
-        key, k = jrd.split(state.key)
-        P = self._psd(obs, mu.shape[-1], state)
-        L = jnp.linalg.cholesky(P)
-        eps = jrd.normal(k, mu.shape)
-        action = mu + jnp.linalg.solve(L, eps[..., None]).squeeze(-1)
-        return action, state.replace(key=key)
+            action = mu
+        else:
+            key, k = jrd.split(state.key)
+            P = self._psd(obs, mu.shape[-1], state)
+            L_chol = jnp.linalg.cholesky(P)
+            eps = jrd.normal(k, mu.shape)
+            noise = jnp.linalg.solve(L_chol, eps[..., None]).squeeze(-1)
+            action = mu + self.noise_scale * noise
+            state = state.replace(key=key)
+        return action, state
 
-    def q_val(self, obs: chex.Array, act: chex.Array, state: Agent.State) -> jax.Array:
-        """Q(s,a) = V(s) - ½(a-μ)ᵀP(a-μ) [+ ½act_dim if not greedy]."""
+    def q_val(
+        self, obs: chex.Array, act: chex.Array, state: Agent.State
+    ) -> jax.Array:
+        """Q(s,a) = V(s) - ½(a-μ)ᵀP(a-μ)."""
         v = state.v_net(obs).squeeze(-1)
         mu = state.mu_net(obs)
         act_dim = act.shape[-1]
         P = self._psd(obs, act_dim, state)
         diff = act - mu
-        q = v - 0.5 * jnp.einsum("...i,...ij,...j", diff, P, diff)
-        if not self.is_greedy:
-            q = q + 0.5 * act_dim
-        return q
+        return v - 0.5 * jnp.einsum("...i,...ij,...j", diff, P, diff)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -264,7 +275,7 @@ def train_step(
     else:
         rewards = trans.rew
 
-    # 4. Off-policy Q(λ) returns
+    # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
     discount_t = cfg.gamma * (1.0 - trans.term.astype(jnp.float32))
     v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
     q_t = jax.vmap(jax.vmap(
@@ -346,15 +357,23 @@ def train(cfg: Config) -> State:
     (act_dim,) = env._act_shape
 
     total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_minibatches
-    lr_schedule = optax.linear_schedule(cfg.lr, 0.0, total_updates)
+    if cfg.lr_schedule == "linear":
+        lr = optax.linear_schedule(cfg.lr, 0.0, total_updates)
+    else:
+        lr = cfg.lr
     tx = optax.chain(
         optax.clip_by_global_norm(cfg.max_grad_norm),
-        optax.adam(lr_schedule, eps=1e-5),
+        optax.adam(lr, eps=1e-5),
     )
 
     obs_rs = RunningStats(clip=10.0) if cfg.normalize_obs else None
     rew_norm = RewardNorm(gamma=cfg.gamma, rms=RunningStats(), clip=10.0)
-    agent = Agent(deterministic=False, noise_eps=cfg.noise_eps, obs_norm=obs_rs)
+    agent = Agent(
+        deterministic=False,
+        noise_eps=cfg.noise_eps,
+        noise_scale=cfg.noise_scale,
+        obs_norm=obs_rs,
+    )
     eval_agent = Agent(deterministic=True, obs_norm=obs_rs)
 
     roll = Roll(
@@ -405,25 +424,27 @@ def train(cfg: Config) -> State:
     a_net = MLP(
         obs_dim,
         cfg.a_hiddens,
-        act_dim * act_dim,
+        act_dim * (act_dim + 1) // 2,
         output_gain=1.0 / jnp.sqrt(act_dim),
         layer_norm=cfg.layer_norm,
         key=a_key,
     )
 
+    agent_state = Agent.State(
+        key=agent_key,
+        v_net=v_net,
+        mu_net=mu_net,
+        a_net=a_net,
+        obs_stats=RunningStats.State(
+            mean=jnp.zeros(obs_dim),
+            var=jnp.ones(obs_dim),
+            count=jnp.float32(1e-4),
+        ),
+    )
+
     state = State(
         mc=roll.imc.mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
-        agent=Agent.State(
-            key=agent_key,
-            v_net=v_net,
-            mu_net=mu_net,
-            a_net=a_net,
-            obs_stats=RunningStats.State(
-                mean=jnp.zeros(obs_dim),
-                var=jnp.ones(obs_dim),
-                count=jnp.float32(1e-4),
-            ),
-        ),
+        agent=agent_state,
         rew_norm=RewardNorm.State(
             ret=jnp.zeros(cfg.n_envs),
             rms=RunningStats.State(
@@ -461,7 +482,9 @@ def train(cfg: Config) -> State:
             eval_mc = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
-            m = evaluate(Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key)))
+            m = evaluate(
+                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
+            )
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
                 f"  iter {i + 1:4d}  q_loss={float(metrics['q_loss']):.4f}"
