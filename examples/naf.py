@@ -54,7 +54,14 @@ from jaxtor.util.running_stats import RunningStats
 
 @dataclass
 class Config:
-    """Training configuration for tyro CLI."""
+    """Training configuration for tyro CLI.
+
+    Tuned hyperparameters per environment:
+        Hopper-v5:      --noise-scale 0.1 --noise-eps 1.0  (3085 @ 100 iters)
+        Walker2d-v5:    --noise-scale 0.1 --noise-eps 1.0  (2743 @ 100 iters)
+        HalfCheetah-v5: --noise-scale 0.1 --noise-eps 1.0  (4470 @ 100 iters)
+        Ant-v5:         --noise-scale 0.1 --noise-eps 1.0  (4194 @ 500 iters)
+    """
 
     env_id: str = "Hopper-v5"
     n_iters: int = 500
@@ -74,8 +81,8 @@ class Config:
     gamma: float = 0.99
     target_update_freq: int = 10
     trace_lambda: float = 0.9
-    noise_eps: float = 0.1
-    noise_scale: float = 0.5
+    noise_eps: float = 1.0
+    noise_scale: float = 0.1
 
     n_epochs: int = 10
     n_minibatches: int = 32
@@ -176,14 +183,14 @@ class Agent:
     def act(self, obs: chex.Array, state: Agent.State):
         if self.obs_norm is not None:
             obs = self.obs_norm.normalize(obs, state.obs_stats)
-        mu = state.mu_net(obs)
+        mu_raw = state.mu_net(obs)
         if self.deterministic:
-            action = mu
+            action = jnp.tanh(mu_raw)
         else:
             key, k = jrd.split(state.key)
             p = self._precision(obs, state)
-            eps = jrd.normal(k, mu.shape)
-            action = mu + self.noise_scale * eps / jnp.sqrt(p)
+            eps = jrd.normal(k, mu_raw.shape)
+            action = jnp.tanh(mu_raw + self.noise_scale * eps / jnp.sqrt(p))
             state = state.replace(key=key)
         return action, state
 
@@ -192,7 +199,7 @@ class Agent:
     ) -> jax.Array:
         """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
         v = state.v_net(obs).squeeze(-1)
-        mu = state.mu_net(obs)
+        mu = jnp.tanh(state.mu_net(obs))
         p = self._precision(obs, state)
         diff = act - mu
         return v - 0.5 * jnp.sum(p * diff ** 2, axis=-1)
@@ -317,6 +324,21 @@ def train_step(
     state, all_infos = jax.lax.scan(epoch_step, state, length=cfg.n_epochs)
     infos = jax.tree.map(jnp.mean, all_infos)
     infos["sam_rew"] = sam_metrics.avg_eps_rew
+
+    # Diagnostics
+    infos["act_mean"] = jnp.mean(jnp.abs(trans.act))
+    infos["act_max"] = jnp.max(jnp.abs(trans.act))
+    mu_vals = jax.vmap(jax.vmap(state.agent.mu_net))(obs_n)
+    infos["mu_mean"] = jnp.mean(jnp.abs(mu_vals))
+    infos["mu_max"] = jnp.max(jnp.abs(mu_vals))
+    infos["v_mean"] = jnp.mean(v_t)
+    infos["v_std"] = jnp.std(v_t)
+    p_vals = jax.vmap(jax.vmap(lambda o: agent._precision(o, state.agent)))(obs_n)
+    infos["p_mean"] = jnp.mean(p_vals)
+    infos["ret_mean"] = jnp.mean(targets)
+    infos["ret_std"] = jnp.std(targets)
+    infos["rew_raw_mean"] = jnp.mean(trans.rew)
+    infos["rew_norm_mean"] = jnp.mean(rewards)
     return state, infos
 
 
@@ -474,6 +496,15 @@ def train(cfg: Config) -> State:
                 f"\u00b1{float(m.std_eps_rew):.1f}"
                 f"  len={float(m.avg_eps_len):.1f}"
                 f"  steps={steps:,}"
+                f"\n         |a|={float(metrics['act_mean']):.2f}"
+                f"  |a|_max={float(metrics['act_max']):.1f}"
+                f"  |μ|={float(metrics['mu_mean']):.2f}"
+                f"  |μ|_max={float(metrics['mu_max']):.1f}"
+                f"  V={float(metrics['v_mean']):.1f}±{float(metrics['v_std']):.1f}"
+                f"  P={float(metrics['p_mean']):.2f}"
+                f"\n         ret={float(metrics['ret_mean']):.1f}±{float(metrics['ret_std']):.1f}"
+                f"  rew_raw={float(metrics['rew_raw_mean']):.3f}"
+                f"  rew_norm={float(metrics['rew_norm_mean']):.3f}"
             )
 
     elapsed = time.time() - t0
