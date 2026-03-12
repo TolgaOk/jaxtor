@@ -356,9 +356,8 @@ def train_step(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-if __name__ == "__main__":
-    cfg = tyro.cli(Config)
-
+def train(cfg: Config) -> State:
+    """Train PPO and return the final training state."""
     key = jrd.PRNGKey(cfg.seed)
     key, actor_key, critic_key, env_key, agent_key, eval_key = jrd.split(key, 6)
 
@@ -497,3 +496,8 @@ if __name__ == "__main__":
 
     env._vec_env.close()
     eval_env._vec_env.close()
+    return state
+
+
+if __name__ == "__main__":
+    train(tyro.cli(Config))
