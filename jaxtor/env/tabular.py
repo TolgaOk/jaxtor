@@ -6,8 +6,7 @@ Example:
     >>> import jax
     >>> from jaxtor.env import tabular
     >>> key = jax.random.PRNGKey(0)
-    >>> config = tabular.garnet.Config(state_size=50, action_size=10)
-    >>> env = tabular.garnet.make(config)
+    >>> env = tabular.make(tabular.garnet.Config())
     >>> init_key, reset_key = jax.random.split(key)
     >>> state = env.init(init_key)
     >>> obs, state = env.reset(reset_key, state)
@@ -278,7 +277,15 @@ class gridworld:
             ... )
         """
 
-        board: list[str]
+        board: list[str] = [
+            "#######",
+            "#     #",
+            "#  #  #",
+            "#P # @#",
+            "#  #  #",
+            "#     #",
+            "#######",
+        ]
         p_slip: float = 0.0
         max_episode_len: int = 1000
 
@@ -297,3 +304,83 @@ class gridworld:
             TabularEnv instance.
         """
         return TabularEnv(config=config)
+
+
+_ENVS: dict[str, ConfigProtocol] = {
+    "cliffworld": gridworld.Config(
+        board=[
+            "#########",
+            "#     @X#",
+            "#      X#",
+            "#      X#",
+            "#      X#",
+            "#P     X#",
+            "#########",
+        ],
+    ),
+    "cliff-walking": gridworld.Config(
+        board=[
+            "##############",
+            "#            #",
+            "#            #",
+            "#            #",
+            "#PXXXXXXXXXX@#",
+            "##############",
+        ],
+    ),
+    "four-rooms": gridworld.Config(
+        board=[
+            "#############",
+            "#     #    @#",
+            "#     #     #",
+            "#           #",
+            "#     #     #",
+            "#     #     #",
+            "## #### #####",
+            "#     #     #",
+            "#     #     #",
+            "#           #",
+            "#     #     #",
+            "#P    #     #",
+            "#############",
+        ],
+    ),
+    "frozen-lake": gridworld.Config(
+        board=[
+            "######",
+            "#P   #",
+            "# X X#",
+            "#   X#",
+            "#X  @#",
+            "######",
+        ],
+        p_slip=1 / 3,
+    ),
+    "mid-garnet": garnet.Config(state_size=50, action_size=10, branch_size=5),
+    "graph": graph.Config(),
+}
+
+
+def make(name: str) -> TabularEnv:
+    """Create a pre-defined tabular environment by name.
+
+    For custom configurations, use the namespace make functions directly
+    (e.g. ``tabular.garnet.make(config)``).
+
+    Args:
+        name: Environment name ("cliffworld", "cliff-walking", "four-rooms",
+            "frozen-lake", "mid-garnet", "graph").
+
+    Returns:
+        TabularEnv instance.
+
+    Raises:
+        ValueError: If name is not recognized.
+
+    Example:
+        >>> env = make("cliffworld")
+        >>> env = make("mid-garnet")
+    """
+    if name not in _ENVS:
+        raise ValueError(f"Unknown env {name!r}, choose from {list(_ENVS)}")
+    return TabularEnv(config=_ENVS[name])
