@@ -17,7 +17,6 @@ and α(k) = α_init / (1 + k / α_period)^α_power is a decaying step size.
 
 from __future__ import annotations
 
-import dataclasses
 import time
 
 import chex
@@ -30,7 +29,7 @@ from chex import dataclass
 from rich import print
 from rich.progress import track
 
-from jaxtor.env.tabular import garnet
+from jaxtor.env import tabular
 from jaxtor.eval.tabular import Eval as Evaluator, optimal_q
 from jaxtor.sampler import Imc, Mc
 
@@ -44,7 +43,7 @@ from jaxtor.sampler import Imc, Mc
 class Config:
     """Training configuration for tyro CLI."""
 
-    garnet: garnet.Config = dataclasses.field(default_factory=garnet.Config)
+    env_name: str = "mid-garnet"
     n_steps: int = 1_000_000
     alpha_init: float = 0.5
     alpha_power: float = 0.25
@@ -105,21 +104,22 @@ def train_step(state: Imc.State, k: int) -> Imc.State:
 # ──────────────────────────────────────────────────────────────────────────────
 
 cfg = tyro.cli(Config)
-S, A = cfg.garnet.state_size, cfg.garnet.action_size
+env = tabular.make(cfg.env_name)
 
 agent = Agent(epsilon=cfg.epsilon)
 imc = Imc(
     agent=agent,
     mc=Mc(
-        max_episode_len=cfg.garnet.max_episode_len,
+        max_episode_len=env.config.max_episode_len,
         queue_size=20,
-        env=garnet.make(cfg.garnet),
+        env=env,
     ),
 )
 
 key = jrd.PRNGKey(cfg.seed)
 key, env_key, agent_key = jrd.split(key, 3)
-env_state = imc.mc.env.init(env_key)
+env_state = env.init(env_key)
+S, A = env_state.mdp.state_size, env_state.mdp.action_size
 
 opt_q = optimal_q(env_state.mdp, cfg.gamma)
 opt_rho = float(jnp.sum(env_state.mdp.initial * jnp.max(opt_q, axis=0)))
@@ -135,7 +135,7 @@ eval_state = evaluator.init(agent_state)
 # Training loop
 # ──────────────────────────────────────────────────────────────────────────────
 
-print(f"[bold green]Q-learning on Garnet[/bold green] ({S}S, {A}A)")
+print(f"[bold green]Q-learning on {cfg.env_name}[/bold green] ({S}S, {A}A)")
 
 t0 = time.time()
 for k in track(range(cfg.n_steps), description="Training"):

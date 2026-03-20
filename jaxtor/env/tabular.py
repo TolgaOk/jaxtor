@@ -260,24 +260,24 @@ class gridworld:
             ' ': Regular passable space
 
         Attributes:
-            board: List of strings representing the 2D grid layout.
+            board: Tuple of strings representing the 2D grid layout.
             p_slip: Probability of slipping to unintended action.
             max_episode_len: Maximum episode length before truncation.
 
         Example:
             >>> config = gridworld.Config(
-            ...     board=[
+            ...     board=(
             ...         "#####",
             ...         "#  @#",
             ...         "# #X#",
             ...         "#P  #",
-            ...         "#####"
-            ...     ],
-            ...     p_slip=0.1
+            ...         "#####",
+            ...     ),
+            ...     p_slip=0.1,
             ... )
         """
 
-        board: list[str] = [
+        board: tuple[str, ...] = (
             "#######",
             "#     #",
             "#  #  #",
@@ -285,13 +285,13 @@ class gridworld:
             "#  #  #",
             "#     #",
             "#######",
-        ]
+        )
         p_slip: float = 0.0
         max_episode_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a GridWorld MDP from this config."""
-            return grid_world(board=self.board, p_slip=self.p_slip)
+            return grid_world(board=list(self.board), p_slip=self.p_slip)
 
     @staticmethod
     def make(config: gridworld.Config) -> TabularEnv:
@@ -308,7 +308,7 @@ class gridworld:
 
 _ENVS: dict[str, ConfigProtocol] = {
     "cliffworld": gridworld.Config(
-        board=[
+        board=(
             "#########",
             "#     @X#",
             "#      X#",
@@ -316,20 +316,20 @@ _ENVS: dict[str, ConfigProtocol] = {
             "#      X#",
             "#P     X#",
             "#########",
-        ],
+        ),
     ),
     "cliff-walking": gridworld.Config(
-        board=[
+        board=(
             "##############",
             "#            #",
             "#            #",
             "#            #",
             "#PXXXXXXXXXX@#",
             "##############",
-        ],
+        ),
     ),
     "four-rooms": gridworld.Config(
-        board=[
+        board=(
             "#############",
             "#     #    @#",
             "#     #     #",
@@ -343,17 +343,17 @@ _ENVS: dict[str, ConfigProtocol] = {
             "#     #     #",
             "#P    #     #",
             "#############",
-        ],
+        ),
     ),
     "frozen-lake": gridworld.Config(
-        board=[
+        board=(
             "######",
             "#P   #",
             "# X X#",
             "#   X#",
             "#X  @#",
             "######",
-        ],
+        ),
         p_slip=1 / 3,
     ),
     "mid-garnet": garnet.Config(state_size=50, action_size=10, branch_size=5),
