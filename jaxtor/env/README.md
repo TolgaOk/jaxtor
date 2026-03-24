@@ -23,24 +23,39 @@ from jaxtor.env import gymnax
 env = gymnax.make("CartPole-v1")
 ```
 
-## `TabularEnv` — [`jaxdp`](https://github.com/TolgaOk/jaxdp)
+## `tabular` — [`jaxdp`](https://github.com/TolgaOk/jaxdp)
 
-Tabular MDPs with exact transition matrices. Supports Garnet (random MDPs), graph, and gridworld configurations.
+Tabular MDPs with exact transition matrices.
+
+### Pre-defined environments
 
 ```python
 from jaxtor.env import tabular
 
-# GridWorld
-# P: player, X: lava, @: goal, #: wall
+env = tabular.make("mid-garnet")      # 50S, 10A random MDP
+env = tabular.make("graph")           # 6-state graph (Fastest Convergence for Q-Learning)
+env = tabular.make("cliffworld")      # right-side cliff gridworld
+env = tabular.make("cliff-walking")   # Sutton & Barto classic cliff walking
+env = tabular.make("four-rooms")      # Sutton, Precup, Singh 1999
+env = tabular.make("frozen-lake")     # 4x4 frozen lake with p_slip=1/3
+```
+
+### Custom configurations
+
+```python
+env = tabular.garnet.make(tabular.garnet.Config(state_size=100, action_size=4))
+env = tabular.graph.make(tabular.graph.Config(max_episode_len=500))
 env = tabular.gridworld.make(tabular.gridworld.Config(
-    board=[
+    board=(
         "#####",
         "#  @#",
         "# #X#",
         "#P  #",
         "#####",
-    ],
+    ),
     p_slip=0.1,
 ))
 ```
+
+Board characters: `#` wall, `P` start, `@` terminal goal, `X` penalty, `+` reward, `=` absorbing, ` ` passable.
 
