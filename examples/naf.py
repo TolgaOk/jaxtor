@@ -93,6 +93,9 @@ class Config:
     eval_freq: int = 5
     eval_envs: int = 10
     async_envs: bool = True
+    env_backend: str = (
+        "gymnasium"  # "gymnasium" (any env) | "envpool" (fast CPU MuJoCo)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -194,15 +197,13 @@ class Agent:
             state = state.replace(key=key)
         return action, state
 
-    def q_val(
-        self, obs: chex.Array, act: chex.Array, state: Agent.State
-    ) -> jax.Array:
+    def q_val(self, obs: chex.Array, act: chex.Array, state: Agent.State) -> jax.Array:
         """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
         v = state.v_net(obs).squeeze(-1)
         mu = jnp.tanh(state.mu_net(obs))
         p = self._precision(obs, state)
         diff = act - mu
-        return v - 0.5 * jnp.sum(p * diff ** 2, axis=-1)
+        return v - 0.5 * jnp.sum(p * diff**2, axis=-1)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -266,9 +267,9 @@ def train_step(
     # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
     discount_t = cfg.gamma * (1.0 - trans.term.astype(jnp.float32))
     v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
-    q_t = jax.vmap(jax.vmap(
-        lambda o, a: agent.q_val(o, a, state.agent)
-    ))(obs_n[:, 1:], trans.act[:, 1:])
+    q_t = jax.vmap(jax.vmap(lambda o, a: agent.q_val(o, a, state.agent)))(
+        obs_n[:, 1:], trans.act[:, 1:]
+    )
     c_t = cfg.trace_lambda * (1.0 - dones[:, :-1].astype(jnp.float32))
 
     targets = jax.vmap(
@@ -347,17 +348,31 @@ def train_step(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _make_env(cfg: Config, num_envs: int):
+    """Build the rollout env from the configured backend.
+
+    ``gymnasium`` works for any env; ``envpool`` is fast CPU MuJoCo (its
+    ``max_episode_steps`` is aligned to ``max_episode_len`` so its truncation
+    matches ``Mc``'s).
+    """
+    if cfg.env_backend == "envpool":
+        from jaxtor.env import envpool
+
+        return envpool.make(
+            cfg.env_id, num_envs=num_envs, max_episode_steps=cfg.max_episode_len
+        )
+    return gymnasium.make(cfg.env_id, num_envs=num_envs, async_envs=cfg.async_envs)
+
+
 def train(cfg: Config) -> State:
     """Train NAF and return the final training state."""
     key = jrd.PRNGKey(cfg.seed)
     key, v_key, mu_key, a_key, env_key, agent_key, eval_key = jrd.split(key, 7)
 
-    env = gymnasium.make(cfg.env_id, num_envs=cfg.n_envs, async_envs=cfg.async_envs)
-    eval_env = gymnasium.make(
-        cfg.env_id, num_envs=cfg.eval_envs, async_envs=cfg.async_envs
-    )
-    (obs_dim,) = env._obs_shape
-    (act_dim,) = env._act_shape
+    env = _make_env(cfg, cfg.n_envs)
+    eval_env = _make_env(cfg, cfg.eval_envs)
+    (obs_dim,) = env.obs_shape
+    (act_dim,) = env.act_shape
 
     total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_minibatches
     if cfg.lr_schedule == "linear":
@@ -485,9 +500,7 @@ def train(cfg: Config) -> State:
             eval_mc = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
-            m = evaluate(
-                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
-            )
+            m = evaluate(Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key)))
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
                 f"  iter {i + 1:4d}  q_loss={float(metrics['q_loss']):.4f}"
@@ -506,6 +519,7 @@ def train(cfg: Config) -> State:
                 f"  rew_raw={float(metrics['rew_raw_mean']):.3f}"
                 f"  rew_norm={float(metrics['rew_norm_mean']):.3f}"
             )
+            eval_env.close(eval_mc.env)
 
     elapsed = time.time() - t0
     print(
@@ -514,8 +528,7 @@ def train(cfg: Config) -> State:
         f"  (over {int(m.n_episodes)} eps)"
     )
 
-    env._vec_env.close()
-    eval_env._vec_env.close()
+    env.close(state.mc.env)
     return state
 
 

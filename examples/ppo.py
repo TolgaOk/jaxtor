@@ -88,6 +88,9 @@ class Config:
     eval_freq: int = 5
     eval_envs: int = 10
     async_envs: bool = True
+    env_backend: str = (
+        "gymnasium"  # "gymnasium" (any env) | "envpool" (fast CPU MuJoCo)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -125,9 +128,7 @@ class MLP(eqx.Module):
             b = jnp.zeros(dims[i + 1])
             self.layers.append((w, b))
         if layer_norm:
-            self.layer_norms = [
-                (jnp.ones(d), jnp.zeros(d)) for d in hiddens
-            ]
+            self.layer_norms = [(jnp.ones(d), jnp.zeros(d)) for d in hiddens]
         else:
             self.layer_norms = None
 
@@ -332,7 +333,9 @@ def train_step(
             )
 
             p_upd, actor_opt = actor_tx.update(p_grad, state.actor_opt, policy_params)
-            c_upd, critic_opt = critic_tx.update(c_grad, state.critic_opt, state.agent.critic)
+            c_upd, critic_opt = critic_tx.update(
+                c_grad, state.critic_opt, state.agent.critic
+            )
             new_actor, new_log_std = eqx.apply_updates(policy_params, p_upd)
             new_critic = eqx.apply_updates(state.agent.critic, c_upd)
             return state.replace(
@@ -356,17 +359,31 @@ def train_step(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _make_env(cfg: Config, num_envs: int):
+    """Build the rollout env from the configured backend.
+
+    ``gymnasium`` works for any env; ``envpool`` is fast CPU MuJoCo (its
+    ``max_episode_steps`` is aligned to ``max_episode_len`` so its truncation
+    matches ``Mc``'s).
+    """
+    if cfg.env_backend == "envpool":
+        from jaxtor.env import envpool
+
+        return envpool.make(
+            cfg.env_id, num_envs=num_envs, max_episode_steps=cfg.max_episode_len
+        )
+    return gymnasium.make(cfg.env_id, num_envs=num_envs, async_envs=cfg.async_envs)
+
+
 def train(cfg: Config) -> State:
     """Train PPO and return the final training state."""
     key = jrd.PRNGKey(cfg.seed)
     key, actor_key, critic_key, env_key, agent_key, eval_key = jrd.split(key, 6)
 
-    env = gymnasium.make(cfg.env_id, num_envs=cfg.n_envs, async_envs=cfg.async_envs)
-    eval_env = gymnasium.make(
-        cfg.env_id, num_envs=cfg.eval_envs, async_envs=cfg.async_envs
-    )
-    (obs_dim,) = env._obs_shape
-    (act_dim,) = env._act_shape
+    env = _make_env(cfg, cfg.n_envs)
+    eval_env = _make_env(cfg, cfg.eval_envs)
+    (obs_dim,) = env.obs_shape
+    (act_dim,) = env.act_shape
 
     total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_minibatches
     lr_schedule = optax.linear_schedule(cfg.lr, 0.0, total_updates)
@@ -414,13 +431,21 @@ def train(cfg: Config) -> State:
     )
 
     actor = MLP(
-        obs_dim, cfg.actor_hiddens, act_dim,
-        output_gain=0.01, layer_norm=cfg.layer_norm, key=actor_key,
+        obs_dim,
+        cfg.actor_hiddens,
+        act_dim,
+        output_gain=0.01,
+        layer_norm=cfg.layer_norm,
+        key=actor_key,
     )
     log_std = jnp.zeros(act_dim)
     critic = MLP(
-        obs_dim, cfg.critic_hiddens, 1,
-        output_gain=1.0, layer_norm=cfg.layer_norm, key=critic_key,
+        obs_dim,
+        cfg.critic_hiddens,
+        1,
+        output_gain=1.0,
+        layer_norm=cfg.layer_norm,
+        key=critic_key,
     )
 
     state = State(
@@ -475,9 +500,7 @@ def train(cfg: Config) -> State:
             eval_mc = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
-            m = evaluate(
-                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
-            )
+            m = evaluate(Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key)))
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
                 f"  iter {i + 1:4d}  loss={float(metrics['pg_loss']):+.4f}"
@@ -486,6 +509,7 @@ def train(cfg: Config) -> State:
                 f"  len={float(m.avg_eps_len):.1f}"
                 f"  steps={steps:,}"
             )
+            eval_env.close(eval_mc.env)
 
     elapsed = time.time() - t0
     print(
@@ -494,8 +518,7 @@ def train(cfg: Config) -> State:
         f"  (over {int(m.n_episodes)} eps)"
     )
 
-    env._vec_env.close()
-    eval_env._vec_env.close()
+    env.close(state.mc.env)
     return state
 
 
