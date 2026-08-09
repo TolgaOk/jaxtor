@@ -183,7 +183,7 @@ def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
     return eqx.tree_at(lambda s: s.agent.params, state, new_params), loss
 
 
-jit_eval = jax.jit(evaluator.metric)
+jit_eval = jax.jit(evaluator.evaluate)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Training loop
@@ -204,7 +204,7 @@ for i in track(range(cfg.n_iters), description="Training"):
 
     if (i + 1) % cfg.eval_freq == 0:
         eval_key, env_key, k = jrd.split(eval_key, 3)
-        m = jit_eval(
+        m, eval_state = jit_eval(
             Imc.State(
                 mc=VecMc(mc=mc).init(jrd.split(k, cfg.eval_envs), mc.env.init(env_key)),
                 agent=imc_state.agent,

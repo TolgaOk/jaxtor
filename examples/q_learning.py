@@ -124,8 +124,13 @@ S, A = env_state.mdp.state_size, env_state.mdp.action_size
 opt_q = optimal_q(env_state.mdp, cfg.gamma)
 opt_rho = float(jnp.sum(env_state.mdp.initial * jnp.max(opt_q, axis=0)))
 
-evaluator = Evaluator(mdp=env_state.mdp, gamma=cfg.gamma, agent=agent)
-jit_eval = jax.jit(evaluator.metric)
+evaluator = Evaluator(
+    mdp=env_state.mdp,
+    gamma=cfg.gamma,
+    agent=agent,
+    opt_q=opt_q,
+)
+jit_eval = jax.jit(evaluator.evaluate)
 agent_state = Agent.State(key=agent_key, q=jnp.zeros((A, S)))
 imc_state = imc.init(mc=imc.mc.init(agent_key, env_state), agent=agent_state)
 eval_state = evaluator.init(agent_state)
@@ -142,7 +147,7 @@ for k in track(range(cfg.n_steps), description="Training"):
     imc_state = train_step(imc_state, k)
 
     if (k + 1) % cfg.eval_freq == 0:
-        m, eval_state = jit_eval(eval_state, opt_q, imc_state.agent)
+        m, eval_state = jit_eval(eval_state, imc_state.agent)
         print(
             f"  step {k + 1:6d}"
             f"  bellman={float(m.bellman_linf):.4f}"

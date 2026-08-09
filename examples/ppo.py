@@ -487,7 +487,7 @@ def train(cfg: Config) -> State:
 
     @jax.jit
     def evaluate(imc_state):
-        return evaluator.metric(imc_state)
+        return evaluator.evaluate(imc_state)
 
     print(f"[bold green]{cfg.env_id} PPO[/bold green]")
     t0 = time.time()
@@ -500,7 +500,9 @@ def train(cfg: Config) -> State:
             eval_mc = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
-            m = evaluate(Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key)))
+            m, eval_state = evaluate(
+                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
+            )
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
                 f"  iter {i + 1:4d}  loss={float(metrics['pg_loss']):+.4f}"
@@ -509,7 +511,7 @@ def train(cfg: Config) -> State:
                 f"  len={float(m.avg_eps_len):.1f}"
                 f"  steps={steps:,}"
             )
-            eval_env.close(eval_mc.env)
+            eval_env.close(eval_state.mc.env)
 
     elapsed = time.time() - t0
     print(

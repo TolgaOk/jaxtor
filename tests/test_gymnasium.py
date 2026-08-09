@@ -7,6 +7,7 @@ import jax.random as jrd
 import pytest
 from chex import dataclass
 from jaxtor.env import gymnasium
+from jaxtor.eval.mc import Eval as McEval
 from jaxtor.sampler.mc import Mc, VecMc
 from jaxtor.sampler.imc import Imc
 from jaxtor.sampler.rollout import Roll
@@ -602,6 +603,24 @@ def test_roll_multiple_iterations_with_metrics():
     assert jnp.isfinite(metrics.avg_eps_rew)
     assert jnp.isfinite(metrics.avg_eps_len)
     assert metrics.avg_eps_len > 0
+
+
+def test_eval_returns_live_runtime_state():
+    """Evaluation returns the runtime token needed by subsequent sampling."""
+    env = _make_env()
+    key = jrd.PRNGKey(74)
+    vec_mc, mc_state = _init_vec(key, env)
+    imc = Imc(agent=RandomAgent(), mc=vec_mc)
+    state = imc.init(mc=mc_state, agent=AgentState(key=key))
+    evaluator = McEval(imc=imc, episode_len=4)
+
+    _, state = jax.jit(evaluator.evaluate)(state)
+    _, state = jax.jit(imc.sample)(state)
+
+    assert jnp.all(state.mc.env.token == 5)
+    runtime = gymnasium.lookup_runtime(state.mc.env.runtime_id)
+    assert runtime.token == 5
+    env.close(state.mc.env)
 
 
 # =============================================================================
