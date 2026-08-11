@@ -35,7 +35,7 @@ def small_env():
 def test_sweep_sample_returns_batched_state(small_env):
     """Sample returns MC state with shape (A*S, ...)."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -49,7 +49,7 @@ def test_sweep_sample_returns_batched_state(small_env):
 def test_sweep_sample_correct_initial_states(small_env):
     """Each position starts at its designated state (obs = state index)."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -64,7 +64,7 @@ def test_sweep_sample_correct_initial_states(small_env):
 def test_sweep_sample_mdp_initial_conditioned(small_env):
     """Each position has MDP with one-hot initial distribution."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -83,7 +83,7 @@ def test_sweep_sample_mdp_initial_conditioned(small_env):
 def test_sweep_sample_returns_transitions(small_env):
     """Sample returns batched transitions."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -103,7 +103,7 @@ def test_sweep_sample_returns_transitions(small_env):
 def test_sweep_sample_uses_correct_init_action(small_env):
     """Sample uses designated init_action for each (s,a) position."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -118,7 +118,7 @@ def test_sweep_sample_uses_correct_init_action(small_env):
 def test_sweep_sample_state_action_pairing(small_env):
     """Verify each position has correct (state, action) pairing."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -148,7 +148,7 @@ def test_sweep_batch_shape_various_sizes():
             state_size=state_size, action_size=action_size, max_episode_len=10
         )
         env = tabular.garnet.make(config)
-        mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+        mc_sampler = mc.Mc(max_episode_len=10, env=env)
         sweeper = sweep.Sweep(mc=mc_sampler)
 
         env_state = env.init(key)
@@ -169,7 +169,7 @@ def test_sweep_batch_shape_various_sizes():
 def test_sweep_transitions_are_valid(small_env):
     """Transitions have valid state indices."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -192,7 +192,7 @@ def test_sweep_transitions_are_valid(small_env):
 def test_sweep_transitions_consistent_with_mdp(small_env):
     """Next states are reachable according to MDP transitions."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -220,7 +220,7 @@ def test_sweep_transitions_consistent_with_mdp(small_env):
 def test_sweep_sample_jit(small_env):
     """Sample can be JIT compiled."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -236,7 +236,7 @@ def test_sweep_sample_jit(small_env):
 def test_sweep_sample_jit_multiple_calls(small_env):
     """JIT compiled sample produces correct results on multiple calls."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -263,7 +263,7 @@ def test_sweep_sample_jit_multiple_calls(small_env):
 def test_sweep_deterministic_with_same_key(small_env):
     """Same key produces same results."""
     key = jax.random.PRNGKey(42)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -279,7 +279,7 @@ def test_sweep_deterministic_with_same_key(small_env):
 
 def test_sweep_different_keys_can_differ(small_env):
     """Different keys can produce different next states (stochastic transitions)."""
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     # Use same env state but different sample keys
@@ -312,7 +312,7 @@ def test_sweep_single_state_env():
     key = jax.random.PRNGKey(0)
     config = tabular.garnet.Config(state_size=1, action_size=3, max_episode_len=10)
     env = tabular.garnet.make(config)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = env.init(key)
@@ -331,7 +331,7 @@ def test_sweep_single_action_env():
     key = jax.random.PRNGKey(0)
     config = tabular.garnet.Config(state_size=5, action_size=1, max_episode_len=10)
     env = tabular.garnet.make(config)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = env.init(key)
@@ -353,7 +353,7 @@ def test_sweep_single_action_env():
 def test_condition_mdp_initial_creates_one_hot(small_env):
     """_condition_mdp_initial creates MDP with one-hot initial distribution."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=small_env)
+    mc_sampler = mc.Mc(max_episode_len=10, env=small_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = small_env.init(key)
@@ -382,7 +382,7 @@ def test_condition_mdp_initial_creates_one_hot(small_env):
 def test_sweep_larger_env(garnet_env):
     """Works with larger environment (10 states, 4 actions)."""
     key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_episode_len=100, queue_size=10, env=garnet_env)
+    mc_sampler = mc.Mc(max_episode_len=100, env=garnet_env)
     sweeper = sweep.Sweep(mc=mc_sampler)
 
     env_state = garnet_env.init(key)

@@ -8,6 +8,7 @@ import pytest
 from chex import dataclass
 from jaxtor.env import gymnasium
 from jaxtor.eval.mc import Eval as McEval
+from jaxtor.sampler.stats import EpisodeStats
 from jaxtor.sampler.mc import Mc, VecMc
 from jaxtor.sampler.imc import Imc
 from jaxtor.sampler.rollout import Roll
@@ -20,7 +21,6 @@ from jaxtor.sampler.rollout import Roll
 NUM_ENVS = 4
 OBS_DIM = 4  # CartPole-v1 obs dimension
 MAX_EPISODE_LEN = 500
-QUEUE_SIZE = 10
 COMPONENT_NUM_ENVS = 3
 COMPONENT_ROLLOUT_LEN = 4
 
@@ -56,7 +56,7 @@ def _make_env(num_envs=NUM_ENVS):
 
 
 def _make_mc(env):
-    return Mc(max_episode_len=MAX_EPISODE_LEN, queue_size=QUEUE_SIZE, env=env)
+    return Mc(max_episode_len=MAX_EPISODE_LEN, env=env)
 
 
 def _init_vec(key, env):
@@ -184,9 +184,7 @@ def test_vecmc_init_shapes():
     assert mc_state.key.shape == (NUM_ENVS, 2)
     assert mc_state.last_obs.shape == (NUM_ENVS, OBS_DIM)
     assert mc_state.env.obs.shape == (NUM_ENVS, OBS_DIM)
-    assert mc_state.eps_rew_queue.shape == (NUM_ENVS, QUEUE_SIZE)
-    assert mc_state.eps_len_queue.shape == (NUM_ENVS, QUEUE_SIZE)
-    assert jnp.all(jnp.isnan(mc_state.eps_rew_queue))
+    assert mc_state.eps_idx.shape == (NUM_ENVS,)
 
 
 def test_vecmc_init_per_env_obs():
@@ -365,7 +363,7 @@ def test_vecmc_sample_shapes():
 
 
 def test_vecmc_sample_updates_state():
-    """VecMc.sample advances episode index and accumulates reward."""
+    """VecMc.sample advances each lane's episode index."""
     env = _make_env()
     key = jrd.PRNGKey(2)
     vec_mc, mc_state = _init_vec(key, env)
@@ -374,7 +372,6 @@ def test_vecmc_sample_updates_state():
     _, new_state = vec_mc.sample(actions, mc_state)
 
     assert jnp.all(new_state.eps_idx >= 0)
-    assert jnp.all(new_state.eps_rew >= 0)
 
 
 def test_vecmc_consecutive_observations_match():
@@ -400,8 +397,8 @@ def test_vecmc_consecutive_observations_match():
 # =============================================================================
 
 
-def test_auto_reset_triggers_episode_stats():
-    """Running many steps triggers auto-resets and populates episode queues."""
+def test_auto_reset_keeps_valid_episode_state():
+    """Running across resets preserves valid observations and episode indices."""
     env = _make_env()
     key = jrd.PRNGKey(4)
     vec_mc, mc_state = _init_vec(key, env)
@@ -410,8 +407,9 @@ def test_auto_reset_triggers_episode_stats():
         actions = jrd.randint(jrd.fold_in(key, i), (NUM_ENVS,), 0, 2)
         _, mc_state = vec_mc.sample(actions, mc_state)
 
-    assert not jnp.all(jnp.isnan(mc_state.eps_rew_queue))
-    assert not jnp.all(jnp.isnan(mc_state.eps_len_queue))
+    assert jnp.all(jnp.isfinite(mc_state.last_obs))
+    assert jnp.all(mc_state.eps_idx >= 0)
+    assert jnp.all(mc_state.eps_idx < MAX_EPISODE_LEN)
 
 
 def test_auto_reset_obs_continuity():
@@ -594,7 +592,7 @@ def test_roll_jit():
 
 
 def test_roll_multiple_iterations_with_metrics():
-    """Multiple Roll iterations followed by metrics computation."""
+    """EpisodeStats accumulates completed episodes across vector rollouts."""
     env = _make_env()
     key = jrd.PRNGKey(10)
     vec_mc, mc_state = _init_vec(key, env)
@@ -605,12 +603,15 @@ def test_roll_multiple_iterations_with_metrics():
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))
 
     roll = Roll(imc=imc, seqlen=64, seq_axis=1)
+    stats = EpisodeStats(seq_axis=1)
+    stats_state = stats.init((NUM_ENVS,))
     jit_roll = jax.jit(roll.sample)
 
     for _ in range(10):
-        _, imc_state = jit_roll(imc_state)
+        trajectory, imc_state = jit_roll(imc_state)
+        stats_state = stats.update(trajectory.mc, stats_state)
 
-    metrics, _ = vec_mc.metrics(imc_state.mc)
+    metrics, _ = stats.drain(stats_state)
 
     assert jnp.isfinite(metrics.avg_eps_rew)
     assert jnp.isfinite(metrics.avg_eps_len)
@@ -643,7 +644,7 @@ def test_eval_returns_live_runtime_state():
 def test_scalar_path_single_env():
     """Default num_envs with plain Mc works under jit without vmap."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, queue_size=5, env=env)
+    mc = Mc(max_episode_len=500, env=env)
     key = jrd.PRNGKey(11)
 
     env_state = env.init(key)
@@ -662,7 +663,7 @@ def test_scalar_path_single_env():
 def test_scalar_path_multiple_steps():
     """Scalar path runs many steps with auto-reset."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, queue_size=5, env=env)
+    mc = Mc(max_episode_len=500, env=env)
     key = jrd.PRNGKey(12)
 
     env_state = env.init(key)
@@ -673,44 +674,7 @@ def test_scalar_path_multiple_steps():
         _, mc_state = mc.sample(action, mc_state)
 
     assert jnp.all(jnp.isfinite(mc_state.last_obs))
-    assert not jnp.all(jnp.isnan(mc_state.eps_rew_queue))
-
-
-# =============================================================================
-# Metrics Tests
-# =============================================================================
-
-
-def test_metrics_reasonable_values():
-    """Metrics produce reasonable values for CartPole random policy."""
-    env = _make_env()
-    key = jrd.PRNGKey(13)
-    vec_mc, mc_state = _init_vec(key, env)
-
-    for i in range(500):
-        actions = jrd.randint(jrd.fold_in(key, i), (NUM_ENVS,), 0, 2)
-        _, mc_state = vec_mc.sample(actions, mc_state)
-
-    metrics, _ = vec_mc.metrics(mc_state)
-
-    assert metrics.avg_eps_len > 5
-    assert metrics.avg_eps_len < 100
-    assert metrics.avg_eps_rew > 0
-
-
-def test_metrics_refresh_clears_queues():
-    """Metrics call refreshes episode queues."""
-    env = _make_env()
-    key = jrd.PRNGKey(14)
-    vec_mc, mc_state = _init_vec(key, env)
-
-    for i in range(200):
-        actions = jrd.randint(jrd.fold_in(key, i), (NUM_ENVS,), 0, 2)
-        _, mc_state = vec_mc.sample(actions, mc_state)
-
-    _, refreshed_state = vec_mc.metrics(mc_state)
-    assert jnp.all(jnp.isnan(refreshed_state.eps_rew_queue))
-    assert jnp.all(jnp.isnan(refreshed_state.eps_len_queue))
+    assert 0 <= mc_state.eps_idx < 500
 
 
 # =============================================================================
@@ -721,7 +685,7 @@ def test_metrics_refresh_clears_queues():
 def test_roll_single_env():
     """Imc + single-env Mc + Roll collects trajectories."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, queue_size=5, env=env)
+    mc = Mc(max_episode_len=500, env=env)
     agent = ScalarRandomAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -750,7 +714,7 @@ def test_scalar_component_rollout_across_envs(
 ):
     """Mc, Imc, and Roll compose under jit across scalar Gymnasium envs."""
     env = gymnasium.make(name)
-    mc = Mc(max_episode_len=1000, queue_size=2, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     imc = Imc(
         agent=ZeroAgent(
             obs_shape=obs_shape,
@@ -787,7 +751,7 @@ def test_vector_component_rollout_across_envs(
 ):
     """VecMc, Imc, and Roll compose under jit across vector Gymnasium envs."""
     env = gymnasium.make(name, num_envs=COMPONENT_NUM_ENVS)
-    mc = Mc(max_episode_len=1000, queue_size=2, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     imc = Imc(
         agent=ZeroAgent(

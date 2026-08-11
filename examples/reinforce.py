@@ -159,7 +159,6 @@ env = make("CartPole-v1")
 vec_mc = VecMc(
     mc=Mc(
         max_episode_len=cfg.max_episode_len,
-        queue_size=20,
         env=env,
     )
 )

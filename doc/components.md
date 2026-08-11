@@ -23,7 +23,7 @@ flowchart TB
 
     subgraph sampling["2 · SAMPLING | episode lifecycle"]
         direction LR
-        mc["Mc<br/>reset · time limit · episode queues<br/>state: key · env · observation · statistics"]
+        mc["Mc<br/>reset · time limit<br/>state: key · env · observation · episode index"]
         vecmc["VecMc<br/>parallel vmap"]
         mc_api(["MC protocol<br/>observe(state) → obs<br/>sample(action, state) → transition"])
         mc -->|scalar| mc_api
@@ -47,12 +47,14 @@ flowchart TB
 
     subgraph collection["4 · COLLECT / EVALUATE"]
         direction LR
-        roll["Roll<br/>lax.scan over N steps<br/>trajectory: dec · mc · succ"]
+        roll["Roll<br/>lax.scan over T steps<br/>trajectory: dec · mc · succ"]
+        ep_stats["EpisodeStats<br/>partial episodes · completed sums<br/>state: return · length · count"]
         mc_eval["McEval<br/>sampled episode metrics"]
     end
 
     imc_api --> roll
     imc_api --> mc_eval
+    roll -->|MC trajectory| ep_stats
 
     subgraph tabular_branch["TABULAR OPERATIONS"]
         direction LR
@@ -81,7 +83,8 @@ flowchart TB
     roll -->|aligned trajectory| update
     sweep -->|batched transitions| update
     exp_sweep -->|value / occupancy sequences| update
-    mc_eval -->|episode metrics| report
+    ep_stats -->|training episode metrics| report
+    mc_eval -->|evaluation metrics| report
     tabular_eval -->|convergence metrics| report
 
     classDef adapter fill:#E8F0FE,stroke:#4E73A8,color:#172A46,stroke-width:1.4px;
@@ -96,7 +99,7 @@ flowchart TB
     class env_api,mc_api,agent_api,imc_api,value_api protocol;
     class mc,vecmc sampler;
     class imc,roll interactionNode;
-    class mc_eval,sweep,exp_sweep,tabular_eval analysis;
+    class ep_stats,mc_eval,sweep,exp_sweep,tabular_eval analysis;
     class dec,mdp data;
     class update,report consumer;
 
@@ -112,8 +115,8 @@ flowchart TB
 Solid arrows show runtime composition and data flow. Dotted arrows show structural
 relationships. Components are configured objects, while dynamic data lives in
 explicit state pytrees. The composition can be wrapped in `jit`; `VecMc` uses
-`vmap`, `Roll` and `McEval` use `scan`, and `grad` remains available along pure-JAX
-environment paths.
+`vmap`, while `Roll`, `EpisodeStats`, and `McEval` use `scan`. Gradient transforms
+remain available along pure-JAX environment paths.
 
 ## Host-backed Gymnasium boundary
 

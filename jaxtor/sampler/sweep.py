@@ -7,7 +7,7 @@ Example:
     >>> from jaxtor.sampler import mc, sweep
     >>> config = tabular.garnet.Config(state_size=10, action_size=4)
     >>> env = tabular.garnet.make(config)
-    >>> mc_sampler = mc.Mc(max_episode_len=100, queue_size=10, env=env)
+    >>> mc_sampler = mc.Mc(max_episode_len=100, env=env)
     >>> sweeper = sweep.Sweep(mc=mc_sampler)
     >>> env_state = env.init(key)
     >>> transition, mc_state = sweeper.sample(key, env_state)

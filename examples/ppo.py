@@ -751,7 +751,6 @@ def train(cfg: Config) -> State:
             mc=VecMc(
                 mc=Mc(
                     max_episode_len=cfg.max_episode_len,
-                    queue_size=20,
                     env=env,
                 )
             ),
@@ -777,7 +776,6 @@ def train(cfg: Config) -> State:
             mc=VecMc(
                 mc=Mc(
                     max_episode_len=cfg.max_episode_len,
-                    queue_size=20,
                     env=eval_env,
                 )
             ),

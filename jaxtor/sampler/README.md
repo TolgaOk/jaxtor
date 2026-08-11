@@ -6,6 +6,7 @@
 - `VecMc`: `vmap`-based parallel `Mc`.
 - `Imc`: caches agent data and returns an MC transition with its true successor.
 - `Roll`: stacks aligned decisions, MC transitions, and successors.
+- `EpisodeStats`: accumulates completed episodes from trajectories.
 - `Sweep`: stochastic samples over all `(s, a)` pairs.
 - `ExpSweep`: exact forward and backward propagation.
 
@@ -41,7 +42,7 @@ class EGreedy:
 ## Single step
 
 ```python
-mc = Mc(max_episode_len=100, queue_size=10, env=env)
+mc = Mc(max_episode_len=100, env=env)
 mc_state = mc.init(mc_key, env_state)
 
 imc = Imc(agent=EGreedy(eps=0.1), mc=mc)
@@ -72,6 +73,18 @@ trajectory.succ  # T decisions computed at trajectory.mc.nobs
 
 With `VecMc`, set `seq_axis=1` for `(N, T, ...)` arrays. All three trajectory
 pytrees use the same sequence axis.
+
+Episode statistics remain alongside the sampler state. Partial episodes carry
+across rollouts, while `drain` clears only completed-episode accumulators.
+
+```python
+stats = EpisodeStats(seq_axis=1)
+stats_state = stats.init(batch_shape=(n_envs,))
+
+trajectory, state = roll.sample(state)
+stats_state = stats.update(trajectory.mc, stats_state)
+metrics, stats_state = stats.drain(stats_state)
+```
 
 If agent parameters change while an `Imc.State` is retained, refresh its cached
 decision before further sampling:

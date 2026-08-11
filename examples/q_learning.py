@@ -125,7 +125,6 @@ imc = Imc(
     agent=agent,
     mc=Mc(
         max_episode_len=env.config.max_episode_len,
-        queue_size=20,
         env=env,
     ),
 )

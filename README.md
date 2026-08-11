@@ -32,9 +32,8 @@ roll = Roll(                                # N-step rollout collector
     seqlen=2048,
     imc=Imc(                                # agent + sampler interaction (Induced MC)
         agent=agent,
-        mc=Mc(                              # episode sampling + statistics (Markov Chain)
+        mc=Mc(                              # episode lifecycle (Markov Chain)
             max_episode_len=1000,
-            queue_size=10,
             env=gymnax.make("CartPole-v1"),
         ),
     ),

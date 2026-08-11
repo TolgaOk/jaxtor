@@ -118,7 +118,7 @@ def test_sample_deterministic_one_step_goal():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=20, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
@@ -147,7 +147,7 @@ def test_sample_truncation_rate_dead_end():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=5, queue_size=20, env=env)
+    mc = Mc(max_episode_len=5, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -172,7 +172,7 @@ def test_sample_more_episodes_gives_more_data():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=20, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -199,7 +199,7 @@ def test_sample_jit_compilation():
     config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=5, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -221,7 +221,7 @@ def test_sample_key_determinism():
     config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=5, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -254,7 +254,7 @@ def test_sample_truncation_rate_zero_when_all_terminate():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=20, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
 
@@ -280,7 +280,7 @@ def test_sample_dead_end_episode_length_equals_max():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=max_len, queue_size=20, env=env)
+    mc = Mc(max_episode_len=max_len, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=max_len * 3)
 
@@ -305,7 +305,7 @@ def test_sample_std_zero_for_identical_episodes():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=20, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
 
@@ -320,11 +320,10 @@ def test_sample_std_zero_for_identical_episodes():
     assert jnp.allclose(metrics.min_eps_rew, metrics.max_eps_rew, atol=1e-5)
 
 
-def test_sample_metrics_are_independent_of_mc_queue_size():
-    """Evaluation summarizes all completed episodes, not the Mc queue window."""
+def test_sample_metrics_include_all_completed_episodes():
+    """Evaluation summarizes every episode completed during its scan."""
     key = jax.random.PRNGKey(33)
 
-    # One-step episodes produce 100 completions despite a three-entry Mc queue.
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
@@ -332,7 +331,7 @@ def test_sample_metrics_are_independent_of_mc_queue_size():
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=3, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=100)
 
@@ -352,13 +351,13 @@ def test_sample_metrics_are_independent_of_mc_queue_size():
 # =============================================================================
 
 
-def test_sample_vmap_init_produces_batched_queues():
-    """vmap over sampler.init produces (n_envs, queue_size) shaped queues."""
+def test_sample_vmap_init_produces_batched_mc_state():
+    """Vectorized initialization batches every dynamic ``Mc`` state field."""
     key = jax.random.PRNGKey(40)
 
     config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
     env = tabular.garnet.make(config)
-    mc = Mc(max_episode_len=10, queue_size=7, env=env)
+    mc = Mc(max_episode_len=10, env=env)
 
     n_envs = 4
     init_key, env_key = jrd.split(key)
@@ -366,41 +365,9 @@ def test_sample_vmap_init_produces_batched_queues():
     env_keys = jrd.split(init_key, n_envs)
     states = jax.vmap(mc.init, in_axes=(0, None))(env_keys, env_state)
 
-    assert states.eps_rew_queue.shape == (n_envs, 7)
-    assert states.eps_len_queue.shape == (n_envs, 7)
+    assert states.key.shape == (n_envs, 2)
     assert states.last_obs.shape == (n_envs,)
-    assert jnp.all(jnp.isnan(states.eps_rew_queue))
-
-
-def test_sample_queues_populated_after_rollout():
-    """After rollout with completed episodes, queues contain non-NaN entries."""
-    key = jax.random.PRNGKey(41)
-
-    config = tabular.gridworld.Config(
-        board=["####", "#P@#", "####"],
-        p_slip=0.0,
-        max_episode_len=10,
-    )
-    env = tabular.gridworld.make(config)
-    mc = Mc(max_episode_len=10, queue_size=10, env=env)
-    agent = GoRightAgent()
-
-    # Manually run init + a few steps to inspect queue
-    init_key, env_key, agent_key = jrd.split(key, 3)
-    env_state = env.init(env_key)
-    mc_state = mc.init(init_key, env_state)
-    agent_state = GoRightAgent.State(key=agent_key)
-
-    # Before any steps — all NaN
-    assert jnp.all(jnp.isnan(mc_state.eps_rew_queue))
-
-    # Take one step (goal reached — episode done — queue updated)
-    dec, agent_state = agent.decide(mc.observe(mc_state), agent_state)
-    _, mc_state = mc.sample(dec.act, mc_state)
-
-    # First entry should now be populated
-    assert not jnp.isnan(mc_state.eps_rew_queue[0])
-    assert jnp.all(jnp.isnan(mc_state.eps_rew_queue[1:]))
+    assert states.eps_idx.shape == (n_envs,)
 
 
 def test_sample_episode_count_matches_expected():
@@ -413,7 +380,7 @@ def test_sample_episode_count_matches_expected():
         max_episode_len=10,
     )
     env = tabular.gridworld.make(config)
-    mc = Mc(max_episode_len=10, queue_size=20, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -440,7 +407,7 @@ def test_sample_metrics_all_scalar():
     config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, queue_size=5, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 

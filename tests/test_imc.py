@@ -99,7 +99,7 @@ def make_imc_state(
 ) -> tuple[Imc, Imc.State]:
     """Build a scalar IMC and initialize its cached decision."""
     env = CounterEnv()
-    mc = Mc(max_episode_len=10, queue_size=2, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=RichAgent(), mc=mc)
     mc_state = mc.init(key, env.init())
     state = imc.init(
@@ -183,7 +183,7 @@ def test_vec_mc_decisions_preserve_batch_axes():
     """One batched agent composes with a vectorized Markov chain."""
     n_envs = 3
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, queue_size=2, env=env))
+    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
     imc = Imc(agent=RichAgent(), mc=mc)
     state = imc.init(
         mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
@@ -202,7 +202,7 @@ def test_vec_mc_selects_reset_nodes_only_for_boundary_lanes():
     """Mixed vector boundaries keep normal successors and replace done lanes."""
     n_envs = 3
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, queue_size=2, env=env))
+    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
     mc_state = mc.init(jax.random.split(jax.random.key(0), n_envs), env.init())
     obs = jnp.array([0, 1, 0], dtype=jnp.int32)
     mc_state = mc_state.replace(

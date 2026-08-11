@@ -296,7 +296,7 @@ def test_reset_is_deterministic_in_key():
 def test_mc_scalar_path():
     """Plain Mc samples transitions with scalar reward/termination."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, queue_size=5, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     key = jrd.PRNGKey(6)
     env_state = env.init(key)
     mc_state = mc.init(key, env_state)
@@ -310,7 +310,7 @@ def test_mc_scalar_path():
 def test_vecmc_sample_shapes():
     """VecMc samples batched transitions with correct per-env shapes."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, queue_size=5, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(7)
     env_state = env.init(key)
@@ -338,7 +338,7 @@ def test_jit_step():
 def test_roll_chain_jit():
     """Imc + VecMc + Roll collects batched trajectories under jit."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, queue_size=5, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(9)
 
@@ -357,14 +357,11 @@ def test_roll_chain_jit():
     assert trajectory.dec.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
     assert trajectory.mc.rew.shape == (NUM_ENVS, seqlen)
 
-    metrics, _ = vec_mc.metrics(imc_state.mc)
-    assert jnp.isfinite(metrics.avg_eps_len)
-
 
 def test_roll_single_env():
     """Imc + single-env Mc + Roll collects a trajectory."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, queue_size=5, env=env)
+    mc = Mc(max_episode_len=1000, env=env)
     imc = Imc(agent=ScalarRandomAgent(), mc=mc)
     key = jrd.PRNGKey(30)
 

@@ -1,4 +1,4 @@
-"""Open Markov-chain sampling with episode lifecycle statistics.
+"""Open Markov-chain sampling with episode lifecycle handling.
 
 ``Mc`` turns an environment into a transition sampler. ``VecMc`` applies the
 same interface to a batch of independent environment states.
@@ -43,31 +43,26 @@ class Env[StateT, StepT: EnvStep](Protocol):
 
 @dataclass
 class Mc[EnvStateT, EnvStepT: EnvStep]:
-    """Sample an open Markov chain and track completed episodes.
+    """Sample an open Markov chain with reset and truncation handling.
 
-    ``Mc`` owns the episode limit and rolling metric queues. Its state keeps
-    the current environment observation so :meth:`observe` does not inspect
-    backend-specific environment state.
+    Its state keeps the current observation and episode index so
+    :meth:`observe` does not inspect backend-specific environment state.
 
     Attributes:
         max_episode_len: Maximum number of transitions in one episode.
-        queue_size: Number of completed episodes retained for metrics.
         env: Environment implementing ``reset`` and non-autoreset ``step``.
 
     Public dataclasses:
-        State: Environment, RNG, current observation, and episode statistics.
+        State: Environment, RNG, current observation, and episode index.
         Transition: One aligned ``obs, act, rew, term, trun, nobs`` sample.
-        Metrics: Mean return and length of queued completed episodes.
 
     Public methods:
         init: Initialize state from a backend-specific environment state.
         observe: Read the current observation without advancing state.
         sample: Advance once and autoreset at an episode boundary.
-        metrics: Read aggregate episode metrics and clear their queues.
     """
 
     max_episode_len: int
-    queue_size: int
     env: Env[EnvStateT, EnvStepT]
 
     @dataclass
@@ -79,18 +74,12 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             env: Backend-specific environment state.
             last_obs: Observation from which the next action is taken.
             eps_idx: Number of transitions completed in the current episode.
-            eps_rew: Return accumulated in the current episode.
-            eps_rew_queue: Returns of recently completed episodes.
-            eps_len_queue: Lengths of recently completed episodes.
         """
 
         key: jax.Array
         env: EnvDataT
         last_obs: jax.Array
         eps_idx: jax.Array
-        eps_rew: jax.Array
-        eps_rew_queue: jax.Array
-        eps_len_queue: jax.Array
 
     @dataclass
     class Transition:
@@ -113,18 +102,6 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         nobs: jax.Array
 
     @dataclass
-    class Metrics:
-        """Aggregate statistics over queued completed episodes.
-
-        Attributes:
-            avg_eps_rew: Mean completed-episode return.
-            avg_eps_len: Mean completed-episode length.
-        """
-
-        avg_eps_rew: jax.Array
-        avg_eps_len: jax.Array
-
-    @dataclass
     class _Advance[EnvDataT]:
         """Data required to finish one environment advance."""
 
@@ -135,11 +112,9 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         reset_key: jax.Array
 
     def __post_init__(self) -> None:
-        """Validate static episode and queue configuration."""
+        """Validate the static episode limit."""
         if self.max_episode_len < 1:
             raise ValueError("max_episode_len must be positive")
-        if self.queue_size < 1:
-            raise ValueError("queue_size must be positive")
 
     def init(
         self,
@@ -154,9 +129,6 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             env=env,
             last_obs=jnp.asarray(obs),
             eps_idx=jnp.array(0, dtype=jnp.int32),
-            eps_rew=jnp.array(0.0),
-            eps_rew_queue=jnp.full(self.queue_size, jnp.nan),
-            eps_len_queue=jnp.full(self.queue_size, jnp.nan),
         )
 
     def observe(self, state: Mc.State[EnvStateT]) -> jax.Array:
@@ -178,17 +150,6 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             advance,
         )
         return transition, state
-
-    def metrics(
-        self,
-        state: Mc.State[EnvStateT],
-    ) -> tuple[Mc.Metrics, Mc.State[EnvStateT]]:
-        """Return queued episode metrics and clear both metric queues."""
-        metrics = self.Metrics(
-            avg_eps_rew=jnp.nanmean(state.eps_rew_queue),
-            avg_eps_len=jnp.nanmean(state.eps_len_queue),
-        )
-        return metrics, self._clear_metric_queues(state)
 
     def _advance(
         self,
@@ -228,24 +189,14 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         self,
         advance: Mc._Advance[EnvStateT],
     ) -> Mc.State[EnvStateT]:
-        """Reset after a boundary and record the completed episode."""
+        """Reset after a terminal or truncated transition."""
         state = advance.state
-        transition = advance.transition
         obs, env = self.env.reset(advance.reset_key, advance.env)
         return state.replace(  # type: ignore[reportAttributeAccessIssue]
             key=advance.key,
             env=env,
             last_obs=jnp.asarray(obs),
             eps_idx=jnp.zeros_like(state.eps_idx),
-            eps_rew=jnp.zeros_like(state.eps_rew),
-            eps_rew_queue=(
-                jnp.roll(state.eps_rew_queue, shift=1)
-                .at[0]
-                .set(state.eps_rew + transition.rew)
-            ),
-            eps_len_queue=(
-                jnp.roll(state.eps_len_queue, shift=1).at[0].set(state.eps_idx + 1)
-            ),
         )
 
     @staticmethod
@@ -260,17 +211,6 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             env=advance.env,
             last_obs=transition.nobs,
             eps_idx=state.eps_idx + 1,
-            eps_rew=state.eps_rew + transition.rew,
-        )
-
-    @staticmethod
-    def _clear_metric_queues(
-        state: Mc.State[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
-        """Clear completed-episode queues after their metrics are consumed."""
-        return state.replace(  # type: ignore[reportAttributeAccessIssue]
-            eps_rew_queue=jnp.full_like(state.eps_rew_queue, jnp.nan),
-            eps_len_queue=jnp.full_like(state.eps_len_queue, jnp.nan),
         )
 
 
@@ -289,7 +229,6 @@ class VecMc[EnvStateT, EnvStepT: EnvStep]:
         init: Vectorize ``Mc.init`` over random keys.
         observe: Read batched current observations.
         sample: Advance all lanes and handle mixed boundaries.
-        metrics: Aggregate and clear per-lane episode metric queues.
     """
 
     mc: Mc[EnvStateT, EnvStepT]
@@ -335,20 +274,6 @@ class VecMc[EnvStateT, EnvStepT: EnvStep]:
             boundary,
         )
         return transition, state
-
-    def metrics(
-        self,
-        state: Mc.State[EnvStateT],
-    ) -> tuple[Mc.Metrics, Mc.State[EnvStateT]]:
-        """Aggregate episode metrics across lanes and clear their queues."""
-        per_env, state = jax.vmap(self.mc.metrics)(state)
-        return (
-            Mc.Metrics(
-                avg_eps_rew=jnp.nanmean(per_env.avg_eps_rew),
-                avg_eps_len=jnp.nanmean(per_env.avg_eps_len),
-            ),
-            state,
-        )
 
     def _reset_boundaries(
         self,

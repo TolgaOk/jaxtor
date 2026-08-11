@@ -42,7 +42,7 @@ from rich.progress import track
 
 from jaxtor.env import gymnasium
 from jaxtor.eval.mc import Eval as Evaluator
-from jaxtor.sampler import Imc, Mc, Roll, VecMc
+from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 from jaxtor.util.reward_norm import RewardNorm
 from jaxtor.util.running_stats import RunningStats
 
@@ -240,6 +240,7 @@ class State:
 
     mc: Mc.State
     agent: Agent.State
+    stats: EpisodeStats.State
     rew_norm: RewardNorm.State
     opt: optax.OptState
 
@@ -248,8 +249,8 @@ def train_step(
     state: State,
     *,
     agent: Agent,
-    mc: VecMc,
     roll: Roll,
+    stats: EpisodeStats,
     rew_norm: RewardNorm,
     tx: optax.GradientTransformation,
     cfg: Config,
@@ -258,8 +259,13 @@ def train_step(
     # 1. Collect rollout
     imc_state = roll.imc.init(state.mc, state.agent)
     trajectory, imc_state = roll.sample(imc_state)
-    sam_metrics, mc_state = mc.metrics(imc_state.mc)
-    state = state.replace(mc=mc_state, agent=imc_state.agent)
+    stats_state = stats.update(trajectory.mc, state.stats)
+    sam_metrics, stats_state = stats.drain(stats_state)
+    state = state.replace(
+        mc=imc_state.mc,
+        agent=imc_state.agent,
+        stats=stats_state,
+    )
     dones = jnp.logical_or(trajectory.mc.term, trajectory.mc.trun)
 
     # 2. Obs normalization
@@ -421,7 +427,6 @@ def train(cfg: Config) -> State:
     train_mc = VecMc(
         mc=Mc(
             max_episode_len=cfg.max_episode_len,
-            queue_size=20,
             env=env,
         )
     )
@@ -430,11 +435,11 @@ def train(cfg: Config) -> State:
         seq_axis=1,
         imc=Imc(agent=agent, mc=train_mc),
     )
+    stats = EpisodeStats(seq_axis=1)
 
     eval_mc = VecMc(
         mc=Mc(
             max_episode_len=cfg.max_episode_len,
-            queue_size=20,
             env=eval_env,
         )
     )
@@ -483,6 +488,7 @@ def train(cfg: Config) -> State:
     state = State(
         mc=train_mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
         agent=agent_state,
+        stats=stats.init(batch_shape=(cfg.n_envs,)),
         rew_norm=RewardNorm.State(
             ret=jnp.zeros(cfg.n_envs),
             rms=RunningStats.State(
@@ -499,8 +505,8 @@ def train(cfg: Config) -> State:
         return train_step(
             state,
             agent=agent,
-            mc=train_mc,
             roll=roll,
+            stats=stats,
             rew_norm=rew_norm,
             tx=tx,
             cfg=cfg,

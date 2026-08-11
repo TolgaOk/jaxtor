@@ -97,7 +97,7 @@ def make_roll(
 ) -> tuple[Roll, Imc.State]:
     """Build a scalar rollout and its initialized IMC state."""
     env = CounterEnv()
-    mc = Mc(max_episode_len=10, queue_size=2, env=env)
+    mc = Mc(max_episode_len=10, env=env)
     imc = Imc(agent=ValueAgent(), mc=mc)
     state = imc.init(
         mc.init(key, env.init()),
@@ -159,7 +159,7 @@ def test_roll_moves_one_sequence_axis_consistently():
     n_envs = 3
     seqlen = 4
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, queue_size=2, env=env))
+    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
     imc = Imc(agent=ValueAgent(), mc=mc)
     state = imc.init(
         mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
