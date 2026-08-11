@@ -54,9 +54,9 @@ class GymnaxEnv:
         """
 
         nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     def init(self, key: chex.PRNGKey) -> GymnaxEnv.State:
         """Initialize the environment state.

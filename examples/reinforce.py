@@ -104,14 +104,20 @@ class Agent:
         key: jax.Array
         params: eqx.Module
 
-    def act(
+    @dataclass
+    class Decision:
+        """Sampled action collected by ``Imc``."""
+
+        act: chex.Array
+
+    def decide(
         self, obs: chex.Array, state: Agent.State
-    ) -> tuple[chex.Array, Agent.State]:
-        """Select an action given an observation."""
+    ) -> tuple[Agent.Decision, Agent.State]:
+        """Prepare a sampled action for an observation."""
         key, act_key = jrd.split(state.key)
         logits = state.params(obs)
         action = jrd.categorical(act_key, logits / self.tau)
-        return action, state.replace(key=key)
+        return self.Decision(act=action), state.replace(key=key)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,22 +127,22 @@ class Agent:
 
 def reinforce_loss(
     params: eqx.Module,
-    trans: Mc.Transition,
+    trajectory: Roll.Trajectory,
     gamma: float,
     entropy_coef: float,
 ) -> chex.Numeric:
     """REINFORCE policy gradient loss with entropy bonus."""
-    logits = jax.vmap(jax.vmap(params))(trans.obs)
+    logits = jax.vmap(jax.vmap(params))(trajectory.mc.obs)
 
-    discount_t = jnp.where(trans.term, 0.0, gamma)
+    discount_t = jnp.where(trajectory.mc.term, 0.0, gamma)
 
     returns = jax.vmap(rlax.discounted_returns, in_axes=(0, 0, None))(
-        trans.rew, discount_t, jnp.float32(0.0)
+        trajectory.mc.rew, discount_t, jnp.float32(0.0)
     )
 
     w_t = jnp.ones_like(returns)
     pg_loss = jax.vmap(rlax.policy_gradient_loss)(
-        logits, trans.act.astype(jnp.int32), returns, w_t
+        logits, trajectory.dec.act.astype(jnp.int32), returns, w_t
     ).mean()
     ent_loss = jax.vmap(rlax.entropy_loss)(logits, w_t).mean()
 
@@ -149,24 +155,27 @@ def reinforce_loss(
 
 cfg = tyro.cli(Config)
 key = jrd.PRNGKey(cfg.seed)
-mc = Mc(
-    max_episode_len=cfg.max_episode_len,
-    queue_size=20,
-    env=make("CartPole-v1"),
+env = make("CartPole-v1")
+vec_mc = VecMc(
+    mc=Mc(
+        max_episode_len=cfg.max_episode_len,
+        queue_size=20,
+        env=env,
+    )
 )
-beavior_agent = Agent(tau=cfg.tau_mu)
+behavior_agent = Agent(tau=cfg.tau_mu)
 target_agent = Agent(tau=cfg.tau_pi)
 
 # Training rollout sampler
 roll = Roll(
-    imc=Imc(agent=beavior_agent, mc=VecMc(mc=mc)),
+    imc=Imc(agent=behavior_agent, mc=vec_mc),
     seqlen=cfg.seqlen,
     seq_axis=1,
 )
 
 # Eval component
 evaluator = Evaluator(
-    imc=Imc(agent=target_agent, mc=VecMc(mc=mc)),
+    imc=Imc(agent=target_agent, mc=vec_mc),
     episode_len=cfg.max_episode_len,
 )
 
@@ -174,13 +183,14 @@ evaluator = Evaluator(
 @jax.jit
 def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
     """Sample a rollout, compute REINFORCE loss, and update params."""
-    trans, state = roll.sample(state)
+    trajectory, state = roll.sample(state)
     params = state.agent.params
     loss, grads = jax.value_and_grad(reinforce_loss)(
-        params, trans, cfg.gamma, cfg.entropy_coef
+        params, trajectory, cfg.gamma, cfg.entropy_coef
     )
     new_params = jax.tree.map(lambda p, g: p - cfg.lr * g, params, grads)
-    return eqx.tree_at(lambda s: s.agent.params, state, new_params), loss
+    state = eqx.tree_at(lambda s: s.agent.params, state, new_params)
+    return roll.imc.refresh(state), loss
 
 
 jit_eval = jax.jit(evaluator.evaluate)
@@ -193,9 +203,9 @@ print("[bold green]CartPole REINFORCE[/bold green]")
 
 # Init states
 key, params_key, env_key, agent_key, eval_key = jrd.split(key, 5)
-imc_state = Imc.State(
-    mc=VecMc(mc=mc).init(jrd.split(key, cfg.n_envs), env=mc.env.init(env_key)),
-    agent=Agent.State(key=agent_key, params=MLP(4, cfg.hidden, 2, key=params_key)),
+imc_state = roll.imc.init(
+    vec_mc.init(jrd.split(key, cfg.n_envs), env=env.init(env_key)),
+    Agent.State(key=agent_key, params=MLP(4, cfg.hidden, 2, key=params_key)),
 )
 
 t0 = time.time()
@@ -205,9 +215,9 @@ for i in track(range(cfg.n_iters), description="Training"):
     if (i + 1) % cfg.eval_freq == 0:
         eval_key, env_key, k = jrd.split(eval_key, 3)
         m, eval_state = jit_eval(
-            Imc.State(
-                mc=VecMc(mc=mc).init(jrd.split(k, cfg.eval_envs), mc.env.init(env_key)),
-                agent=imc_state.agent,
+            evaluator.imc.init(
+                vec_mc.init(jrd.split(k, cfg.eval_envs), env.init(env_key)),
+                imc_state.agent.replace(key=eval_key),
             )
         )
         steps = (i + 1) * cfg.n_envs * cfg.seqlen

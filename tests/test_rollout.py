@@ -1,335 +1,192 @@
-"""Tests for Roll trajectory collector."""
+"""Tests for decision-MC-successor trajectory collection."""
 
 import chex
 import jax
 import jax.numpy as jnp
-import pytest
 from chex import dataclass
-from jaxtor.sampler import imc, mc, rollout
-from jaxtor.env import tabular
+
+from jaxtor.sampler import Imc, Mc, Roll, VecMc
 
 
-class GoRightAgent:
-    """Agent that always takes the 'right' action (action index 1)."""
-
-    @dataclass
-    class State:
-        key: chex.PRNGKey
-
-    def act(self, obs, state):
-        return jnp.array(1), state
-
-
-class CountingAgent:
-    """Agent with a counter in state that increments each step."""
+@dataclass
+class CounterEnv:
+    """Deterministic environment terminating after three actions."""
 
     @dataclass
     class State:
-        key: chex.PRNGKey
-        counter: int
+        """Current counter value."""
 
-    def __init__(self, action_size: int = 4):
-        self.action_size = action_size
+        count: jax.Array
 
-    def act(self, obs, state):
-        action = jnp.array(0)
-        new_state = state.replace(counter=state.counter + 1)
-        return action, new_state
+    @dataclass
+    class Step:
+        """Environment step result."""
+
+        nobs: chex.Array
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
+
+    def init(self) -> State:
+        """Return the initial environment state."""
+        return self.State(count=jnp.array(0, dtype=jnp.int32))
+
+    def reset(
+        self,
+        key: jax.Array,
+        state: State,
+    ) -> tuple[jax.Array, State]:
+        """Reset the counter to zero."""
+        del key, state
+        count = jnp.array(0, dtype=jnp.int32)
+        return count, self.State(count=count)
+
+    def step(
+        self,
+        key: jax.Array,
+        act: jax.Array,
+        state: State,
+    ) -> tuple[Step, State]:
+        """Advance one counter step."""
+        del key, act
+        count = state.count + 1
+        return self.Step(
+            nobs=count,
+            rew=count.astype(jnp.float32),
+            term=count == 3,
+            trun=jnp.array(False),
+        ), self.State(count=count)
 
 
-class RandomAgent:
-    """Agent that takes random actions."""
+@dataclass
+class ValueAgent:
+    """Agent attaching a behavior log-probability and value to each decision."""
 
     @dataclass
     class State:
-        key: chex.PRNGKey
+        """Number of decisions prepared by the agent."""
 
-    def __init__(self, action_size: int = 4):
-        self.action_size = action_size
+        decisions: jax.Array
 
-    def act(self, obs, state):
-        key, subkey = jax.random.split(state.key)
-        action = jax.random.randint(subkey, (), 0, self.action_size)
-        return action, state.replace(key=key)
+    @dataclass
+    class Decision:
+        """Learning data attached to a decision."""
+
+        act: chex.Array
+        log_mu: jax.Array
+        value: jax.Array
+
+    def decide(
+        self,
+        obs: jax.Array,
+        state: State,
+    ) -> tuple[Decision, State]:
+        """Prepare one deterministic decision."""
+        dec = self.Decision(
+            act=jnp.zeros_like(obs, dtype=jnp.int32),
+            log_mu=-obs.astype(jnp.float32),
+            value=10.0 * obs.astype(jnp.float32),
+        )
+        return dec, state.replace(decisions=state.decisions + 1)
 
 
-# =============================================================================
-# Roll Basic Tests
-# =============================================================================
-
-
-def test_roll_output_shapes():
-    """Test Roll produces correct output shapes."""
-    key = jax.random.PRNGKey(0)
-    seqlen = 10
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
+def make_roll(
+    key: jax.Array,
+    *,
+    seqlen: int,
+) -> tuple[Roll, Imc.State]:
+    """Build a scalar rollout and its initialized IMC state."""
+    env = CounterEnv()
+    mc = Mc(max_episode_len=10, queue_size=2, env=env)
+    imc = Imc(agent=ValueAgent(), mc=mc)
+    state = imc.init(
+        mc.init(key, env.init()),
+        ValueAgent.State(decisions=jnp.array(0, dtype=jnp.int32)),
     )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=seqlen)
-
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State(key=key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    transitions, next_state = sampler.sample(state)
-
-    assert transitions.obs.shape == (seqlen,)
-    assert transitions.act.shape == (seqlen,)
-    assert transitions.rew.shape == (seqlen,)
-    assert transitions.term.shape == (seqlen,)
-    assert transitions.trun.shape == (seqlen,)
-    assert transitions.nobs.shape == (seqlen,)
+    return Roll(imc=imc, seqlen=seqlen), state
 
 
-def test_roll_trajectory_consistency():
-    """Test consecutive observations match within trajectories."""
-    key = jax.random.PRNGKey(0)
+def test_roll_stacks_three_aligned_sequences():
+    """Agent nodes, MC transitions, and successors all have length T."""
+    roll, state = make_roll(jax.random.key(0), seqlen=5)
 
-    config = tabular.gridworld.Config(
-        board=["######", "#P  @#", "######"],
-        p_slip=0.0,
-        max_episode_len=10,
+    trajectory, _ = roll.sample(state)
+
+    chex.assert_shape(trajectory.dec.log_mu, (5,))
+    chex.assert_shape(trajectory.mc.obs, (5,))
+    chex.assert_shape(trajectory.mc.rew, (5,))
+    chex.assert_shape(trajectory.mc.nobs, (5,))
+    chex.assert_shape(trajectory.succ.value, (5,))
+
+
+def test_roll_exposes_normal_and_boundary_alignment():
+    """Normal successors continue while terminal successors precede reset nodes."""
+    roll, state = make_roll(jax.random.key(0), seqlen=4)
+
+    trajectory, state = roll.sample(state)
+
+    assert jnp.array_equal(trajectory.mc.obs, jnp.array([0, 1, 2, 0]))
+    assert jnp.array_equal(trajectory.mc.nobs, jnp.array([1, 2, 3, 1]))
+    assert jnp.array_equal(trajectory.mc.term, jnp.array([False, False, True, False]))
+    assert roll.imc.mc.observe(state.mc) == 1
+
+
+def test_roll_uses_cached_successors_between_calls():
+    """The next rollout begins at the decision cached by the previous one."""
+    roll, state = make_roll(jax.random.key(0), seqlen=2)
+    _, state = roll.sample(state)
+    expected = state.dec
+    expected_obs = roll.imc.mc.observe(state.mc)
+
+    trajectory, _ = roll.sample(state)
+
+    assert trajectory.mc.obs[0] == expected_obs
+    assert trajectory.dec.value[0] == expected.value
+
+
+def test_roll_is_jittable():
+    """The complete trajectory collection compiles under JIT."""
+    roll, state = make_roll(jax.random.key(0), seqlen=5)
+
+    trajectory, state = jax.jit(roll.sample)(state)
+
+    chex.assert_shape(trajectory.mc.obs, (5,))
+    chex.assert_shape(state.dec.value, ())
+
+
+def test_roll_moves_one_sequence_axis_consistently():
+    """Vectorized rollouts place all three sequences on the configured axis."""
+    n_envs = 3
+    seqlen = 4
+    env = CounterEnv()
+    mc = VecMc(mc=Mc(max_episode_len=10, queue_size=2, env=env))
+    imc = Imc(agent=ValueAgent(), mc=mc)
+    state = imc.init(
+        mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
+        ValueAgent.State(decisions=jnp.array(0, dtype=jnp.int32)),
     )
-    env = tabular.gridworld.make(config)
+    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
 
-    mc_sampler = mc.Mc(max_episode_len=10, queue_size=5, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=5)
+    trajectory, _ = jax.jit(roll.sample)(state)
 
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State(key=key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    transitions, next_state = sampler.sample(state)
-
-    for i in range(4):
-        done = jnp.logical_or(transitions.term[i], transitions.trun[i])
-        if not done:
-            assert jnp.allclose(transitions.nobs[i], transitions.obs[i + 1])
+    chex.assert_shape(trajectory.mc.obs, (n_envs, seqlen))
+    chex.assert_shape(trajectory.mc.rew, (n_envs, seqlen))
+    chex.assert_shape(trajectory.mc.nobs, (n_envs, seqlen))
+    chex.assert_shape(trajectory.succ.value, (n_envs, seqlen))
 
 
-def test_roll_state_continuity():
-    """Test state preservation across multiple sample calls."""
-    key = jax.random.PRNGKey(0)
+def test_roll_unroll_factor_preserves_results():
+    """Changing scan unrolling does not change the trajectory."""
+    roll, state = make_roll(jax.random.key(0), seqlen=6)
+    expected, _ = roll.sample(state)
 
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=20,
+    actual, _ = Roll(imc=roll.imc, seqlen=6, _unroll=3).sample(state)
+
+    assert all(
+        bool(jnp.array_equal(left, right))
+        for left, right in zip(
+            jax.tree.leaves(actual),
+            jax.tree.leaves(expected),
+            strict=True,
+        )
     )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=20, queue_size=10, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=5)
-
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State(key=key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    transitions1, state = sampler.sample(state)
-    last_obs_after_first = state.mc.last_obs
-
-    transitions2, state = sampler.sample(state)
-
-    assert jnp.allclose(transitions2.obs[0], last_obs_after_first)
-
-
-def test_roll_agent_state_updates():
-    """Test stateful agent state updates during rollout."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = CountingAgent(action_size=4)
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=10)
-
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = CountingAgent.State(key=key, counter=0)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    assert state.agent.counter == 0
-
-    transitions, state = sampler.sample(state)
-    assert state.agent.counter == 10
-
-    transitions, state = sampler.sample(state)
-    assert state.agent.counter == 20
-
-
-def test_roll_jit_compilation():
-    """Verify Roll sample() can be JIT compiled."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=10)
-
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State(key=key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    jit_sample = jax.jit(sampler.sample)
-
-    transitions, next_state = jit_sample(state)
-
-    assert transitions.obs.shape == (10,)
-    assert transitions.act.shape == (10,)
-
-
-def test_roll_seqlen_one():
-    """Test with seqlen=1 (single step rollout)."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=1)
-
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = GoRightAgent.State(key=key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    transitions, next_state = sampler.sample(state)
-
-    assert transitions.obs.shape == (1,)
-    assert transitions.rew.shape == (1,)
-
-
-def test_roll_unroll_parameter():
-    """Test that _unroll parameter works correctly."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = GoRightAgent()
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-
-    for unroll in [1, 2, 5]:
-        sampler = rollout.Roll(imc=imc_step, seqlen=10, _unroll=unroll)
-
-        env_state = env.init(key)
-        mc_state = mc_sampler.init(key, env_state)
-        agent_state = GoRightAgent.State(key=key)
-        state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-        transitions, next_state = sampler.sample(state)
-
-        assert transitions.obs.shape == (10,)
-
-
-# =============================================================================
-# Roll + VecMc Tests
-# =============================================================================
-
-
-def test_long_roll_stability():
-    """Verify 1000-step rollout has no NaN values."""
-    key = jax.random.PRNGKey(0)
-    seqlen = 1000
-
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=100, env=env)
-    agent = RandomAgent(action_size=4)
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=seqlen)
-
-    key, agent_key = jax.random.split(key)
-    env_state = env.init(key)
-    mc_state = mc_sampler.init(key, env_state)
-    agent_state = RandomAgent.State(key=agent_key)
-    state = imc.Imc.State(mc=mc_state, agent=agent_state)
-
-    transitions, _ = sampler.sample(state)
-
-    assert not bool(jnp.any(jnp.isnan(transitions.obs)))
-    assert not bool(jnp.any(jnp.isnan(transitions.rew)))
-    assert not bool(jnp.any(jnp.isnan(transitions.nobs)))
-
-
-@pytest.mark.statistical
-def test_deterministic_reproducibility():
-    """Verify identical keys produce identical trajectories."""
-    config = tabular.garnet.Config(
-        state_size=10,
-        action_size=4,
-        max_episode_len=50,
-    )
-    env = tabular.garnet.make(config)
-
-    mc_sampler = mc.Mc(max_episode_len=50, queue_size=5, env=env)
-    agent = RandomAgent(action_size=4)
-    imc_step = imc.Imc(agent=agent, mc=mc_sampler)
-    sampler = rollout.Roll(imc=imc_step, seqlen=20)
-
-    # First run
-    key1 = jax.random.PRNGKey(42)
-    env_state1 = env.init(key1)
-    mc_state1 = mc_sampler.init(key1, env_state1)
-    key1, agent_key1 = jax.random.split(key1)
-    agent_state1 = RandomAgent.State(key=agent_key1)
-    state1 = imc.Imc.State(mc=mc_state1, agent=agent_state1)
-    transitions1, _ = sampler.sample(state1)
-
-    # Second run with same key
-    key2 = jax.random.PRNGKey(42)
-    env_state2 = env.init(key2)
-    mc_state2 = mc_sampler.init(key2, env_state2)
-    key2, agent_key2 = jax.random.split(key2)
-    agent_state2 = RandomAgent.State(key=agent_key2)
-    state2 = imc.Imc.State(mc=mc_state2, agent=agent_state2)
-    transitions2, _ = sampler.sample(state2)
-
-    assert bool(jnp.allclose(transitions1.obs, transitions2.obs))
-    assert bool(jnp.allclose(transitions1.act, transitions2.act))
-    assert bool(jnp.allclose(transitions1.rew, transitions2.rew))

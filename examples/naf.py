@@ -179,23 +179,37 @@ class Agent:
         p_net: MLP
         obs_stats: RunningStats.State
 
+    @dataclass
+    class Decision:
+        """Action attached to one NAF decision."""
+
+        act: chex.Array
+
     def _precision(self, obs: chex.Array, state: Agent.State) -> jax.Array:
         """Diagonal precision p = softplus(net(s)) + ε."""
         return jax.nn.softplus(state.p_net(obs)) + self.noise_eps
 
-    def act(self, obs: chex.Array, state: Agent.State):
-        if self.obs_norm is not None:
-            obs = self.obs_norm.normalize(obs, state.obs_stats)
-        mu_raw = state.mu_net(obs)
+    def decide(
+        self,
+        obs: chex.Array,
+        state: Agent.State,
+    ) -> tuple[Agent.Decision, Agent.State]:
+        """Prepare a deterministic or exploratory NAF action."""
+        policy_obs = (
+            self.obs_norm.normalize(obs, state.obs_stats)
+            if self.obs_norm is not None
+            else obs
+        )
+        mu_raw = state.mu_net(policy_obs)
         if self.deterministic:
             action = jnp.tanh(mu_raw)
         else:
             key, k = jrd.split(state.key)
-            p = self._precision(obs, state)
+            p = self._precision(policy_obs, state)
             eps = jrd.normal(k, mu_raw.shape)
             action = jnp.tanh(mu_raw + self.noise_scale * eps / jnp.sqrt(p))
             state = state.replace(key=key)
-        return action, state
+        return self.Decision(act=action), state
 
     def q_val(self, obs: chex.Array, act: chex.Array, state: Agent.State) -> jax.Array:
         """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
@@ -234,6 +248,7 @@ def train_step(
     state: State,
     *,
     agent: Agent,
+    mc: VecMc,
     roll: Roll,
     rew_norm: RewardNorm,
     tx: optax.GradientTransformation,
@@ -241,34 +256,43 @@ def train_step(
 ) -> tuple[State, dict]:
     """One NAF iteration: collect rollout, compute Q(λ) targets, train Q."""
     # 1. Collect rollout
-    trans, imc_state = roll.sample(Imc.State(mc=state.mc, agent=state.agent))
-    sam_metrics, mc_state = roll.imc.mc.metrics(imc_state.mc)
+    imc_state = roll.imc.init(state.mc, state.agent)
+    trajectory, imc_state = roll.sample(imc_state)
+    sam_metrics, mc_state = mc.metrics(imc_state.mc)
     state = state.replace(mc=mc_state, agent=imc_state.agent)
-    dones = jnp.logical_or(trans.term, trans.trun)
+    dones = jnp.logical_or(trajectory.mc.term, trajectory.mc.trun)
 
     # 2. Obs normalization
     if agent.obs_norm is not None:
         obs_stats = agent.obs_norm.update(
-            trans.obs.reshape(-1, trans.obs.shape[-1]), state.agent.obs_stats
+            trajectory.mc.obs.reshape(-1, trajectory.mc.obs.shape[-1]),
+            state.agent.obs_stats,
         )
         state = state.replace(agent=state.agent.replace(obs_stats=obs_stats))
-        obs_n = agent.obs_norm.normalize(trans.obs, state.agent.obs_stats)
-        nobs_n = agent.obs_norm.normalize(trans.nobs, state.agent.obs_stats)
+        obs_n = agent.obs_norm.normalize(trajectory.mc.obs, state.agent.obs_stats)
+        nobs_n = agent.obs_norm.normalize(
+            trajectory.mc.nobs,
+            state.agent.obs_stats,
+        )
     else:
-        obs_n, nobs_n = trans.obs, trans.nobs
+        obs_n, nobs_n = trajectory.mc.obs, trajectory.mc.nobs
 
     # 3. Reward normalization
     if cfg.normalize_reward:
-        rewards, rew_state = rew_norm.update(trans.rew, dones, state.rew_norm)
+        rewards, rew_state = rew_norm.update(
+            trajectory.mc.rew,
+            dones,
+            state.rew_norm,
+        )
         state = state.replace(rew_norm=rew_state)
     else:
-        rewards = trans.rew
+        rewards = trajectory.mc.rew
 
     # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
-    discount_t = cfg.gamma * (1.0 - trans.term.astype(jnp.float32))
+    discount_t = cfg.gamma * (1.0 - trajectory.mc.term.astype(jnp.float32))
     v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
     q_t = jax.vmap(jax.vmap(lambda o, a: agent.q_val(o, a, state.agent)))(
-        obs_n[:, 1:], trans.act[:, 1:]
+        obs_n[:, 1:], trajectory.dec.act[:, 1:]
     )
     c_t = cfg.trace_lambda * (1.0 - dones[:, :-1].astype(jnp.float32))
 
@@ -283,7 +307,7 @@ def train_step(
     mb_size = batch_size // cfg.n_minibatches
     batch = jax.tree.map(
         lambda x: x.reshape(batch_size, *x.shape[2:]),
-        Batch(obs=obs_n, act=trans.act, ret=targets),
+        Batch(obs=obs_n, act=trajectory.dec.act, ret=targets),
     )
 
     # 6. Epoch loop: shuffle and minibatch SGD over fixed targets
@@ -327,8 +351,8 @@ def train_step(
     infos["sam_rew"] = sam_metrics.avg_eps_rew
 
     # Diagnostics
-    infos["act_mean"] = jnp.mean(jnp.abs(trans.act))
-    infos["act_max"] = jnp.max(jnp.abs(trans.act))
+    infos["act_mean"] = jnp.mean(jnp.abs(trajectory.dec.act))
+    infos["act_max"] = jnp.max(jnp.abs(trajectory.dec.act))
     mu_vals = jax.vmap(jax.vmap(state.agent.mu_net))(obs_n)
     infos["mu_mean"] = jnp.mean(jnp.abs(mu_vals))
     infos["mu_max"] = jnp.max(jnp.abs(mu_vals))
@@ -338,7 +362,7 @@ def train_step(
     infos["p_mean"] = jnp.mean(p_vals)
     infos["ret_mean"] = jnp.mean(targets)
     infos["ret_std"] = jnp.std(targets)
-    infos["rew_raw_mean"] = jnp.mean(trans.rew)
+    infos["rew_raw_mean"] = jnp.mean(trajectory.mc.rew)
     infos["rew_norm_mean"] = jnp.mean(rewards)
     return state, infos
 
@@ -394,33 +418,29 @@ def train(cfg: Config) -> State:
     )
     eval_agent = Agent(deterministic=True, obs_norm=obs_rs)
 
+    train_mc = VecMc(
+        mc=Mc(
+            max_episode_len=cfg.max_episode_len,
+            queue_size=20,
+            env=env,
+        )
+    )
     roll = Roll(
         seqlen=cfg.seqlen,
         seq_axis=1,
-        imc=Imc(
-            agent=agent,
-            mc=VecMc(
-                mc=Mc(
-                    max_episode_len=cfg.max_episode_len,
-                    queue_size=20,
-                    env=env,
-                )
-            ),
-        ),
+        imc=Imc(agent=agent, mc=train_mc),
     )
 
+    eval_mc = VecMc(
+        mc=Mc(
+            max_episode_len=cfg.max_episode_len,
+            queue_size=20,
+            env=eval_env,
+        )
+    )
     evaluator = Evaluator(
         episode_len=cfg.max_episode_len,
-        imc=Imc(
-            agent=eval_agent,
-            mc=VecMc(
-                mc=Mc(
-                    max_episode_len=cfg.max_episode_len,
-                    queue_size=20,
-                    env=eval_env,
-                )
-            ),
-        ),
+        imc=Imc(agent=eval_agent, mc=eval_mc),
     )
 
     v_net = MLP(
@@ -461,7 +481,7 @@ def train(cfg: Config) -> State:
     )
 
     state = State(
-        mc=roll.imc.mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
+        mc=train_mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
         agent=agent_state,
         rew_norm=RewardNorm.State(
             ret=jnp.zeros(cfg.n_envs),
@@ -479,6 +499,7 @@ def train(cfg: Config) -> State:
         return train_step(
             state,
             agent=agent,
+            mc=train_mc,
             roll=roll,
             rew_norm=rew_norm,
             tx=tx,
@@ -497,11 +518,14 @@ def train(cfg: Config) -> State:
 
         if (i + 1) % cfg.eval_freq == 0:
             eval_key, e_env_key, k = jrd.split(eval_key, 3)
-            eval_mc = evaluator.imc.mc.init(
+            eval_mc_state = eval_mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
             m, eval_state = evaluate(
-                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
+                evaluator.imc.init(
+                    eval_mc_state,
+                    state.agent.replace(key=eval_key),
+                )
             )
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(

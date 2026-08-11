@@ -48,9 +48,9 @@ class Task(Protocol):
 
     def reward(
         self, x_velocity: chex.Numeric, act: chex.Array, data: mjx.Data
-    ) -> chex.Numeric: ...
+    ) -> chex.Array: ...
 
-    def terminal(self, data: mjx.Data) -> chex.Numeric: ...
+    def terminal(self, data: mjx.Data) -> chex.Array: ...
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,7 +83,7 @@ class Locomotion:
     exclude_positions: int = 1
     velocity_clip: float = _INF
 
-    def is_healthy(self, data: mjx.Data) -> chex.Numeric:
+    def is_healthy(self, data: mjx.Data) -> chex.Array:
         """Whether the body satisfies all (active) health bounds."""
         z, angle = data.qpos[1], data.qpos[2]
         state = jnp.concatenate([data.qpos, data.qvel])[2:]
@@ -105,14 +105,14 @@ class Locomotion:
 
     def reward(
         self, x_velocity: chex.Numeric, act: chex.Array, data: mjx.Data
-    ) -> chex.Numeric:
+    ) -> chex.Array:
         """Reward: forward velocity plus healthy bonus minus control cost."""
         forward = self.forward_reward_weight * x_velocity
         survive = self.is_healthy(data) * self.healthy_reward
         ctrl_cost = self.ctrl_cost_weight * jnp.sum(jnp.square(act))
         return forward + survive - ctrl_cost
 
-    def terminal(self, data: mjx.Data) -> chex.Numeric:
+    def terminal(self, data: mjx.Data) -> chex.Array:
         """Whether the episode terminates due to leaving the healthy set."""
         return jnp.logical_and(
             jnp.logical_not(self.is_healthy(data)), self.terminate_when_unhealthy
@@ -200,9 +200,9 @@ class MjxEnv:
         """
 
         nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     def _physics_step(self, data: mjx.Data, act: chex.Array) -> mjx.Data:
         """Advance the physics ``frame_skip`` substeps under constant control."""

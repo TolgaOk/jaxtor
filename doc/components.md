@@ -2,7 +2,7 @@
 
 The sampled runtime path starts with the same environment protocol. The numbered
 layers show its composition, while the lower branch shows exact tabular operations.
-Each runtime node also shows the explicit state threaded through its calls.
+Each runtime component also shows the explicit state threaded through its calls.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui, sans-serif","fontSize":"15px","lineColor":"#718096","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis","nodeSpacing":28,"rankSpacing":42,"padding":12}}}%%
@@ -25,7 +25,7 @@ flowchart TB
         direction LR
         mc["Mc<br/>reset · time limit · episode queues<br/>state: key · env · observation · statistics"]
         vecmc["VecMc<br/>parallel vmap"]
-        mc_api(["MC protocol<br/>sample(action, state)"])
+        mc_api(["MC protocol<br/>observe(state) → obs<br/>sample(action, state) → transition"])
         mc -->|scalar| mc_api
         mc -->|optional batching| vecmc
         vecmc -->|batched| mc_api
@@ -35,21 +35,19 @@ flowchart TB
 
     subgraph interaction["3 · POLICY INTERACTION | closed sampling"]
         direction LR
-        agent_api(["Agent protocol<br/>act(observation, state)"])
-        imc["Imc<br/>action + transition<br/>state: mc · agent"]
-        muimc["MuImc<br/>action + transition + log μ<br/>state: mc · agent"]
-        imc_api(["IMC protocol<br/>sample(state)"])
-        agent_api --> imc
-        agent_api --> muimc
+        agent_api(["Agent protocol<br/>decide(observation, state)<br/>→ decision"])
+        dec[["Decision<br/>act · optional learning data"]]
+        imc["Imc<br/>cache decision · advance MC · prepare successor<br/>state: mc · agent · dec"]
+        imc_api(["IMC protocol<br/>observe(state) → dec<br/>sample(state) → mc · succ"])
+        agent_api --> dec
+        dec --> imc
         mc_api --> imc
-        mc_api --> muimc
         imc --> imc_api
-        muimc --> imc_api
     end
 
     subgraph collection["4 · COLLECT / EVALUATE"]
         direction LR
-        roll["Roll<br/>lax.scan over N steps"]
+        roll["Roll<br/>lax.scan over N steps<br/>trajectory: dec · mc · succ"]
         mc_eval["McEval<br/>sampled episode metrics"]
     end
 
@@ -80,7 +78,7 @@ flowchart TB
         report["Evaluation · logging"]
     end
 
-    roll -->|transition trajectory| update
+    roll -->|aligned trajectory| update
     sweep -->|batched transitions| update
     exp_sweep -->|value / occupancy sequences| update
     mc_eval -->|episode metrics| report
@@ -97,9 +95,9 @@ flowchart TB
     class tabular,gymnax,mjx,gym adapter;
     class env_api,mc_api,agent_api,imc_api,value_api protocol;
     class mc,vecmc sampler;
-    class imc,muimc,roll interactionNode;
+    class imc,roll interactionNode;
     class mc_eval,sweep,exp_sweep,tabular_eval analysis;
-    class mdp data;
+    class dec,mdp data;
     class update,report consumer;
 
     style environments fill:#F8FAFD,stroke:#C8D5E6,stroke-width:1px,color:#425466

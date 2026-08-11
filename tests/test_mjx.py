@@ -51,10 +51,14 @@ class RandomAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         key, subkey = jrd.split(state.key)
         act = jrd.uniform(subkey, (obs.shape[0], HOPPER_NU), minval=-1.0, maxval=1.0)
-        return act, AgentState(key=key)
+        return self.Decision(act=act), AgentState(key=key)
 
 
 class ScalarRandomAgent:
@@ -62,10 +66,14 @@ class ScalarRandomAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         key, subkey = jrd.split(state.key)
         act = jrd.uniform(subkey, (HOPPER_NU,), minval=-1.0, maxval=1.0)
-        return act, AgentState(key=key)
+        return self.Decision(act=act), AgentState(key=key)
 
 
 def _sync_state(env, qpos, qvel):
@@ -343,11 +351,11 @@ def test_roll_chain_jit():
 
     seqlen = 16
     roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
-    transitions, imc_state = jax.jit(roll.sample)(imc_state)
+    trajectory, imc_state = jax.jit(roll.sample)(imc_state)
 
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, HOPPER_OBS)
-    assert transitions.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
-    assert transitions.rew.shape == (NUM_ENVS, seqlen)
+    assert trajectory.mc.obs.shape == (NUM_ENVS, seqlen, HOPPER_OBS)
+    assert trajectory.dec.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
+    assert trajectory.mc.rew.shape == (NUM_ENVS, seqlen)
 
     metrics, _ = vec_mc.metrics(imc_state.mc)
     assert jnp.isfinite(metrics.avg_eps_len)
@@ -367,7 +375,7 @@ def test_roll_single_env():
 
     seqlen = 10
     roll = Roll(imc=imc, seqlen=seqlen)
-    transitions, _ = roll.sample(imc_state)
+    trajectory, _ = roll.sample(imc_state)
 
-    assert transitions.obs.shape == (seqlen, HOPPER_OBS)
-    assert transitions.act.shape == (seqlen, HOPPER_NU)
+    assert trajectory.mc.obs.shape == (seqlen, HOPPER_OBS)
+    assert trajectory.dec.act.shape == (seqlen, HOPPER_NU)

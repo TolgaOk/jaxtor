@@ -1,5 +1,7 @@
 """Tests for sampling-based evaluator."""
 
+from __future__ import annotations
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -23,8 +25,13 @@ class GoRightAgent:
     class State:
         key: chex.PRNGKey
 
-    def act(self, obs, state):
-        return jnp.array(1), state
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
+        del obs
+        return self.Decision(act=jnp.array(1)), state
 
 
 class GoLeftAgent:
@@ -34,8 +41,13 @@ class GoLeftAgent:
     class State:
         key: chex.PRNGKey
 
-    def act(self, obs, state):
-        return jnp.array(3), state
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
+        del obs
+        return self.Decision(act=jnp.array(3)), state
 
 
 @dataclass
@@ -58,13 +70,21 @@ class OpaqueImc:
         term: jax.Array
         trun: jax.Array
 
+    @dataclass
+    class Sample:
+        """Evaluator-facing wrapper around one transition."""
+
+        mc: OpaqueImc.Transition
+
     def sample(self, state):
         """Return one completed unit-reward episode per batch element."""
         return (
-            self.Transition(
-                rew=jnp.ones(self.batch_shape),
-                term=jnp.ones(self.batch_shape, dtype=jnp.bool_),
-                trun=jnp.zeros(self.batch_shape, dtype=jnp.bool_),
+            self.Sample(
+                mc=self.Transition(
+                    rew=jnp.ones(self.batch_shape),
+                    term=jnp.ones(self.batch_shape, dtype=jnp.bool_),
+                    trun=jnp.zeros(self.batch_shape, dtype=jnp.bool_),
+                )
             ),
             state.replace(step=state.step + 1),
         )
@@ -75,10 +95,10 @@ class OpaqueImc:
 # =============================================================================
 
 
-def _make_eval_imc_state(key, mc, agent_state, env_state):
+def _make_eval_imc_state(key, imc, agent_state, env_state):
     """Build an Imc.State for evaluation."""
-    mc_state = mc.init(key, env_state)
-    return Imc.State(mc=mc_state, agent=agent_state)
+    mc_state = imc.mc.init(key, env_state)
+    return imc.init(mc_state, agent_state)
 
 
 # =============================================================================
@@ -106,7 +126,7 @@ def test_sample_deterministic_one_step_goal():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -134,7 +154,7 @@ def test_sample_truncation_rate_dead_end():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoLeftAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -163,10 +183,10 @@ def test_sample_more_episodes_gives_more_data():
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
 
-    imc_state_1 = _make_eval_imc_state(mc_key1, mc, agent_state, env_state)
+    imc_state_1 = _make_eval_imc_state(mc_key1, imc, agent_state, env_state)
     metrics_short, imc_state_1 = eval_short.evaluate(imc_state_1)
 
-    imc_state_2 = _make_eval_imc_state(mc_key2, mc, agent_state, env_state)
+    imc_state_2 = _make_eval_imc_state(mc_key2, imc, agent_state, env_state)
     metrics_long, imc_state_2 = eval_long.evaluate(imc_state_2)
 
     assert metrics_long.n_episodes >= metrics_short.n_episodes
@@ -186,7 +206,7 @@ def test_sample_jit_compilation():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     jit_evaluate = jax.jit(evaluator.evaluate)
     metrics, imc_state = jit_evaluate(imc_state)
@@ -208,7 +228,7 @@ def test_sample_key_determinism():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics_a, state_a = evaluator.evaluate(imc_state)
     metrics_b, state_b = evaluator.evaluate(imc_state)
@@ -241,7 +261,7 @@ def test_sample_truncation_rate_zero_when_all_terminate():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -267,7 +287,7 @@ def test_sample_dead_end_episode_length_equals_max():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoLeftAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -292,7 +312,7 @@ def test_sample_std_zero_for_identical_episodes():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -319,7 +339,7 @@ def test_sample_metrics_are_independent_of_mc_queue_size():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -375,8 +395,8 @@ def test_sample_queues_populated_after_rollout():
     assert jnp.all(jnp.isnan(mc_state.eps_rew_queue))
 
     # Take one step (goal reached — episode done — queue updated)
-    act, agent_state = agent.act(mc_state.last_obs, agent_state)
-    _, mc_state = mc.sample(act, mc_state)
+    dec, agent_state = agent.decide(mc.observe(mc_state), agent_state)
+    _, mc_state = mc.sample(dec.act, mc_state)
 
     # First entry should now be populated
     assert not jnp.isnan(mc_state.eps_rew_queue[0])
@@ -405,7 +425,7 @@ def test_sample_episode_count_matches_expected():
     env_state = env.init(env_key)
     mc_state = mc.init(init_key, env_state)
     agent_state = GoRightAgent.State(key=agent_key)
-    imc_state = Imc.State(mc=mc_state, agent=agent_state)
+    imc_state = imc.init(mc_state, agent_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 
@@ -427,7 +447,7 @@ def test_sample_metrics_all_scalar():
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
     agent_state = GoRightAgent.State(key=key)
-    imc_state = _make_eval_imc_state(mc_key, mc, agent_state, env_state)
+    imc_state = _make_eval_imc_state(mc_key, imc, agent_state, env_state)
 
     metrics, imc_state = evaluator.evaluate(imc_state)
 

@@ -90,10 +90,10 @@ class TabularEnv:
             trun: Truncation flag.
         """
 
-        nobs: chex.Numeric
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        nobs: chex.Array
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     config: ConfigProtocol
 
@@ -114,7 +114,12 @@ class TabularEnv:
         trun = state.step >= state.max_episode_len - 1
         new_state = state.replace(s=s_next, step=state.step + 1)  # type: ignore[attr-defined]
         return (
-            TabularEnv.Step(nobs=s_next, rew=rew, term=term, trun=trun),
+            TabularEnv.Step(
+                nobs=jnp.asarray(s_next),
+                rew=jnp.asarray(rew),
+                term=jnp.asarray(term),
+                trun=jnp.asarray(trun),
+            ),
             new_state,
         )
 

@@ -29,11 +29,37 @@ def test_mc_init():
     sampler = Mc(max_episode_len=50, queue_size=5, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
+    obs = sampler.observe(state)
 
+    assert obs.shape == ()
+    assert jnp.array_equal(obs, state.last_obs)
     assert state.last_obs.shape == ()
     assert state.eps_rew_queue.shape == (5,)
     assert state.eps_len_queue.shape == (5,)
     assert jnp.all(jnp.isnan(state.eps_rew_queue))
+
+
+@pytest.mark.parametrize(
+    ("max_episode_len", "queue_size", "message"),
+    [
+        (0, 1, "max_episode_len must be positive"),
+        (1, 0, "queue_size must be positive"),
+    ],
+)
+def test_mc_rejects_nonpositive_static_configuration(
+    max_episode_len,
+    queue_size,
+    message,
+):
+    """Episode and queue limits are validated when ``Mc`` is configured."""
+    env = tabular.garnet.make(tabular.garnet.Config(state_size=2, action_size=2))
+
+    with pytest.raises(ValueError, match=message):
+        Mc(
+            max_episode_len=max_episode_len,
+            queue_size=queue_size,
+            env=env,
+        )
 
 
 def test_mc_single_sample():
@@ -174,8 +200,8 @@ class NonScalarRewardEnv:
     class Step:
         nobs: chex.Array
         rew: chex.Array
-        term: chex.Numeric
-        trun: chex.Numeric
+        term: chex.Array
+        trun: chex.Array
 
     def reset(self, key, state):
         return jnp.array(0), state.replace(key=key)
@@ -202,9 +228,9 @@ class MismatchedObsEnv:
     @dataclass
     class Step:
         nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     def reset(self, key, state):
         return jnp.array(0), state.replace(key=key)
@@ -250,9 +276,7 @@ def test_chex_vecmc_wrong_batch_action():
     key = jax.random.PRNGKey(0)
     n_env = 4
 
-    config = tabular.garnet.Config(
-        state_size=10, action_size=4, max_episode_len=50
-    )
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=50)
     env = tabular.garnet.make(config)
 
     sampler = Mc(max_episode_len=50, queue_size=5, env=env)
@@ -265,5 +289,3 @@ def test_chex_vecmc_wrong_batch_action():
     wrong_action = jnp.zeros(3)
     with pytest.raises(AssertionError):
         vec_mc.sample(wrong_action, state)
-
-

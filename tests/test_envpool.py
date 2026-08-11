@@ -69,10 +69,14 @@ class RandomAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         key, subkey = jrd.split(state.key)
         actions = jrd.uniform(subkey, (obs.shape[0], ACT_DIM), minval=-1.0, maxval=1.0)
-        return actions, AgentState(key=key)
+        return self.Decision(act=actions), AgentState(key=key)
 
 
 # =============================================================================
@@ -356,9 +360,9 @@ def test_roll_chain_jit():
     roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
     jit_roll = jax.jit(roll.sample)
 
-    transitions, imc_state = jit_roll(imc_state)
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
-    assert transitions.act.shape == (NUM_ENVS, seqlen, ACT_DIM)
+    trajectory, imc_state = jit_roll(imc_state)
+    assert trajectory.mc.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert trajectory.dec.act.shape == (NUM_ENVS, seqlen, ACT_DIM)
 
-    transitions, imc_state = jit_roll(imc_state)
-    assert jnp.all(jnp.isfinite(transitions.rew))
+    trajectory, imc_state = jit_roll(imc_state)
+    assert jnp.all(jnp.isfinite(trajectory.mc.rew))

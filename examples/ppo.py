@@ -1,34 +1,62 @@
-"""PPO on Hopper-v5 (Gymnasium/MuJoCo) using jaxtor, distrax, rlax, optax, equinox.
+"""PPO on Hopper-v5 with an explicit actor-critic component.
 
-Proximal Policy Optimization from Schulman et al. (2017) "Proximal Policy
-Optimization Algorithms", arXiv:1707.06347.
+Proximal Policy Optimization follows Schulman et al. (2017) and the continuous
+control details collected by Huang et al. (2022).
 
-Implementation follows the 9 MuJoCo-specific details from Huang et al. (2022)
-"The 37 Implementation Details of Proximal Policy Optimization", ICLR Blog:
+Components
+----------
+actor_critic: ActorCritic
+├── policy: Gaussian MLP + log_std
+├── value: MLP
+└── obs_norm: ObservationNorm
 
-1. Orthogonal initialization (sqrt(2) hidden, 0.01 actor, 1.0 critic)
-2. State-independent log-std initialized to 0
-3. Observation normalization with clipping [-10, 10]
-4. Reward normalization (divide by std of rolling discounted return)
-5. No action clipping in agent (raw Gaussian sample stored for log-prob)
-6. Separate actor/critic networks, tanh activations
-7. Linear learning rate annealing to 0
-8. Adam epsilon = 1e-5
-9. Per-minibatch advantage normalization
+rollout: Roll
+└── Imc
+    ├── agent: ActorCritic(stochastic)
+    └── VecMc
+        └── Mc
+            └── train_env
 
-- jaxtor:
-  - rollout sampler: GymEnv -> Mc -> VecMc -> MuImc -> Roll
-  - evaluation: GymEnv -> Mc -> VecMc -> Imc -> Eval
-- equinox: separate actor and critic MLPs.
-- optax: Adam optimizer with gradient clipping and LR annealing.
-- distrax: Gaussian policy distribution (sampling, log-prob, entropy).
-- rlax: clipped_surrogate_pg_loss, truncated_generalized_advantage_estimation.
+evaluation: Evaluator
+└── Imc
+    ├── agent: ActorCritic(deterministic)
+    └── VecMc
+        └── Mc
+            └── eval_env
 
+The two trees contain equivalent static ActorCritic configurations and share
+one dynamic ActorCritic.State.
+
+State
+-----
+key: PPO update randomness.
+rollout: Dynamic state consumed and returned by Roll.sample.
+├── mc: Environment state and episode queues.
+├── agent: Policy, value function, sampling key, and observation statistics.
+└── dec: Cached next decision.
+rew_norm: Rolling discounted-return statistics.
+pi_opt, v_opt: Policy and value optimizer states.
+
+Flow
+----
+trajectory[dec, mc, succ]
+-> reward normalization
+-> TD(lambda) from dec.value to succ.value
+-> PpoBatch
+-> ActorCritic.eval_pi[log_pi] + ActorCritic.value
+-> PPO update
+-> observation normalization
+-> refresh cached decision
+
+Axes
+----
+N: environments, T: rollout length, B: N * T.
 """
 
 from __future__ import annotations
 
 import time
+from typing import Protocol
 
 import chex
 import distrax
@@ -45,7 +73,7 @@ from rich.progress import track
 
 from jaxtor.env import gymnasium
 from jaxtor.eval.mc import Eval as Evaluator
-from jaxtor.sampler import Imc, Mc, MuImc, Roll, VecMc
+from jaxtor.sampler import Imc, Mc, Roll, VecMc
 from jaxtor.util.reward_norm import RewardNorm
 from jaxtor.util.running_stats import RunningStats
 
@@ -94,6 +122,144 @@ class Config:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Normalization contracts
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class ObservationNorm(Protocol):
+    """Observation-normalization surface consumed by ActorCritic."""
+
+    class State(Protocol): ...
+
+    def init(self, shape: tuple[int, ...]) -> ObservationNorm.State: ...
+
+    def update(
+        self,
+        batch: jax.Array,
+        state: ObservationNorm.State,
+    ) -> ObservationNorm.State: ...
+
+    def norm(
+        self,
+        obs: jax.Array,
+        state: ObservationNorm.State,
+    ) -> jax.Array: ...
+
+
+class RewardNormalizer(Protocol):
+    """Reward-normalization surface consumed by the PPO recipe."""
+
+    class State(Protocol): ...
+
+    def init(self, n_envs: int) -> RewardNormalizer.State: ...
+
+    def norm(
+        self,
+        rewards: jax.Array,
+        done: jax.Array,
+        state: RewardNormalizer.State,
+    ) -> tuple[jax.Array, RewardNormalizer.State]: ...
+
+
+@dataclass
+class RunningObsNorm(RunningStats):
+    """Expose ``RunningStats`` through PPO's normalization contract."""
+
+    def init(self, shape: tuple[int, ...]) -> RunningStats.State:
+        """Initialize unit statistics for one observation shape."""
+        return self.State(
+            mean=jnp.zeros(shape),
+            var=jnp.ones(shape),
+            count=jnp.float32(1e-4),
+        )
+
+    def norm(self, obs: jax.Array, state: RunningStats.State) -> jax.Array:
+        """Normalize observations with the running statistics."""
+        return self.normalize(obs, state)
+
+
+@dataclass
+class RunningRewNorm(RewardNorm):
+    """Expose ``RewardNorm`` through PPO's normalization contract."""
+
+    def init(self, n_envs: int) -> RewardNorm.State:
+        """Initialize per-environment returns and scalar reward statistics."""
+        return self.State(
+            ret=jnp.zeros(n_envs),
+            rms=RunningStats.State(
+                mean=jnp.float32(0.0),
+                var=jnp.float32(1.0),
+                count=jnp.float32(1e-4),
+            ),
+        )
+
+    def norm(
+        self,
+        rewards: jax.Array,
+        done: jax.Array,
+        state: RewardNorm.State,
+    ) -> tuple[chex.Array, RewardNorm.State]:
+        """Normalize rewards and update rolling-return statistics."""
+        return self.update(rewards, done, state)
+
+
+@dataclass
+class IdentityObsNorm:
+    """Leave observations unchanged without adding array leaves to state."""
+
+    @dataclass
+    class State:
+        """Empty identity-normalizer state."""
+
+    def init(self, shape: tuple[int, ...]) -> ObservationNorm.State:
+        """Return the empty state; shape is accepted for API compatibility."""
+        del shape
+        return self.State()
+
+    def update(
+        self,
+        batch: jax.Array,
+        state: ObservationNorm.State,
+    ) -> ObservationNorm.State:
+        """Return the unchanged state."""
+        del batch
+        return state
+
+    def norm(
+        self,
+        obs: jax.Array,
+        state: ObservationNorm.State,
+    ) -> jax.Array:
+        """Return observations unchanged."""
+        del state
+        return obs
+
+
+@dataclass
+class IdentityRewNorm:
+    """Leave rewards unchanged without adding array leaves to state."""
+
+    @dataclass
+    class State:
+        """Empty identity-normalizer state."""
+
+    def init(self, n_envs: int) -> RewardNormalizer.State:
+        """Return the empty state; n_envs is accepted for API compatibility."""
+        del n_envs
+        return self.State()
+
+    def norm(
+        self,
+        rewards: jax.Array,
+        done: jax.Array,
+        state: RewardNormalizer.State,
+    ) -> tuple[jax.Array, RewardNormalizer.State]:
+        """Return rewards and state unchanged."""
+        del done
+        return rewards, state
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Networks (orthogonal init per Huang et al. 2022)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -115,7 +281,7 @@ class MLP(eqx.Module):
         hiddens: tuple[int, ...],
         out_dim: int,
         *,
-        output_gain: float = jnp.sqrt(2),
+        output_gain: float = 2**0.5,
         layer_norm: bool = False,
         key: jax.Array,
     ):
@@ -123,7 +289,7 @@ class MLP(eqx.Module):
         dims = [in_dim, *hiddens, out_dim]
         self.layers = []
         for i in range(len(dims) - 1):
-            gain = output_gain if i == len(dims) - 2 else jnp.sqrt(2)
+            gain = output_gain if i == len(dims) - 2 else 2**0.5
             w = _ortho_init(keys[i], (dims[i], dims[i + 1]), gain)
             b = jnp.zeros(dims[i + 1])
             self.layers.append((w, b))
@@ -144,40 +310,165 @@ class MLP(eqx.Module):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Agent (unified behavior + eval)
+# Actor-critic
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class Agent:
-    """Gaussian policy agent for continuous control.
+class ActorCritic:
+    """Gaussian policy and value function used by collection, loss, and eval.
 
-    - deterministic=False, satisfies MuImc protocol: act -> (action, log_prob, state).
-    - deterministic=True, satisfies Imc protocol: act -> (action, state).
+    Public dataclasses:
+        State: Policy, value, random-key, and observation-normalizer state.
+        Decision: Action, behavior log-probability, and value.
+        PolicyEval: Log-probability and entropy for supplied actions.
+
+    Public methods:
+        init: Initialize the complete dynamic state.
+        decide: Prepare a stochastic or deterministic decision.
+        eval_pi: Evaluate policy statistics for PPO updates.
+        value: Evaluate the critic.
+        update_obs: Update observation statistics from a trajectory.
     """
 
+    obs_dim: int
+    act_dim: int
+    actor_hiddens: tuple[int, ...]
+    critic_hiddens: tuple[int, ...]
+    layer_norm: bool
+    obs_norm: ObservationNorm
     deterministic: bool = False
-    obs_norm: RunningStats | None = None
+
+    @dataclass
+    class PolicyState:
+        """Gaussian policy parameters."""
+
+        network: MLP
+        log_std: jax.Array
 
     @dataclass
     class State:
-        key: jax.Array
-        actor: MLP
-        log_std: jax.Array
-        critic: MLP
-        obs_stats: RunningStats.State
+        """Dynamic actor-critic state."""
 
-    def act(self, obs: chex.Array, state: Agent.State):
-        if self.obs_norm is not None:
-            obs = self.obs_norm.normalize(obs, state.obs_stats)
-        mean = state.actor(obs)
-        log_std = jnp.clip(state.log_std, -20.0, 2.0)
+        key: jax.Array
+        policy: ActorCritic.PolicyState
+        value: MLP
+        obs_norm: ObservationNorm.State
+
+    @dataclass
+    class Decision:
+        """Actor-critic data cached and collected by ``Imc``."""
+
+        act: chex.Array
+        log_mu: jax.Array
+        value: jax.Array
+
+    @dataclass
+    class PolicyEval:
+        """Policy statistics evaluated at supplied actions."""
+
+        logp: jax.Array
+        entropy: jax.Array
+
+    def init(self, key: jax.Array) -> ActorCritic.State:
+        """Initialize policy, value, RNG, and observation statistics."""
+        key, actor_key, critic_key = jrd.split(key, 3)
+        policy = self.PolicyState(
+            network=MLP(
+                self.obs_dim,
+                self.actor_hiddens,
+                self.act_dim,
+                output_gain=0.01,
+                layer_norm=self.layer_norm,
+                key=actor_key,
+            ),
+            log_std=jnp.zeros(self.act_dim),
+        )
+        value = MLP(
+            self.obs_dim,
+            self.critic_hiddens,
+            1,
+            output_gain=1.0,
+            layer_norm=self.layer_norm,
+            key=critic_key,
+        )
+        return self.State(
+            key=key,
+            policy=policy,
+            value=value,
+            obs_norm=self.obs_norm.init((self.obs_dim,)),
+        )
+
+    def _norm_obs(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> jax.Array:
+        """Normalize observations using the configured strategy."""
+        return self.obs_norm.norm(obs, state.obs_norm)
+
+    def _dist(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> distrax.Normal:
+        """Construct the diagonal Gaussian policy distribution."""
+        mean = state.policy.network(self._norm_obs(obs, state))
+        log_std = jnp.clip(state.policy.log_std, -20.0, 2.0)
+        return distrax.Normal(loc=mean, scale=jnp.exp(log_std))
+
+    def decide(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> tuple[ActorCritic.Decision, ActorCritic.State]:
+        """Prepare the action, behavior log-probability, and value at ``obs``."""
+        dist = self._dist(obs, state)
+        value = self.value(obs, state)
         if self.deterministic:
-            return mean, state
-        key, k = jrd.split(state.key)
-        dist = distrax.Normal(loc=mean, scale=jnp.exp(log_std))
-        action, log_prob = dist.sample_and_log_prob(seed=k)
-        return action, log_prob.sum(-1), state.replace(key=key)
+            action = dist.mode()
+            log_mu = dist.log_prob(action).sum(-1)
+            return self.Decision(act=action, log_mu=log_mu, value=value), state
+
+        key, sample_key = jrd.split(state.key)
+        action, log_mu = dist.sample_and_log_prob(seed=sample_key)
+        dec = self.Decision(
+            act=action,
+            log_mu=log_mu.sum(-1),
+            value=value,
+        )
+        return dec, state.replace(key=key)
+
+    def eval_pi(
+        self,
+        obs: jax.Array,
+        action: jax.Array,
+        state: ActorCritic.State,
+    ) -> ActorCritic.PolicyEval:
+        """Evaluate log-probability and entropy for supplied actions."""
+        dist = self._dist(obs, state)
+        return self.PolicyEval(
+            logp=dist.log_prob(action).sum(-1),
+            entropy=dist.entropy().sum(-1),
+        )
+
+    def value(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> jax.Array:
+        """Evaluate the value function."""
+        return state.value(self._norm_obs(obs, state)).squeeze(-1)
+
+    def update_obs(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> ActorCritic.State:
+        """Update observation statistics from arbitrary leading axes."""
+        batch = obs.reshape(-1, obs.shape[-1])
+        obs_norm = self.obs_norm.update(batch, state.obs_norm)
+        return state.replace(obs_norm=obs_norm)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -186,47 +477,55 @@ class Agent:
 
 
 @dataclass
-class Batch:
+class PpoBatch:
     """Flattened minibatch for PPO updates."""
 
-    obs: chex.Array
-    act: chex.Array
-    old_lp: chex.Array
-    adv: chex.Array
-    ret: chex.Array
+    obs: jax.Array
+    act: jax.Array
+    log_mu: jax.Array
+    adv: jax.Array
+    ret: jax.Array
+
+
+@dataclass
+class PpoMetrics:
+    """Transient metrics produced by one PPO update."""
+
+    pi_loss: jax.Array
+    v_loss: jax.Array
+    entropy: jax.Array
+    clip_frac: jax.Array
+    approx_kl: jax.Array
 
 
 def ppo_loss(
-    policy_params: tuple[MLP, jax.Array],
-    critic: MLP,
-    mb: Batch,
+    ac_state: ActorCritic.State,
+    *,
+    ac: ActorCritic,
+    batch: PpoBatch,
     clip_eps: float,
     vf_coef: float,
     entropy_coef: float,
-    normalize_adv: bool = True,
-) -> tuple[chex.Numeric, dict]:
+    norm_adv: bool,
+) -> tuple[jax.Array, PpoMetrics]:
     """PPO clipped objective with optional per-minibatch advantage normalization."""
-    actor, log_std = policy_params
-    mean = jax.vmap(actor)(mb.obs)
-    log_std = jnp.clip(log_std, -20.0, 2.0)
-    dist = distrax.Normal(loc=mean, scale=jnp.exp(log_std))
-    new_lp = dist.log_prob(mb.act).sum(-1)
-    entropy = jnp.mean(dist.entropy().sum(-1))
+    pi = ac.eval_pi(batch.obs, batch.act, ac_state)
+    entropy = jnp.mean(pi.entropy)
 
-    if normalize_adv:
-        adv = (mb.adv - mb.adv.mean()) / (mb.adv.std() + 1e-8)
-    else:
-        adv = mb.adv
-    ratio = jnp.exp(new_lp - mb.old_lp)
-    pg_loss = rlax.clipped_surrogate_pg_loss(ratio, adv, clip_eps)
+    adv = batch.adv
+    if norm_adv:
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    values = jax.vmap(critic)(mb.obs).squeeze(-1)
-    vf_loss = jnp.mean((values - mb.ret) ** 2)
+    ratio = jnp.exp(pi.logp - batch.log_mu)
+    pi_loss = rlax.clipped_surrogate_pg_loss(ratio, adv, clip_eps)
 
-    loss = pg_loss + vf_coef * vf_loss - entropy_coef * entropy
-    return loss, dict(
-        pg_loss=pg_loss,
-        vf_loss=vf_loss,
+    values = ac.value(batch.obs, ac_state)
+    v_loss = jnp.mean((values - batch.ret) ** 2)
+
+    loss = pi_loss + vf_coef * v_loss - entropy_coef * entropy
+    return loss, PpoMetrics(
+        pi_loss=pi_loss,
+        v_loss=v_loss,
         entropy=entropy,
         clip_frac=jnp.mean(jnp.abs(ratio - 1.0) > clip_eps),
         approx_kl=jnp.mean((ratio - 1.0) - jnp.log(ratio)),
@@ -240,118 +539,148 @@ def ppo_loss(
 
 @dataclass
 class State:
-    """Flat training state — single source of truth, updated via .replace()."""
+    """Dynamic state of the complete PPO recipe."""
 
-    mc: Mc.State
-    agent: Agent.State
-    rew_norm: RewardNorm.State
-    actor_opt: optax.OptState
-    critic_opt: optax.OptState
+    key: jax.Array
+    rollout: Imc.State
+    rew_norm: RewardNormalizer.State
+    pi_opt: optax.OptState
+    v_opt: optax.OptState
 
 
 def train_step(
     state: State,
     *,
-    agent: Agent,
-    roll: Roll,
-    rew_norm: RewardNorm,
-    actor_tx: optax.GradientTransformation,
-    critic_tx: optax.GradientTransformation,
+    rollout: Roll,
+    rew_norm: RewardNormalizer,
+    pi_tx: optax.GradientTransformation,
+    v_tx: optax.GradientTransformation,
     cfg: Config,
-) -> tuple[State, dict]:
+) -> tuple[PpoMetrics, State]:
     """One PPO iteration: collect rollout, compute GAE, run minibatch updates."""
-    # 1. Collect rollout
-    trans, imc_state = roll.sample(MuImc.State(mc=state.mc, agent=state.agent))
-    state = state.replace(mc=imc_state.mc, agent=imc_state.agent)
-    dones = jnp.logical_or(trans.term, trans.trun)
+    ac = rollout.imc.agent
+    trajectory, roll_state = rollout.sample(state.rollout)
 
-    # 2. Obs normalization
-    if agent.obs_norm is not None:
-        obs_stats = agent.obs_norm.update(
-            trans.obs.reshape(-1, trans.obs.shape[-1]), state.agent.obs_stats
-        )
-        state = state.replace(agent=state.agent.replace(obs_stats=obs_stats))
-        obs_n = agent.obs_norm.normalize(trans.obs, state.agent.obs_stats)
-        nobs_n = agent.obs_norm.normalize(trans.nobs, state.agent.obs_stats)
-    else:
-        obs_n, nobs_n = trans.obs, trans.nobs
-
-    # 3. Reward normalization
-    if cfg.normalize_reward:
-        rewards, rew_state = rew_norm.update(trans.rew, dones, state.rew_norm)
-        state = state.replace(rew_norm=rew_state)
-    else:
-        rewards = trans.rew
-
-    # 4. GAE
-    values = jax.vmap(jax.vmap(state.agent.critic))(obs_n).squeeze(-1)
-    last_val = jax.vmap(state.agent.critic)(nobs_n[:, -1]).squeeze(-1)
-    values_tp1 = jnp.concatenate([values, last_val[:, None]], axis=1)
-    discount_t = cfg.gamma * (1.0 - trans.term.astype(jnp.float32))
-
-    advantages = jax.vmap(
-        lambda r, d, v: rlax.truncated_generalized_advantage_estimation(
-            r, d, cfg.gae_lambda, v
-        )
-    )(rewards, discount_t, values_tp1)
-    returns = advantages + values
-
-    # 5. Flatten batch
-    batch_size = cfg.n_envs * cfg.seqlen
-    mb_size = batch_size // cfg.n_minibatches
-    batch = jax.tree.map(
-        lambda x: x.reshape(batch_size, *x.shape[2:]),
-        Batch(
-            obs=obs_n, act=trans.act, old_lp=trans.log_mu, adv=advantages, ret=returns
-        ),
+    done = jnp.logical_or(trajectory.mc.term, trajectory.mc.trun)
+    rewards, rew_norm_state = rew_norm.norm(
+        trajectory.mc.rew,
+        done,
+        state.rew_norm,
     )
 
-    # 6. Minibatch updates
-    def epoch_step(state, _):
-        key, perm_key = jrd.split(state.agent.key)
-        state = state.replace(agent=state.agent.replace(key=key))
-        shuffled = jax.tree.map(
-            lambda x: x[jrd.permutation(perm_key, batch_size)], batch
+    values = trajectory.dec.value
+    discounts = cfg.gamma * (1.0 - trajectory.mc.term.astype(jnp.float32))
+    trace = cfg.gae_lambda * (1.0 - done.astype(jnp.float32))
+    chex.assert_equal_shape([rewards, values, discounts, trace, trajectory.succ.value])
+    advantages = jax.vmap(rlax.td_lambda)(
+        values,
+        rewards,
+        discounts,
+        trajectory.succ.value,
+        trace,
+    )
+    returns = advantages + values
+
+    batch = jax.tree.map(
+        lambda x: x.reshape((-1, *x.shape[2:])),
+        PpoBatch(
+            obs=trajectory.mc.obs,
+            act=trajectory.dec.act,
+            log_mu=trajectory.dec.log_mu,
+            adv=advantages,
+            ret=returns,
+        ),
+    )
+    state = state.replace(rollout=roll_state, rew_norm=rew_norm_state)
+    metrics, state = update(
+        batch,
+        state,
+        ac=ac,
+        pi_tx=pi_tx,
+        v_tx=v_tx,
+        cfg=cfg,
+    )
+    agent = ac.update_obs(trajectory.mc.obs, state.rollout.agent)
+    rollout_state = rollout.imc.refresh(state.rollout.replace(agent=agent))
+    state = state.replace(rollout=rollout_state)
+    return metrics, state
+
+
+def update(
+    batch: PpoBatch,
+    state: State,
+    *,
+    ac: ActorCritic,
+    pi_tx: optax.GradientTransformation,
+    v_tx: optax.GradientTransformation,
+    cfg: Config,
+) -> tuple[PpoMetrics, State]:
+    """Optimize the actor-critic over shuffled epochs and minibatches."""
+    batch_size = batch.obs.shape[0]
+    if batch_size % cfg.n_minibatches:
+        raise ValueError("batch size must be divisible by n_minibatches")
+    mb_size = batch_size // cfg.n_minibatches
+
+    def minibatch(
+        state: State,
+        minibatch: PpoBatch,
+    ) -> tuple[State, PpoMetrics]:
+        ac_state = state.rollout.agent
+        (_, metrics), grads = eqx.filter_value_and_grad(
+            ppo_loss,
+            has_aux=True,
+        )(
+            ac_state,
+            ac=ac,
+            batch=minibatch,
+            clip_eps=cfg.clip_eps,
+            vf_coef=cfg.vf_coef,
+            entropy_coef=cfg.entropy_coef,
+            norm_adv=cfg.normalize_adv,
         )
+        pi_updates, pi_opt = pi_tx.update(
+            grads.policy,
+            state.pi_opt,
+            ac_state.policy,
+        )
+        v_updates, v_opt = v_tx.update(
+            grads.value,
+            state.v_opt,
+            ac_state.value,
+        )
+        ac_state = ac_state.replace(
+            policy=eqx.apply_updates(ac_state.policy, pi_updates),
+            value=eqx.apply_updates(ac_state.value, v_updates),
+        )
+        return state.replace(
+            rollout=state.rollout.replace(agent=ac_state),
+            pi_opt=pi_opt,
+            v_opt=v_opt,
+        ), metrics
 
-        def minibatch_step(state, start):
-            mb = jax.tree.map(
-                lambda x: jax.lax.dynamic_slice_in_dim(x, start, mb_size),
-                shuffled,
-            )
-            policy_params = (state.agent.actor, state.agent.log_std)
-            (loss, info), (p_grad, c_grad) = jax.value_and_grad(
-                ppo_loss, argnums=(0, 1), has_aux=True
-            )(
-                policy_params,
-                state.agent.critic,
-                mb,
-                cfg.clip_eps,
-                cfg.vf_coef,
-                cfg.entropy_coef,
-                cfg.normalize_adv,
-            )
+    def epoch(
+        state: State,
+        key: jax.Array,
+    ) -> tuple[State, PpoMetrics]:
+        permutation = jrd.permutation(key, batch_size)
+        minibatches = jax.tree.map(
+            lambda x: x[permutation].reshape(
+                cfg.n_minibatches,
+                mb_size,
+                *x.shape[1:],
+            ),
+            batch,
+        )
+        return jax.lax.scan(minibatch, state, minibatches)
 
-            p_upd, actor_opt = actor_tx.update(p_grad, state.actor_opt, policy_params)
-            c_upd, critic_opt = critic_tx.update(
-                c_grad, state.critic_opt, state.agent.critic
-            )
-            new_actor, new_log_std = eqx.apply_updates(policy_params, p_upd)
-            new_critic = eqx.apply_updates(state.agent.critic, c_upd)
-            return state.replace(
-                agent=state.agent.replace(
-                    actor=new_actor, log_std=new_log_std, critic=new_critic
-                ),
-                actor_opt=actor_opt,
-                critic_opt=critic_opt,
-            ), info
-
-        starts = jnp.arange(cfg.n_minibatches) * mb_size
-        state, infos = jax.lax.scan(minibatch_step, state, starts)
-        return state, infos
-
-    state, all_infos = jax.lax.scan(epoch_step, state, length=cfg.n_epochs)
-    return state, jax.tree.map(jnp.mean, all_infos)
+    key, epoch_key = jrd.split(state.key)
+    state = state.replace(key=key)
+    state, metrics = jax.lax.scan(
+        epoch,
+        state,
+        jrd.split(epoch_key, cfg.n_epochs),
+    )
+    return jax.tree.map(jnp.mean, metrics), state
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -378,7 +707,7 @@ def _make_env(cfg: Config, num_envs: int):
 def train(cfg: Config) -> State:
     """Train PPO and return the final training state."""
     key = jrd.PRNGKey(cfg.seed)
-    key, actor_key, critic_key, env_key, agent_key, eval_key = jrd.split(key, 6)
+    mc_key, env_key, ac_key, update_key, eval_key = jrd.split(key, 5)
 
     env = _make_env(cfg, cfg.n_envs)
     eval_env = _make_env(cfg, cfg.eval_envs)
@@ -387,25 +716,38 @@ def train(cfg: Config) -> State:
 
     total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_minibatches
     lr_schedule = optax.linear_schedule(cfg.lr, 0.0, total_updates)
-    actor_tx = optax.chain(
+    pi_tx = optax.chain(
         optax.clip_by_global_norm(cfg.max_grad_norm),
         optax.adam(lr_schedule, eps=1e-5),
     )
-    critic_tx = optax.chain(
+    v_tx = optax.chain(
         optax.clip_by_global_norm(cfg.max_grad_norm),
         optax.adam(lr_schedule, eps=1e-5),
     )
 
-    obs_rs = RunningStats(clip=10.0) if cfg.normalize_obs else None
-    rew_norm = RewardNorm(gamma=cfg.gamma, rms=RunningStats(), clip=10.0)
-    agent = Agent(deterministic=False, obs_norm=obs_rs)
-    eval_agent = Agent(deterministic=True, obs_norm=obs_rs)
+    rew_norm: RewardNormalizer = (
+        RunningRewNorm(gamma=cfg.gamma, rms=RunningStats(), clip=10.0)
+        if cfg.normalize_reward
+        else IdentityRewNorm()
+    )
 
-    roll = Roll(
+    rollout = Roll(
         seqlen=cfg.seqlen,
         seq_axis=1,
-        imc=MuImc(
-            agent=agent,
+        imc=Imc(
+            agent=ActorCritic(
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+                actor_hiddens=cfg.actor_hiddens,
+                critic_hiddens=cfg.critic_hiddens,
+                layer_norm=cfg.layer_norm,
+                obs_norm=(
+                    RunningObsNorm(clip=10.0)
+                    if cfg.normalize_obs
+                    else IdentityObsNorm()
+                ),
+                deterministic=False,
+            ),
             mc=VecMc(
                 mc=Mc(
                     max_episode_len=cfg.max_episode_len,
@@ -419,7 +761,19 @@ def train(cfg: Config) -> State:
     evaluator = Evaluator(
         episode_len=cfg.max_episode_len,
         imc=Imc(
-            agent=eval_agent,
+            agent=ActorCritic(
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+                actor_hiddens=cfg.actor_hiddens,
+                critic_hiddens=cfg.critic_hiddens,
+                layer_norm=cfg.layer_norm,
+                obs_norm=(
+                    RunningObsNorm(clip=10.0)
+                    if cfg.normalize_obs
+                    else IdentityObsNorm()
+                ),
+                deterministic=True,
+            ),
             mc=VecMc(
                 mc=Mc(
                     max_episode_len=cfg.max_episode_len,
@@ -430,58 +784,31 @@ def train(cfg: Config) -> State:
         ),
     )
 
-    actor = MLP(
-        obs_dim,
-        cfg.actor_hiddens,
-        act_dim,
-        output_gain=0.01,
-        layer_norm=cfg.layer_norm,
-        key=actor_key,
+    ac = rollout.imc.agent
+    ac_state = ac.init(ac_key)
+    rollout_state = rollout.imc.init(
+        rollout.imc.mc.init(
+            jrd.split(mc_key, cfg.n_envs),
+            env.init(env_key),
+        ),
+        ac_state,
     )
-    log_std = jnp.zeros(act_dim)
-    critic = MLP(
-        obs_dim,
-        cfg.critic_hiddens,
-        1,
-        output_gain=1.0,
-        layer_norm=cfg.layer_norm,
-        key=critic_key,
-    )
-
     state = State(
-        mc=roll.imc.mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
-        agent=Agent.State(
-            key=agent_key,
-            actor=actor,
-            log_std=log_std,
-            critic=critic,
-            obs_stats=RunningStats.State(
-                mean=jnp.zeros(obs_dim),
-                var=jnp.ones(obs_dim),
-                count=jnp.float32(1e-4),
-            ),
-        ),
-        rew_norm=RewardNorm.State(
-            ret=jnp.zeros(cfg.n_envs),
-            rms=RunningStats.State(
-                mean=jnp.float32(0.0),
-                var=jnp.float32(1.0),
-                count=jnp.float32(1e-4),
-            ),
-        ),
-        actor_opt=actor_tx.init((actor, log_std)),
-        critic_opt=critic_tx.init(critic),
+        key=update_key,
+        rollout=rollout_state,
+        rew_norm=rew_norm.init(cfg.n_envs),
+        pi_opt=pi_tx.init(rollout_state.agent.policy),
+        v_opt=v_tx.init(rollout_state.agent.value),
     )
 
     @jax.jit
     def step(state):
         return train_step(
             state,
-            agent=agent,
-            roll=roll,
+            rollout=rollout,
             rew_norm=rew_norm,
-            actor_tx=actor_tx,
-            critic_tx=critic_tx,
+            pi_tx=pi_tx,
+            v_tx=v_tx,
             cfg=cfg,
         )
 
@@ -493,34 +820,33 @@ def train(cfg: Config) -> State:
     t0 = time.time()
 
     for i in track(range(cfg.n_iters), description="Training"):
-        state, metrics = step(state)
+        metrics, state = step(state)
 
         if (i + 1) % cfg.eval_freq == 0:
             eval_key, e_env_key, k = jrd.split(eval_key, 3)
-            eval_mc = evaluator.imc.mc.init(
+            eval_mc_state = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
-            m, eval_state = evaluate(
-                Imc.State(mc=eval_mc, agent=state.agent.replace(key=eval_key))
+            eval_metrics, eval_state = evaluate(
+                evaluator.imc.init(
+                    eval_mc_state,
+                    state.rollout.agent.replace(key=eval_key),
+                )
             )
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
-                f"  iter {i + 1:4d}  loss={float(metrics['pg_loss']):+.4f}"
-                f"  rew={float(m.avg_eps_rew):.1f}"
-                f"\u00b1{float(m.std_eps_rew):.1f}"
-                f"  len={float(m.avg_eps_len):.1f}"
+                f"  iter {i + 1:4d}  loss={float(metrics.pi_loss):+.4f}"
+                f"  rew={float(eval_metrics.avg_eps_rew):.1f}"
+                f"\u00b1{float(eval_metrics.std_eps_rew):.1f}"
+                f"  len={float(eval_metrics.avg_eps_len):.1f}"
                 f"  steps={steps:,}"
             )
             eval_env.close(eval_state.mc.env)
 
     elapsed = time.time() - t0
-    print(
-        f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s"
-        f"  rew={float(m.avg_eps_rew):.1f}\u00b1{float(m.std_eps_rew):.1f}"
-        f"  (over {int(m.n_episodes)} eps)"
-    )
+    print(f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s")
 
-    env.close(state.mc.env)
+    env.close(state.rollout.mc.env)
     return state
 
 

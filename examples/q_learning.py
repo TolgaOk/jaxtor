@@ -70,15 +70,23 @@ class Agent:
         key: chex.Array
         q: chex.Array  # (A, S)
 
-    def act(
+    @dataclass
+    class Decision:
+        """Q-learning data attached to one decision."""
+
+        act: chex.Array
+        q: chex.Array
+
+    def decide(
         self, obs: chex.Array, state: Agent.State
-    ) -> tuple[chex.Array, Agent.State]:
-        """ε-greedy action selection."""
+    ) -> tuple[Agent.Decision, Agent.State]:
+        """Prepare an ε-greedy action and its Q-values."""
         key, act_key, explore_key = jrd.split(state.key, 3)
-        greedy = jnp.argmax(state.q[:, obs])
+        q = state.q[:, obs]
+        greedy = jnp.argmax(q)
         random = jrd.randint(act_key, (), 0, state.q.shape[0])
         action = jnp.where(jrd.uniform(explore_key) < self.epsilon, random, greedy)
-        return action, state.replace(key=key)
+        return self.Decision(act=action, q=q), state.replace(key=key)
 
     def q_vals(self, state: Agent.State, obs: chex.Array) -> chex.Array:
         """Q-values for given state indices."""
@@ -88,15 +96,21 @@ class Agent:
 @jax.jit
 def train_step(state: Imc.State, k: int) -> Imc.State:
     """One transition + Q-learning update with decaying step size."""
-    trans, state = imc.sample(state)
+    dec = imc.observe(state)
+    sample, state = imc.sample(state)
     q = state.agent.q
     alpha = cfg.alpha_init / (1.0 + k / cfg.alpha_period) ** cfg.alpha_power
-    discount = jnp.where(trans.term, 0.0, cfg.gamma)
+    discount = jnp.where(sample.mc.term, 0.0, cfg.gamma)
     td = rlax.q_learning(
-        q[:, trans.obs], trans.act, trans.rew, discount, q[:, trans.nobs]
+        dec.q,
+        dec.act,
+        sample.mc.rew,
+        discount,
+        sample.succ.q,
     )
-    new_q = q.at[trans.act, trans.obs].add(alpha * td)
-    return state.replace(agent=state.agent.replace(q=new_q))
+    new_q = q.at[dec.act, sample.mc.obs].add(alpha * td)
+    state = state.replace(agent=state.agent.replace(q=new_q))
+    return imc.refresh(state)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

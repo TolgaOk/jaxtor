@@ -2,13 +2,17 @@
 
 ## Components
 
-- `Mc` - open sampler: `sample(act, state)`
-- `Imc` - closed sampler: `sample(state)`
-- `Roll` - N-step: `sample(state) -> (seqlen, ...)`
-- `Sweep` - all (s,a): `sample(key, env) -> (A*S, ...)`
-- `ExpSweep` - exact propagation: `backward/forward(arr, mdp, mu) -> (n_step, A, S)`
+- `Mc`: open environment sampler with `observe(state)` and `sample(act, state)`.
+- `VecMc`: `vmap`-based parallel `Mc`.
+- `Imc`: caches agent data and returns an MC transition with its true successor.
+- `Roll`: stacks aligned decisions, MC transitions, and successors.
+- `Sweep`: stochastic samples over all `(s, a)` pairs.
+- `ExpSweep`: exact forward and backward propagation.
 
-## E-Greedy Agent
+## Agent contract
+
+An agent defines a decision. Only `act` is required
+by `Imc`; algorithms may add fields such as `log_mu`, `value`, or `q`.
 
 ```python
 @dataclass
@@ -17,102 +21,72 @@ class EGreedy:
 
     @dataclass
     class State:
-        key: jrd.PRNGKey
-        q: jnp.ndarray  # (A, S)
+        key: jax.Array
+        q: jax.Array
 
-    def act(self, obs, state):
-        key, k1, k2 = jrd.split(state.key, 3)
-        greedy = jnp.argmax(state.q[:, obs])
-        rand = jrd.randint(k1, (), 0, state.q.shape[0])
-        act = jnp.where(jrd.uniform(k2) < self.eps, rand, greedy)
-        return act, state.replace(key=key)
+    @dataclass
+    class Decision:
+        act: chex.Array
+        q: jax.Array
+
+    def decide(self, obs, state):
+        key, explore_key, act_key = jrd.split(state.key, 3)
+        q = state.q[:, obs]
+        greedy = jnp.argmax(q)
+        random = jrd.randint(act_key, (), 0, q.shape[0])
+        act = jnp.where(jrd.uniform(explore_key) < self.eps, random, greedy)
+        return self.Decision(act=act, q=q), state.replace(key=key)
 ```
 
-## 1. Markov Chain
+## Single step
 
 ```python
 mc = Mc(max_episode_len=100, queue_size=10, env=env)
-mc_state = mc.init(key, env.init(key))
+mc_state = mc.init(mc_key, env_state)
 
-act = jrd.randint(key, (), 0, A)
-trans, mc_state = mc.sample(act, mc_state)
-```
-
-## 2. Induced Markov Chain
-
-```python
 imc = Imc(agent=EGreedy(eps=0.1), mc=mc)
+state = imc.init(mc_state, agent_state)
 
-imc_state = Imc.State(mc=mc_state, agent=EGreedy.State(key=key, q=q))
-trans, imc_state = imc.sample(imc_state)
+dec = imc.observe(state)
+sample, state = imc.sample(state)
+
+# dec: agent decision at sample.mc.obs
+# sample.mc: obs, act, rew, term, trun, nobs
+# sample.succ: agent decision computed at sample.mc.nobs
 ```
 
+At an autoreset boundary, `sample.mc.nobs` remains the terminal observation and
+`sample.succ` is computed there, while `imc.observe(state)` is the reset decision
+used next.
 
-## 3. Vectorized Rollout
+## Rollout
+
 ```python
-agent_key, *mc_keys = jrd.split(key, n_env + 1)
-mc_state = jax.vmap(mc.init, in_axes=(0, None))(mc_keys, env_state)
+roll = Roll(imc=imc, seqlen=20)
+trajectory, state = roll.sample(state)
 
-agent_keys = jrd.split(agent_key, n_env)
-agent_state = EGreedy.State(key=agent_keys, q=jnp.zeros((A, S)))
-
-roll = Roll(
-    imc=Imc(
-        agent=EGreedy(eps=0.1),
-        mc=mc
-    ),
-    seqlen=20
-)
-
-vec_roll = jax.vmap(
-    roll.sample,
-    in_axes=(Imc.State(mc=0, agent=EGreedy.State(key=0, q=None)),),
-    out_axes=(0, Imc.State(mc=0, agent=EGreedy.State(key=0, q=None)))
-)
-
-trans, imc_state = vec_roll(Imc.State(mc=mc_state, agent=agent_state))
-# trans.obs.shape == (n_env, 20, ...)
+trajectory.dec   # T decisions consumed by sampling
+trajectory.mc    # T underlying MC transitions
+trajectory.succ  # T decisions computed at trajectory.mc.nobs
 ```
 
-## 4. Sweep + Rollout
+With `VecMc`, set `seq_axis=1` for `(N, T, ...)` arrays. All three trajectory
+pytrees use the same sequence axis.
+
+If agent parameters change while an `Imc.State` is retained, refresh its cached
+decision before further sampling:
 
 ```python
-sweep = Sweep(mc=mc)
-first_trans, mc_states = sweep.sample(key, env_state)
-# first_trans.obs.shape == (A*S, ...)
-
-agent_keys = jrd.split(key, A * S)
-agent_state = EGreedy.State(key=agent_keys, q=jnp.zeros((A, S)))
-
-roll = Roll(
-    imc=Imc(
-        agent=EGreedy(eps=0.1),
-        mc=mc
-    ),
-    seqlen=20 - 1
-)
-
-vec_roll = jax.vmap(
-    roll.sample,
-    in_axes=(Imc.State(mc=0, agent=EGreedy.State(key=0, q=None)),),
-    out_axes=(0, Imc.State(mc=0, agent=EGreedy.State(key=0, q=None)))
-)
-
-trans, imc_state = vec_roll(Imc.State(mc=mc_states, agent=agent_state))
-# trans.obs.shape == (A*S, 20, ...)
+state = state.replace(agent=updated_agent_state)
+state = imc.refresh(state)
 ```
 
-## 5. ExpSweep
+## Exact and exhaustive tabular sampling
 
 ```python
+first, mc_states = Sweep(mc=mc).sample(key, env_state)
+
 exp = ExpSweep(n_step=5)
-mu = jnp.ones((A, S)) / A
-
-# Backward: { (P^\mu)^k Q }_{k=0}^4
-q_seq = exp.backward(q_arr, mdp, mu)
-# q_seq.shape == (5, A, S)
-
-# Forward: { \pi^T ( P^\mu )^k }_{k=0}^4
-pi_seq = exp.forward(pi_arr, mdp, mu)
-# pi_seq.shape == (5, A, S)
+q_seq = exp.backward(q, mdp, mu)
+occupancy_seq = exp.forward(initial, mdp, mu)
 ```

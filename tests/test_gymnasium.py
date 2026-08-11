@@ -79,10 +79,14 @@ class RandomAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         key, subkey = jrd.split(state.key)
         actions = jrd.randint(subkey, (obs.shape[0],), 0, 2)
-        return actions, AgentState(key=key)
+        return self.Decision(act=actions), AgentState(key=key)
 
 
 class ScalarRandomAgent:
@@ -90,10 +94,14 @@ class ScalarRandomAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         key, subkey = jrd.split(state.key)
         action = jrd.randint(subkey, (), 0, 2)
-        return action, AgentState(key=key)
+        return self.Decision(act=action), AgentState(key=key)
 
 
 @dataclass
@@ -106,13 +114,17 @@ class ZeroAgent:
 
     State = AgentState
 
-    def act(self, obs, state):
+    @dataclass
+    class Decision:
+        act: chex.Array
+
+    def decide(self, obs, state):
         """Return one zero action for every leading observation batch index."""
         obs_ndim = len(self.obs_shape)
         batch_shape = obs.shape[: obs.ndim - obs_ndim]
         dtype = jnp.float32 if self.continuous else jnp.int32
         action = jnp.zeros((*batch_shape, *self.act_shape), dtype=dtype)
-        return action, state
+        return self.Decision(act=action), state
 
 
 # =============================================================================
@@ -552,11 +564,11 @@ def test_roll_eager():
     roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
     transitions, new_state = roll.sample(imc_state)
 
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
-    assert transitions.rew.shape == (NUM_ENVS, seqlen)
-    assert transitions.act.shape == (NUM_ENVS, seqlen)
-    assert transitions.term.shape == (NUM_ENVS, seqlen)
-    assert transitions.nobs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.mc.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.mc.rew.shape == (NUM_ENVS, seqlen)
+    assert transitions.dec.act.shape == (NUM_ENVS, seqlen)
+    assert transitions.mc.term.shape == (NUM_ENVS, seqlen)
+    assert transitions.mc.nobs.shape == (NUM_ENVS, seqlen, OBS_DIM)
 
 
 def test_roll_jit():
@@ -575,10 +587,10 @@ def test_roll_jit():
     jit_roll = jax.jit(roll.sample)
 
     transitions, imc_state = jit_roll(imc_state)
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.mc.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
 
     transitions, imc_state = jit_roll(imc_state)
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.mc.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
 
 
 def test_roll_multiple_iterations_with_metrics():
@@ -723,10 +735,10 @@ def test_roll_single_env():
     roll = Roll(imc=imc, seqlen=seqlen)
     transitions, new_state = roll.sample(imc_state)
 
-    assert transitions.obs.shape == (seqlen, OBS_DIM)
-    assert transitions.nobs.shape == (seqlen, OBS_DIM)
-    assert transitions.rew.shape == (seqlen,)
-    assert transitions.act.shape == (seqlen,)
+    assert transitions.mc.obs.shape == (seqlen, OBS_DIM)
+    assert transitions.mc.nobs.shape == (seqlen, OBS_DIM)
+    assert transitions.mc.rew.shape == (seqlen,)
+    assert transitions.dec.act.shape == (seqlen,)
 
 
 @pytest.mark.parametrize("name, obs_shape, act_shape, continuous", ENV_CASES)
@@ -756,14 +768,14 @@ def test_scalar_component_rollout_across_envs(
     transitions, state = jax.jit(roll.sample)(state)
     env.close(state.mc.env)
 
-    assert transitions.obs.shape == (COMPONENT_ROLLOUT_LEN, *obs_shape)
-    assert transitions.act.shape == (COMPONENT_ROLLOUT_LEN, *act_shape)
-    assert transitions.rew.shape == (COMPONENT_ROLLOUT_LEN,)
-    assert transitions.term.shape == (COMPONENT_ROLLOUT_LEN,)
-    assert transitions.trun.shape == (COMPONENT_ROLLOUT_LEN,)
-    assert transitions.nobs.shape == (COMPONENT_ROLLOUT_LEN, *obs_shape)
-    assert jnp.all(jnp.isfinite(transitions.obs))
-    assert jnp.all(jnp.isfinite(transitions.rew))
+    assert transitions.mc.obs.shape == (COMPONENT_ROLLOUT_LEN, *obs_shape)
+    assert transitions.dec.act.shape == (COMPONENT_ROLLOUT_LEN, *act_shape)
+    assert transitions.mc.rew.shape == (COMPONENT_ROLLOUT_LEN,)
+    assert transitions.mc.term.shape == (COMPONENT_ROLLOUT_LEN,)
+    assert transitions.mc.trun.shape == (COMPONENT_ROLLOUT_LEN,)
+    assert transitions.mc.nobs.shape == (COMPONENT_ROLLOUT_LEN, *obs_shape)
+    assert jnp.all(jnp.isfinite(transitions.mc.obs))
+    assert jnp.all(jnp.isfinite(transitions.mc.rew))
 
 
 @pytest.mark.parametrize("name, obs_shape, act_shape, continuous", ENV_CASES)
@@ -802,14 +814,14 @@ def test_vector_component_rollout_across_envs(
     env.close(state.mc.env)
 
     prefix = (COMPONENT_NUM_ENVS, COMPONENT_ROLLOUT_LEN)
-    assert transitions.obs.shape == (*prefix, *obs_shape)
-    assert transitions.act.shape == (*prefix, *act_shape)
-    assert transitions.rew.shape == prefix
-    assert transitions.term.shape == prefix
-    assert transitions.trun.shape == prefix
-    assert transitions.nobs.shape == (*prefix, *obs_shape)
-    assert jnp.all(jnp.isfinite(transitions.obs))
-    assert jnp.all(jnp.isfinite(transitions.rew))
+    assert transitions.mc.obs.shape == (*prefix, *obs_shape)
+    assert transitions.dec.act.shape == (*prefix, *act_shape)
+    assert transitions.mc.rew.shape == prefix
+    assert transitions.mc.term.shape == prefix
+    assert transitions.mc.trun.shape == prefix
+    assert transitions.mc.nobs.shape == (*prefix, *obs_shape)
+    assert jnp.all(jnp.isfinite(transitions.mc.obs))
+    assert jnp.all(jnp.isfinite(transitions.mc.rew))
 
 
 # =============================================================================
@@ -843,12 +855,12 @@ def test_trajectory_reproducible_with_same_key():
     t1 = _collect(seed)
     t2 = _collect(seed)
 
-    assert jnp.array_equal(t1.obs, t2.obs)
-    assert jnp.array_equal(t1.act, t2.act)
-    assert jnp.array_equal(t1.rew, t2.rew)
-    assert jnp.array_equal(t1.nobs, t2.nobs)
-    assert jnp.array_equal(t1.term, t2.term)
-    assert jnp.array_equal(t1.trun, t2.trun)
+    assert jnp.array_equal(t1.mc.obs, t2.mc.obs)
+    assert jnp.array_equal(t1.dec.act, t2.dec.act)
+    assert jnp.array_equal(t1.mc.rew, t2.mc.rew)
+    assert jnp.array_equal(t1.mc.nobs, t2.mc.nobs)
+    assert jnp.array_equal(t1.mc.term, t2.mc.term)
+    assert jnp.array_equal(t1.mc.trun, t2.mc.trun)
 
 
 def test_trajectory_differs_with_different_key():
@@ -876,7 +888,7 @@ def test_trajectory_differs_with_different_key():
     t1 = _collect(jrd.PRNGKey(0))
     t2 = _collect(jrd.PRNGKey(999))
 
-    assert not jnp.array_equal(t1.obs, t2.obs)
+    assert not jnp.array_equal(t1.mc.obs, t2.mc.obs)
 
 
 # =============================================================================

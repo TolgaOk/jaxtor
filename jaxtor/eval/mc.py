@@ -23,15 +23,24 @@ class Transition(Protocol):
     trun: jax.Array
 
 
-TransitionType = TypeVar("TransitionType", bound=Transition, covariant=True)
+TransitionType = TypeVar("TransitionType", bound=Transition)
 ImcState = TypeVar("ImcState")
 CarryState = TypeVar("CarryState")
+
+
+class ImcSample(Protocol[TransitionType]):
+    """Single-step sampler output consumed by ``Eval``."""
+
+    mc: TransitionType
 
 
 class Imc(Protocol[TransitionType, ImcState]):
     """Single-step sampler surface consumed by ``Eval``."""
 
-    def sample(self, state: ImcState) -> tuple[TransitionType, ImcState]: ...
+    def sample(
+        self,
+        state: ImcState,
+    ) -> tuple[ImcSample[TransitionType], ImcState]: ...
 
 
 @dataclass  # pyright: ignore[reportUntypedClassDecorator]
@@ -200,8 +209,8 @@ class Eval(Generic[TransitionType, ImcState]):
     ) -> tuple[Eval._Carry[ImcState], None]:
         """Sample and accumulate one evaluation step."""
         del unused
-        transition, imc = self.imc.sample(carry.imc)
-        accumulator, _ = self._accumulate(carry.accumulator, transition)
+        sample, imc = self.imc.sample(carry.imc)
+        accumulator, _ = self._accumulate(carry.accumulator, sample.mc)
         return self._Carry(imc=imc, accumulator=accumulator), None
 
     def evaluate(self, state: ImcState) -> tuple[Eval.Metrics, ImcState]:
@@ -222,10 +231,10 @@ class Eval(Generic[TransitionType, ImcState]):
         if self.unroll < 1:
             raise ValueError("unroll must be positive")
 
-        transition, state = self.imc.sample(state)
+        sample, state = self.imc.sample(state)
         accumulator, _ = self._accumulate(
-            self._init_accumulator(transition.rew),
-            transition,
+            self._init_accumulator(sample.mc.rew),
+            sample.mc,
         )
         carry, _ = jax.lax.scan(
             self._step,
