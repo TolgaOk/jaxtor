@@ -179,22 +179,16 @@ class Agent:
         p_net: MLP
         obs_stats: RunningStats.State
 
-    @dataclass
-    class Decision:
-        """Action attached to one NAF decision."""
-
-        act: chex.Array
-
     def _precision(self, obs: chex.Array, state: Agent.State) -> jax.Array:
         """Diagonal precision p = softplus(net(s)) + ε."""
         return jax.nn.softplus(state.p_net(obs)) + self.noise_eps
 
-    def decide(
+    def act(
         self,
         obs: chex.Array,
         state: Agent.State,
-    ) -> tuple[Agent.Decision, Agent.State]:
-        """Prepare a deterministic or exploratory NAF action."""
+    ) -> tuple[jax.Array, Agent.State]:
+        """Select a deterministic or exploratory NAF action."""
         policy_obs = (
             self.obs_norm.normalize(obs, state.obs_stats)
             if self.obs_norm is not None
@@ -209,7 +203,7 @@ class Agent:
             eps = jrd.normal(k, mu_raw.shape)
             action = jnp.tanh(mu_raw + self.noise_scale * eps / jnp.sqrt(p))
             state = state.replace(key=key)
-        return self.Decision(act=action), state
+        return action, state
 
     def q_val(self, obs: chex.Array, act: chex.Array, state: Agent.State) -> jax.Array:
         """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
@@ -259,46 +253,46 @@ def train_step(
     # 1. Collect rollout
     imc_state = roll.imc.init(state.mc, state.agent)
     trajectory, imc_state = roll.sample(imc_state)
-    stats_state = stats.update(trajectory.mc, state.stats)
+    stats_state = stats.update(trajectory, state.stats)
     sam_metrics, stats_state = stats.drain(stats_state)
     state = state.replace(
         mc=imc_state.mc,
         agent=imc_state.agent,
         stats=stats_state,
     )
-    dones = jnp.logical_or(trajectory.mc.term, trajectory.mc.trun)
+    dones = jnp.logical_or(trajectory.term, trajectory.trun)
 
     # 2. Obs normalization
     if agent.obs_norm is not None:
         obs_stats = agent.obs_norm.update(
-            trajectory.mc.obs.reshape(-1, trajectory.mc.obs.shape[-1]),
+            trajectory.obs.reshape(-1, trajectory.obs.shape[-1]),
             state.agent.obs_stats,
         )
         state = state.replace(agent=state.agent.replace(obs_stats=obs_stats))
-        obs_n = agent.obs_norm.normalize(trajectory.mc.obs, state.agent.obs_stats)
+        obs_n = agent.obs_norm.normalize(trajectory.obs, state.agent.obs_stats)
         nobs_n = agent.obs_norm.normalize(
-            trajectory.mc.nobs,
+            trajectory.nobs,
             state.agent.obs_stats,
         )
     else:
-        obs_n, nobs_n = trajectory.mc.obs, trajectory.mc.nobs
+        obs_n, nobs_n = trajectory.obs, trajectory.nobs
 
     # 3. Reward normalization
     if cfg.normalize_reward:
         rewards, rew_state = rew_norm.update(
-            trajectory.mc.rew,
+            trajectory.rew,
             dones,
             state.rew_norm,
         )
         state = state.replace(rew_norm=rew_state)
     else:
-        rewards = trajectory.mc.rew
+        rewards = trajectory.rew
 
     # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
-    discount_t = cfg.gamma * (1.0 - trajectory.mc.term.astype(jnp.float32))
+    discount_t = cfg.gamma * (1.0 - trajectory.term.astype(jnp.float32))
     v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
     q_t = jax.vmap(jax.vmap(lambda o, a: agent.q_val(o, a, state.agent)))(
-        obs_n[:, 1:], trajectory.dec.act[:, 1:]
+        obs_n[:, 1:], trajectory.act[:, 1:]
     )
     c_t = cfg.trace_lambda * (1.0 - dones[:, :-1].astype(jnp.float32))
 
@@ -313,7 +307,7 @@ def train_step(
     mb_size = batch_size // cfg.n_minibatches
     batch = jax.tree.map(
         lambda x: x.reshape(batch_size, *x.shape[2:]),
-        Batch(obs=obs_n, act=trajectory.dec.act, ret=targets),
+        Batch(obs=obs_n, act=trajectory.act, ret=targets),
     )
 
     # 6. Epoch loop: shuffle and minibatch SGD over fixed targets
@@ -357,8 +351,8 @@ def train_step(
     infos["sam_rew"] = sam_metrics.avg_eps_rew
 
     # Diagnostics
-    infos["act_mean"] = jnp.mean(jnp.abs(trajectory.dec.act))
-    infos["act_max"] = jnp.max(jnp.abs(trajectory.dec.act))
+    infos["act_mean"] = jnp.mean(jnp.abs(trajectory.act))
+    infos["act_max"] = jnp.max(jnp.abs(trajectory.act))
     mu_vals = jax.vmap(jax.vmap(state.agent.mu_net))(obs_n)
     infos["mu_mean"] = jnp.mean(jnp.abs(mu_vals))
     infos["mu_max"] = jnp.max(jnp.abs(mu_vals))
@@ -368,7 +362,7 @@ def train_step(
     infos["p_mean"] = jnp.mean(p_vals)
     infos["ret_mean"] = jnp.mean(targets)
     infos["ret_std"] = jnp.std(targets)
-    infos["rew_raw_mean"] = jnp.mean(trajectory.mc.rew)
+    infos["rew_raw_mean"] = jnp.mean(trajectory.rew)
     infos["rew_norm_mean"] = jnp.mean(rewards)
     return state, infos
 

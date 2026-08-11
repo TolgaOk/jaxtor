@@ -104,20 +104,12 @@ class Agent:
         key: jax.Array
         params: eqx.Module
 
-    @dataclass
-    class Decision:
-        """Sampled action collected by ``Imc``."""
-
-        act: chex.Array
-
-    def decide(
-        self, obs: chex.Array, state: Agent.State
-    ) -> tuple[Agent.Decision, Agent.State]:
-        """Prepare a sampled action for an observation."""
+    def act(self, obs: chex.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
+        """Sample one action for an observation."""
         key, act_key = jrd.split(state.key)
         logits = state.params(obs)
         action = jrd.categorical(act_key, logits / self.tau)
-        return self.Decision(act=action), state.replace(key=key)
+        return action, state.replace(key=key)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -127,22 +119,22 @@ class Agent:
 
 def reinforce_loss(
     params: eqx.Module,
-    trajectory: Roll.Trajectory,
+    trajectory: Mc.Transition,
     gamma: float,
     entropy_coef: float,
 ) -> chex.Numeric:
     """REINFORCE policy gradient loss with entropy bonus."""
-    logits = jax.vmap(jax.vmap(params))(trajectory.mc.obs)
+    logits = jax.vmap(jax.vmap(params))(trajectory.obs)
 
-    discount_t = jnp.where(trajectory.mc.term, 0.0, gamma)
+    discount_t = jnp.where(trajectory.term, 0.0, gamma)
 
     returns = jax.vmap(rlax.discounted_returns, in_axes=(0, 0, None))(
-        trajectory.mc.rew, discount_t, jnp.float32(0.0)
+        trajectory.rew, discount_t, jnp.float32(0.0)
     )
 
     w_t = jnp.ones_like(returns)
     pg_loss = jax.vmap(rlax.policy_gradient_loss)(
-        logits, trajectory.dec.act.astype(jnp.int32), returns, w_t
+        logits, trajectory.act.astype(jnp.int32), returns, w_t
     ).mean()
     ent_loss = jax.vmap(rlax.entropy_loss)(logits, w_t).mean()
 
@@ -189,7 +181,7 @@ def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
     )
     new_params = jax.tree.map(lambda p, g: p - cfg.lr * g, params, grads)
     state = eqx.tree_at(lambda s: s.agent.params, state, new_params)
-    return roll.imc.refresh(state), loss
+    return state, loss
 
 
 jit_eval = jax.jit(evaluator.evaluate)

@@ -1,4 +1,4 @@
-"""Fixed-length decision, Markov-chain, and successor collection."""
+"""Fixed-length trajectory collection from a step sampler."""
 
 from __future__ import annotations
 
@@ -9,82 +9,63 @@ import jax.numpy as jnp
 from chex import dataclass
 
 
-class ImcSample[McT, DecT](Protocol):
-    """Single-step sample surface consumed by ``Roll``."""
+class Sampler[SampleT, StateT](Protocol):
+    """Single-step sampler capability required by ``Roll``."""
 
-    mc: McT
-    succ: DecT
-
-
-class ObservedImc[DecT, McT, StateT](Protocol):
-    """Observed single-step sampler surface consumed by ``Roll``."""
-
-    def observe(self, state: StateT) -> DecT: ...
-
-    def sample(self, state: StateT) -> tuple[ImcSample[McT, DecT], StateT]: ...
+    def sample(self, state: StateT) -> tuple[SampleT, StateT]: ...
 
 
 @dataclass
-class Roll[DecT, McT, StateT]:
-    """Collect aligned decisions, Markov-chain transitions, and successors.
+class Roll[SampleT, StateT]:
+    """Stack samples from a stateful sampler along one sequence axis.
 
     Attributes:
-        imc: Single-step sampler exposing ``observe`` and ``sample``.
+        imc: Stateful single-step sampler.
         seqlen: Number of transitions in the trajectory.
         seq_axis: Output axis carrying the temporal sequence.
-        _unroll: Loop-unroll factor passed to ``jax.lax.scan``.
-
-    Public dataclasses:
-        Trajectory: Decisions, MC transitions, and successors, each of length T.
+        _unroll: Loop-unroll factor passed to :func:`jax.lax.scan`.
 
     Public methods:
-        sample: Collect one fixed-length trajectory and advance child state.
+        sample: Stack a fixed number of samples and advance child state.
     """
 
-    imc: ObservedImc[DecT, McT, StateT]
+    imc: Sampler[SampleT, StateT]
     seqlen: int
     seq_axis: int = 0
     _unroll: int = 1
 
-    @dataclass
-    class Trajectory[DecDataT, McDataT]:
-        """Aligned decision, Markov-chain, and successor pytrees.
+    def __post_init__(self) -> None:
+        """Validate the static scan configuration."""
+        if self.seqlen < 1:
+            raise ValueError("seqlen must be positive")
+        if self._unroll < 1:
+            raise ValueError("_unroll must be positive")
 
-        Attributes:
-            dec: Agent decisions whose actions were consumed.
-            mc: Markov-chain transitions produced by those actions.
-            succ: Decisions at true successors, including across autoresets.
-        """
-
-        dec: DecDataT
-        mc: McDataT
-        succ: DecDataT
+    def _advance(
+        self,
+        state: StateT,
+        unused: None,
+    ) -> tuple[StateT, SampleT]:
+        """Collect one sample for :func:`jax.lax.scan`."""
+        del unused
+        sample, state = self.imc.sample(state)
+        return state, sample
 
     def sample(
         self,
         state: StateT,
-    ) -> tuple[Roll.Trajectory[DecT, McT], StateT]:
-        """Collect ``seqlen`` aligned decision-MC-successor triples."""
-
-        def advance(
-            state: StateT,
-            unused: None,
-        ) -> tuple[StateT, tuple[DecT, McT, DecT]]:
-            del unused
-            dec = self.imc.observe(state)
-            sample, state = self.imc.sample(state)
-            return state, (dec, sample.mc, sample.succ)
-
-        state, (dec, mc, succ) = jax.lax.scan(
-            advance,
+    ) -> tuple[SampleT, StateT]:
+        """Stack ``seqlen`` samples and advance the sampler state."""
+        state, samples = jax.lax.scan(
+            self._advance,
             state,
             xs=None,
             length=self.seqlen,
             unroll=self._unroll,
         )
         if self.seq_axis != 0:
-            dec, mc, succ = jax.tree.map(
+            samples = jax.tree.map(
                 lambda x: jnp.moveaxis(x, 0, self.seq_axis),
-                (dec, mc, succ),
+                samples,
             )
-        return self.Trajectory(dec=dec, mc=mc, succ=succ), state
+        return samples, state

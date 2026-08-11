@@ -70,23 +70,14 @@ class Agent:
         key: chex.Array
         q: chex.Array  # (A, S)
 
-    @dataclass
-    class Decision:
-        """Q-learning data attached to one decision."""
-
-        act: chex.Array
-        q: chex.Array
-
-    def decide(
-        self, obs: chex.Array, state: Agent.State
-    ) -> tuple[Agent.Decision, Agent.State]:
-        """Prepare an ε-greedy action and its Q-values."""
+    def act(self, obs: chex.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
+        """Select an ε-greedy action."""
         key, act_key, explore_key = jrd.split(state.key, 3)
         q = state.q[:, obs]
         greedy = jnp.argmax(q)
         random = jrd.randint(act_key, (), 0, state.q.shape[0])
         action = jnp.where(jrd.uniform(explore_key) < self.epsilon, random, greedy)
-        return self.Decision(act=action, q=q), state.replace(key=key)
+        return action, state.replace(key=key)
 
     def q_vals(self, state: Agent.State, obs: chex.Array) -> chex.Array:
         """Q-values for given state indices."""
@@ -96,21 +87,19 @@ class Agent:
 @jax.jit
 def train_step(state: Imc.State, k: int) -> Imc.State:
     """One transition + Q-learning update with decaying step size."""
-    dec = imc.observe(state)
-    sample, state = imc.sample(state)
+    transition, state = imc.sample(state)
     q = state.agent.q
     alpha = cfg.alpha_init / (1.0 + k / cfg.alpha_period) ** cfg.alpha_power
-    discount = jnp.where(sample.mc.term, 0.0, cfg.gamma)
+    discount = jnp.where(transition.term, 0.0, cfg.gamma)
     td = rlax.q_learning(
-        dec.q,
-        dec.act,
-        sample.mc.rew,
+        q[:, transition.obs],
+        transition.act,
+        transition.rew,
         discount,
-        sample.succ.q,
+        q[:, transition.nobs],
     )
-    new_q = q.at[dec.act, sample.mc.obs].add(alpha * td)
-    state = state.replace(agent=state.agent.replace(q=new_q))
-    return imc.refresh(state)
+    new_q = q.at[transition.act, transition.obs].add(alpha * td)
+    return state.replace(agent=state.agent.replace(q=new_q))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

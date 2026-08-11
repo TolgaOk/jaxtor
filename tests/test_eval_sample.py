@@ -25,13 +25,9 @@ class GoRightAgent:
     class State:
         key: chex.PRNGKey
 
-    @dataclass
-    class Decision:
-        act: chex.Array
-
-    def decide(self, obs, state):
+    def act(self, obs, state):
         del obs
-        return self.Decision(act=jnp.array(1)), state
+        return jnp.array(1), state
 
 
 class GoLeftAgent:
@@ -41,13 +37,9 @@ class GoLeftAgent:
     class State:
         key: chex.PRNGKey
 
-    @dataclass
-    class Decision:
-        act: chex.Array
-
-    def decide(self, obs, state):
+    def act(self, obs, state):
         del obs
-        return self.Decision(act=jnp.array(3)), state
+        return jnp.array(3), state
 
 
 @dataclass
@@ -70,21 +62,13 @@ class OpaqueImc:
         term: jax.Array
         trun: jax.Array
 
-    @dataclass
-    class Sample:
-        """Evaluator-facing wrapper around one transition."""
-
-        mc: OpaqueImc.Transition
-
     def sample(self, state):
         """Return one completed unit-reward episode per batch element."""
         return (
-            self.Sample(
-                mc=self.Transition(
-                    rew=jnp.ones(self.batch_shape),
-                    term=jnp.ones(self.batch_shape, dtype=jnp.bool_),
-                    trun=jnp.zeros(self.batch_shape, dtype=jnp.bool_),
-                )
+            self.Transition(
+                rew=jnp.ones(self.batch_shape),
+                term=jnp.ones(self.batch_shape, dtype=jnp.bool_),
+                trun=jnp.zeros(self.batch_shape, dtype=jnp.bool_),
             ),
             state.replace(step=state.step + 1),
         )

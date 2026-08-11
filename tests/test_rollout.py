@@ -1,4 +1,4 @@
-"""Tests for decision-MC-successor trajectory collection."""
+"""Tests for fixed-length collection from a minimal IMC."""
 
 import chex
 import jax
@@ -48,46 +48,36 @@ class CounterEnv:
         state: State,
     ) -> tuple[Step, State]:
         """Advance one counter step."""
-        del key, act
+        del key
         count = state.count + 1
         return self.Step(
             nobs=count,
-            rew=count.astype(jnp.float32),
+            rew=act.astype(jnp.float32),
             term=count == 3,
             trun=jnp.array(False),
         ), self.State(count=count)
 
 
 @dataclass
-class ValueAgent:
-    """Agent attaching a behavior log-probability and value to each decision."""
+class CountingAgent:
+    """Select zero and count how many actions were requested."""
 
     @dataclass
     class State:
-        """Number of decisions prepared by the agent."""
+        """Number of selected actions."""
 
-        decisions: jax.Array
+        actions: jax.Array
 
-    @dataclass
-    class Decision:
-        """Learning data attached to a decision."""
-
-        act: chex.Array
-        log_mu: jax.Array
-        value: jax.Array
-
-    def decide(
+    def act(
         self,
         obs: jax.Array,
         state: State,
-    ) -> tuple[Decision, State]:
-        """Prepare one deterministic decision."""
-        dec = self.Decision(
-            act=jnp.zeros_like(obs, dtype=jnp.int32),
-            log_mu=-obs.astype(jnp.float32),
-            value=10.0 * obs.astype(jnp.float32),
+    ) -> tuple[jax.Array, State]:
+        """Return a zero action matching the observation batch shape."""
+        act = jnp.zeros_like(obs, dtype=jnp.int32)
+        return act, state.replace(  # type: ignore[reportAttributeAccessIssue]
+            actions=state.actions + 1
         )
-        return dec, state.replace(decisions=state.decisions + 1)
 
 
 def make_roll(
@@ -95,84 +85,84 @@ def make_roll(
     *,
     seqlen: int,
 ) -> tuple[Roll, Imc.State]:
-    """Build a scalar rollout and its initialized IMC state."""
+    """Build a scalar minimal rollout and its state."""
     env = CounterEnv()
     mc = Mc(max_episode_len=10, env=env)
-    imc = Imc(agent=ValueAgent(), mc=mc)
+    imc = Imc(agent=CountingAgent(), mc=mc)
     state = imc.init(
         mc.init(key, env.init()),
-        ValueAgent.State(decisions=jnp.array(0, dtype=jnp.int32)),
+        CountingAgent.State(actions=jnp.array(0, dtype=jnp.int32)),
     )
     return Roll(imc=imc, seqlen=seqlen), state
 
 
-def test_roll_stacks_three_aligned_sequences():
-    """Agent nodes, MC transitions, and successors all have length T."""
+def test_roll_stacks_mc_transitions_directly():
+    """The MC transition pytree receives the configured sequence length."""
     roll, state = make_roll(jax.random.key(0), seqlen=5)
 
     trajectory, _ = roll.sample(state)
 
-    chex.assert_shape(trajectory.dec.log_mu, (5,))
-    chex.assert_shape(trajectory.mc.obs, (5,))
-    chex.assert_shape(trajectory.mc.rew, (5,))
-    chex.assert_shape(trajectory.mc.nobs, (5,))
-    chex.assert_shape(trajectory.succ.value, (5,))
+    chex.assert_shape(trajectory.act, (5,))
+    chex.assert_shape(trajectory.obs, (5,))
+    chex.assert_shape(trajectory.rew, (5,))
+    chex.assert_shape(trajectory.nobs, (5,))
 
 
 def test_roll_exposes_normal_and_boundary_alignment():
-    """Normal successors continue while terminal successors precede reset nodes."""
+    """Normal successors continue while terminal successors precede reset."""
     roll, state = make_roll(jax.random.key(0), seqlen=4)
 
     trajectory, state = roll.sample(state)
 
-    assert jnp.array_equal(trajectory.mc.obs, jnp.array([0, 1, 2, 0]))
-    assert jnp.array_equal(trajectory.mc.nobs, jnp.array([1, 2, 3, 1]))
-    assert jnp.array_equal(trajectory.mc.term, jnp.array([False, False, True, False]))
-    assert roll.imc.mc.observe(state.mc) == 1
+    assert jnp.array_equal(trajectory.obs, jnp.array([0, 1, 2, 0]))
+    assert jnp.array_equal(trajectory.nobs, jnp.array([1, 2, 3, 1]))
+    assert jnp.array_equal(
+        trajectory.term,
+        jnp.array([False, False, True, False]),
+    )
+    assert state.mc.last_obs == 1
 
 
-def test_roll_uses_cached_successors_between_calls():
-    """The next rollout begins at the decision cached by the previous one."""
+def test_roll_recomputes_from_updated_agent_state_between_calls():
+    """Ordinary Roll carries no derived agent output between calls."""
     roll, state = make_roll(jax.random.key(0), seqlen=2)
     _, state = roll.sample(state)
-    expected = state.dec
-    expected_obs = roll.imc.mc.observe(state.mc)
+    state = state.replace(agent=state.agent.replace(actions=jnp.array(100)))
 
-    trajectory, _ = roll.sample(state)
+    _, state = roll.sample(state)
 
-    assert trajectory.mc.obs[0] == expected_obs
-    assert trajectory.dec.value[0] == expected.value
+    assert state.agent.actions == 102
 
 
 def test_roll_is_jittable():
-    """The complete trajectory collection compiles under JIT."""
+    """The complete minimal trajectory collection compiles under JIT."""
     roll, state = make_roll(jax.random.key(0), seqlen=5)
 
     trajectory, state = jax.jit(roll.sample)(state)
 
-    chex.assert_shape(trajectory.mc.obs, (5,))
-    chex.assert_shape(state.dec.value, ())
+    chex.assert_shape(trajectory.obs, (5,))
+    assert state.agent.actions == 5
 
 
 def test_roll_moves_one_sequence_axis_consistently():
-    """Vectorized rollouts place all three sequences on the configured axis."""
+    """Vectorized rollouts place both sequences on the configured axis."""
     n_envs = 3
     seqlen = 4
     env = CounterEnv()
     mc = VecMc(mc=Mc(max_episode_len=10, env=env))
-    imc = Imc(agent=ValueAgent(), mc=mc)
+    imc = Imc(agent=CountingAgent(), mc=mc)
     state = imc.init(
         mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
-        ValueAgent.State(decisions=jnp.array(0, dtype=jnp.int32)),
+        CountingAgent.State(actions=jnp.array(0, dtype=jnp.int32)),
     )
     roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
 
     trajectory, _ = jax.jit(roll.sample)(state)
 
-    chex.assert_shape(trajectory.mc.obs, (n_envs, seqlen))
-    chex.assert_shape(trajectory.mc.rew, (n_envs, seqlen))
-    chex.assert_shape(trajectory.mc.nobs, (n_envs, seqlen))
-    chex.assert_shape(trajectory.succ.value, (n_envs, seqlen))
+    chex.assert_shape(trajectory.act, (n_envs, seqlen))
+    chex.assert_shape(trajectory.obs, (n_envs, seqlen))
+    chex.assert_shape(trajectory.rew, (n_envs, seqlen))
+    chex.assert_shape(trajectory.nobs, (n_envs, seqlen))
 
 
 def test_roll_unroll_factor_preserves_results():

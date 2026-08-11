@@ -51,14 +51,10 @@ class RandomAgent:
 
     State = AgentState
 
-    @dataclass
-    class Decision:
-        act: chex.Array
-
-    def decide(self, obs, state):
+    def act(self, obs, state):
         key, subkey = jrd.split(state.key)
         act = jrd.uniform(subkey, (obs.shape[0], HOPPER_NU), minval=-1.0, maxval=1.0)
-        return self.Decision(act=act), AgentState(key=key)
+        return act, AgentState(key=key)
 
 
 class ScalarRandomAgent:
@@ -66,14 +62,10 @@ class ScalarRandomAgent:
 
     State = AgentState
 
-    @dataclass
-    class Decision:
-        act: chex.Array
-
-    def decide(self, obs, state):
+    def act(self, obs, state):
         key, subkey = jrd.split(state.key)
         act = jrd.uniform(subkey, (HOPPER_NU,), minval=-1.0, maxval=1.0)
-        return self.Decision(act=act), AgentState(key=key)
+        return act, AgentState(key=key)
 
 
 def _sync_state(env, qpos, qvel):
@@ -353,9 +345,9 @@ def test_roll_chain_jit():
     roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
     trajectory, imc_state = jax.jit(roll.sample)(imc_state)
 
-    assert trajectory.mc.obs.shape == (NUM_ENVS, seqlen, HOPPER_OBS)
-    assert trajectory.dec.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
-    assert trajectory.mc.rew.shape == (NUM_ENVS, seqlen)
+    assert trajectory.obs.shape == (NUM_ENVS, seqlen, HOPPER_OBS)
+    assert trajectory.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
+    assert trajectory.rew.shape == (NUM_ENVS, seqlen)
 
 
 def test_roll_single_env():
@@ -374,5 +366,5 @@ def test_roll_single_env():
     roll = Roll(imc=imc, seqlen=seqlen)
     trajectory, _ = roll.sample(imc_state)
 
-    assert trajectory.mc.obs.shape == (seqlen, HOPPER_OBS)
-    assert trajectory.dec.act.shape == (seqlen, HOPPER_NU)
+    assert trajectory.obs.shape == (seqlen, HOPPER_OBS)
+    assert trajectory.act.shape == (seqlen, HOPPER_NU)

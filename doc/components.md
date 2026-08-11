@@ -35,26 +35,31 @@ flowchart TB
 
     subgraph interaction["3 · POLICY INTERACTION | closed sampling"]
         direction LR
-        agent_api(["Agent protocol<br/>decide(observation, state)<br/>→ decision"])
-        dec[["Decision<br/>act · optional learning data"]]
-        imc["Imc<br/>cache decision · advance MC · prepare successor<br/>state: mc · agent · dec"]
-        imc_api(["IMC protocol<br/>observe(state) → dec<br/>sample(state) → mc · succ"])
-        agent_api --> dec
-        dec --> imc
+        agent_api(["Agent protocol<br/>act(observation, state)<br/>→ action · state"])
+        imc["Imc<br/>select action · advance MC<br/>state: mc · agent"]
+        imc_api(["Sampler protocol<br/>sample(state) → transition · state"])
+        loaded_agent_api(["Loaded agent protocol<br/>infer(observation, state)<br/>→ output · state"])
+        output[["Agent output<br/>act · learning data"]]
+        agent_api --> imc
         mc_api --> imc
         imc --> imc_api
+        loaded_agent_api --> output
     end
 
     subgraph collection["4 · COLLECT / EVALUATE"]
         direction LR
-        roll["Roll<br/>lax.scan over T steps<br/>trajectory: dec · mc · succ"]
+        roll["Roll<br/>scan any sampler over T steps<br/>trajectory: stacked samples"]
+        loaded_roll["LoadedRoll<br/>infer endpoints · advance MC over T steps<br/>trajectory: pre · mc · succ<br/>state: mc · agent"]
         ep_stats["EpisodeStats<br/>partial episodes · completed sums<br/>state: return · length · count"]
         mc_eval["McEval<br/>sampled episode metrics"]
     end
 
     imc_api --> roll
     imc_api --> mc_eval
-    roll -->|MC trajectory| ep_stats
+    output --> loaded_roll
+    mc_api --> loaded_roll
+    roll -->|transition trajectory| ep_stats
+    loaded_roll -->|MC trajectory| ep_stats
 
     subgraph tabular_branch["TABULAR OPERATIONS"]
         direction LR
@@ -81,6 +86,7 @@ flowchart TB
     end
 
     roll -->|aligned trajectory| update
+    loaded_roll -->|loaded trajectory| update
     sweep -->|batched transitions| update
     exp_sweep -->|value / occupancy sequences| update
     ep_stats -->|training episode metrics| report
@@ -96,11 +102,11 @@ flowchart TB
     classDef consumer fill:#FFFFFF,stroke:#7C8798,color:#273444,stroke-width:1.2px,stroke-dasharray:5 3;
 
     class tabular,gymnax,mjx,gym adapter;
-    class env_api,mc_api,agent_api,imc_api,value_api protocol;
+    class env_api,mc_api,agent_api,loaded_agent_api,imc_api,value_api protocol;
     class mc,vecmc sampler;
-    class imc,roll interactionNode;
+    class imc,roll,loaded_roll interactionNode;
     class ep_stats,mc_eval,sweep,exp_sweep,tabular_eval analysis;
-    class dec,mdp data;
+    class output,mdp data;
     class update,report consumer;
 
     style environments fill:#F8FAFD,stroke:#C8D5E6,stroke-width:1px,color:#425466
@@ -115,8 +121,8 @@ flowchart TB
 Solid arrows show runtime composition and data flow. Dotted arrows show structural
 relationships. Components are configured objects, while dynamic data lives in
 explicit state pytrees. The composition can be wrapped in `jit`; `VecMc` uses
-`vmap`, while `Roll`, `EpisodeStats`, and `McEval` use `scan`. Gradient transforms
-remain available along pure-JAX environment paths.
+`vmap`, while `Roll`, `LoadedRoll`, `EpisodeStats`, and `McEval` use `scan`.
+Gradient transforms remain available along pure-JAX environment paths.
 
 ## Host-backed Gymnasium boundary
 

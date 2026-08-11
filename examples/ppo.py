@@ -10,12 +10,14 @@ actor_critic: ActorCritic
 ├── value: MLP
 └── obs_norm: ObservationNorm
 
-rollout: Roll
-└── Imc
-    ├── agent: ActorCritic(stochastic)
-    └── VecMc
-        └── Mc
-            └── train_env
+rollout: LoadedRoll
+├── agent: ActorCritic(stochastic)
+└── VecMc
+    └── Mc
+        └── train_env
+
+stats: EpisodeStats
+└── input: rollout.mc[rew, term, trun]
 
 evaluation: Evaluator
 └── Imc
@@ -30,23 +32,23 @@ one dynamic ActorCritic.State.
 State
 -----
 key: PPO update randomness.
-rollout: Dynamic state consumed and returned by Roll.sample.
-├── mc: Environment state and episode queues.
-├── agent: Policy, value function, sampling key, and observation statistics.
-└── dec: Cached next decision.
+rollout: Dynamic state consumed and returned by LoadedRoll.sample.
+├── mc: Environment state, observation, and episode index.
+└── agent: Policy, value function, sampling key, and observation statistics.
+stats: Partial episodes and completed-episode accumulators.
 rew_norm: Rolling discounted-return statistics.
 pi_opt, v_opt: Policy and value optimizer states.
 
 Flow
 ----
-trajectory[dec, mc, succ]
+trajectory[pre, mc, succ]
+-> episode statistics from raw rewards and boundaries
 -> reward normalization
--> TD(lambda) from dec.value to succ.value
+-> TD(lambda) from pre.value to succ.value
 -> PpoBatch
 -> ActorCritic.eval_pi[log_pi] + ActorCritic.value
 -> PPO update
 -> observation normalization
--> refresh cached decision
 
 Axes
 ----
@@ -56,7 +58,7 @@ N: environments, T: rollout length, B: N * T.
 from __future__ import annotations
 
 import time
-from typing import Protocol
+from typing import Protocol, cast
 
 import chex
 import distrax
@@ -73,7 +75,7 @@ from rich.progress import track
 
 from jaxtor.env import gymnasium
 from jaxtor.eval.mc import Eval as Evaluator
-from jaxtor.sampler import Imc, Mc, Roll, VecMc
+from jaxtor.sampler import EpisodeStats, Imc, LoadedRoll, Mc, VecMc
 from jaxtor.util.reward_norm import RewardNorm
 from jaxtor.util.running_stats import RunningStats
 
@@ -320,12 +322,13 @@ class ActorCritic:
 
     Public dataclasses:
         State: Policy, value, random-key, and observation-normalizer state.
-        Decision: Action, behavior log-probability, and value.
+        Output: Action, behavior log-probability, and value.
         PolicyEval: Log-probability and entropy for supplied actions.
 
     Public methods:
         init: Initialize the complete dynamic state.
-        decide: Prepare a stochastic or deterministic decision.
+        act: Select only an action for minimal samplers and evaluation.
+        infer: Infer action, behavior log-probability, and value.
         eval_pi: Evaluate policy statistics for PPO updates.
         value: Evaluate the critic.
         update_obs: Update observation statistics from a trajectory.
@@ -356,10 +359,10 @@ class ActorCritic:
         obs_norm: ObservationNorm.State
 
     @dataclass
-    class Decision:
-        """Actor-critic data cached and collected by ``Imc``."""
+    class Output:
+        """Actor-critic data collected by ``LoadedRoll``."""
 
-        act: chex.Array
+        act: jax.Array
         log_mu: jax.Array
         value: jax.Array
 
@@ -417,27 +420,36 @@ class ActorCritic:
         log_std = jnp.clip(state.policy.log_std, -20.0, 2.0)
         return distrax.Normal(loc=mean, scale=jnp.exp(log_std))
 
-    def decide(
+    def infer(
         self,
         obs: jax.Array,
         state: ActorCritic.State,
-    ) -> tuple[ActorCritic.Decision, ActorCritic.State]:
-        """Prepare the action, behavior log-probability, and value at ``obs``."""
+    ) -> tuple[ActorCritic.Output, ActorCritic.State]:
+        """Infer the action, behavior log-probability, and value at ``obs``."""
         dist = self._dist(obs, state)
         value = self.value(obs, state)
         if self.deterministic:
             action = dist.mode()
             log_mu = dist.log_prob(action).sum(-1)
-            return self.Decision(act=action, log_mu=log_mu, value=value), state
+            return self.Output(act=action, log_mu=log_mu, value=value), state
 
         key, sample_key = jrd.split(state.key)
         action, log_mu = dist.sample_and_log_prob(seed=sample_key)
-        dec = self.Decision(
+        output = self.Output(
             act=action,
             log_mu=log_mu.sum(-1),
             value=value,
         )
-        return dec, state.replace(key=key)
+        return output, state.replace(key=key)
+
+    def act(
+        self,
+        obs: jax.Array,
+        state: ActorCritic.State,
+    ) -> tuple[jax.Array, ActorCritic.State]:
+        """Select only the action required by a minimal ``Imc``."""
+        output, state = self.infer(obs, state)
+        return output.act, state
 
     def eval_pi(
         self,
@@ -542,7 +554,8 @@ class State:
     """Dynamic state of the complete PPO recipe."""
 
     key: jax.Array
-    rollout: Imc.State
+    rollout: LoadedRoll.State[Mc.State, ActorCritic.State]
+    stats: EpisodeStats.State
     rew_norm: RewardNormalizer.State
     pi_opt: optax.OptState
     v_opt: optax.OptState
@@ -551,15 +564,17 @@ class State:
 def train_step(
     state: State,
     *,
-    rollout: Roll,
+    rollout: LoadedRoll,
+    stats: EpisodeStats,
     rew_norm: RewardNormalizer,
     pi_tx: optax.GradientTransformation,
     v_tx: optax.GradientTransformation,
     cfg: Config,
 ) -> tuple[PpoMetrics, State]:
     """One PPO iteration: collect rollout, compute GAE, run minibatch updates."""
-    ac = rollout.imc.agent
+    ac = cast(ActorCritic, rollout.agent)
     trajectory, roll_state = rollout.sample(state.rollout)
+    stats_state = stats.update(trajectory.mc, state.stats)
 
     done = jnp.logical_or(trajectory.mc.term, trajectory.mc.trun)
     rewards, rew_norm_state = rew_norm.norm(
@@ -568,7 +583,7 @@ def train_step(
         state.rew_norm,
     )
 
-    values = trajectory.dec.value
+    values = trajectory.pre.value
     discounts = cfg.gamma * (1.0 - trajectory.mc.term.astype(jnp.float32))
     trace = cfg.gae_lambda * (1.0 - done.astype(jnp.float32))
     chex.assert_equal_shape([rewards, values, discounts, trace, trajectory.succ.value])
@@ -585,13 +600,17 @@ def train_step(
         lambda x: x.reshape((-1, *x.shape[2:])),
         PpoBatch(
             obs=trajectory.mc.obs,
-            act=trajectory.dec.act,
-            log_mu=trajectory.dec.log_mu,
+            act=trajectory.pre.act,
+            log_mu=trajectory.pre.log_mu,
             adv=advantages,
             ret=returns,
         ),
     )
-    state = state.replace(rollout=roll_state, rew_norm=rew_norm_state)
+    state = state.replace(
+        rollout=roll_state,
+        stats=stats_state,
+        rew_norm=rew_norm_state,
+    )
     metrics, state = update(
         batch,
         state,
@@ -601,8 +620,7 @@ def train_step(
         cfg=cfg,
     )
     agent = ac.update_obs(trajectory.mc.obs, state.rollout.agent)
-    rollout_state = rollout.imc.refresh(state.rollout.replace(agent=agent))
-    state = state.replace(rollout=rollout_state)
+    state = state.replace(rollout=state.rollout.replace(agent=agent))
     return metrics, state
 
 
@@ -731,31 +749,28 @@ def train(cfg: Config) -> State:
         else IdentityRewNorm()
     )
 
-    rollout = Roll(
+    rollout = LoadedRoll(
         seqlen=cfg.seqlen,
         seq_axis=1,
-        imc=Imc(
-            agent=ActorCritic(
-                obs_dim=obs_dim,
-                act_dim=act_dim,
-                actor_hiddens=cfg.actor_hiddens,
-                critic_hiddens=cfg.critic_hiddens,
-                layer_norm=cfg.layer_norm,
-                obs_norm=(
-                    RunningObsNorm(clip=10.0)
-                    if cfg.normalize_obs
-                    else IdentityObsNorm()
-                ),
-                deterministic=False,
+        agent=ActorCritic(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            actor_hiddens=cfg.actor_hiddens,
+            critic_hiddens=cfg.critic_hiddens,
+            layer_norm=cfg.layer_norm,
+            obs_norm=(
+                RunningObsNorm(clip=10.0) if cfg.normalize_obs else IdentityObsNorm()
             ),
-            mc=VecMc(
-                mc=Mc(
-                    max_episode_len=cfg.max_episode_len,
-                    env=env,
-                )
+            deterministic=False,
+        ),
+        mc=VecMc(
+            mc=Mc(
+                max_episode_len=cfg.max_episode_len,
+                env=env,
             ),
         ),
     )
+    stats = EpisodeStats(seq_axis=1)
 
     evaluator = Evaluator(
         episode_len=cfg.max_episode_len,
@@ -782,10 +797,10 @@ def train(cfg: Config) -> State:
         ),
     )
 
-    ac = rollout.imc.agent
+    ac = cast(ActorCritic, rollout.agent)
     ac_state = ac.init(ac_key)
-    rollout_state = rollout.imc.init(
-        rollout.imc.mc.init(
+    rollout_state = rollout.init(
+        rollout.mc.init(
             jrd.split(mc_key, cfg.n_envs),
             env.init(env_key),
         ),
@@ -794,6 +809,7 @@ def train(cfg: Config) -> State:
     state = State(
         key=update_key,
         rollout=rollout_state,
+        stats=stats.init(batch_shape=(cfg.n_envs,)),
         rew_norm=rew_norm.init(cfg.n_envs),
         pi_opt=pi_tx.init(rollout_state.agent.policy),
         v_opt=v_tx.init(rollout_state.agent.value),
@@ -804,6 +820,7 @@ def train(cfg: Config) -> State:
         return train_step(
             state,
             rollout=rollout,
+            stats=stats,
             rew_norm=rew_norm,
             pi_tx=pi_tx,
             v_tx=v_tx,
@@ -821,6 +838,8 @@ def train(cfg: Config) -> State:
         metrics, state = step(state)
 
         if (i + 1) % cfg.eval_freq == 0:
+            train_metrics, stats_state = stats.drain(state.stats)
+            state = state.replace(stats=stats_state)
             eval_key, e_env_key, k = jrd.split(eval_key, 3)
             eval_mc_state = evaluator.imc.mc.init(
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
@@ -834,7 +853,8 @@ def train(cfg: Config) -> State:
             steps = (i + 1) * cfg.n_envs * cfg.seqlen
             print(
                 f"  iter {i + 1:4d}  loss={float(metrics.pi_loss):+.4f}"
-                f"  rew={float(eval_metrics.avg_eps_rew):.1f}"
+                f"  train_rew={float(train_metrics.avg_eps_rew):.1f}"
+                f"  eval_rew={float(eval_metrics.avg_eps_rew):.1f}"
                 f"\u00b1{float(eval_metrics.std_eps_rew):.1f}"
                 f"  len={float(eval_metrics.avg_eps_len):.1f}"
                 f"  steps={steps:,}"
