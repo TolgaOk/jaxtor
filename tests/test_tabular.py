@@ -278,6 +278,7 @@ def test_truncation_at_max_eps_len():
 
     # Run until truncation
     truncated = False
+    terminated = False
     for i in range(max_eps_len + 5):
         step_key, key = jax.random.split(key)
         transition, state = env.step(step_key, 0, state)
@@ -291,10 +292,11 @@ def test_truncation_at_max_eps_len():
 
         if transition.term:
             # Terminal state reached before truncation
+            terminated = True
             break
 
     # Either we hit truncation or terminal
-    assert truncated or transition.term
+    assert truncated or terminated
 
 
 def test_episode_length_limit():

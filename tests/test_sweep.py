@@ -1,6 +1,5 @@
 """Tests for stochastic sweep sampler and expected sweep."""
 
-import chex
 import jax
 import jax.numpy as jnp
 import pytest
@@ -303,10 +302,6 @@ def test_sweep_different_keys_can_differ(small_env):
 
     # Check if there's any variation (unless MDP is deterministic)
     all_nobs = jnp.stack(nobs_list)
-    # At least some position should have different nobs across samples
-    has_variation = jnp.any(jnp.std(all_nobs, axis=0) > 0)
-    # This test passes if there's variation OR if MDP happens to be deterministic
-    # (we mainly want to verify it doesn't crash with different keys)
     assert all_nobs.shape == (
         20,
         small_env.config.action_size * small_env.config.state_size,
@@ -422,7 +417,7 @@ def test_sweep_larger_env(garnet_env):
 
 @dataclass
 class FakeMDP:
-    transition: chex.Array
+    transition: jax.Array
 
 
 def test_chex_exp_sweep_wrong_rank_q():

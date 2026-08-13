@@ -6,43 +6,41 @@ optimality target, and known optimal Q-values.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Generic, Protocol, TypeVar, cast
+from typing import Generic, Protocol, TypeVar
 
 import chex
 import jax
 import jax.numpy as jnp
 from chex import dataclass  # pyright: ignore[reportUnknownVariableType]
-from jaxdp.base import bellman_optimality_operator as jaxdp_bellman
-from jaxdp.base import greedy_policy as jaxdp_greedy
-from jaxdp.base import policy_evaluation as jaxdp_policy_evaluation
+
+from jaxtor.env.tabular import Mdp
 
 
-class Mdp(Protocol):
-    """Tabular MDP surface consumed by this module."""
-
-    initial: jax.Array
-    terminal: jax.Array
-
-    @property
-    def state_size(self) -> int: ...
-
-    @property
-    def action_size(self) -> int: ...
+def _greedy_policy(q: jax.Array) -> jax.Array:
+    """Return a one-hot greedy policy for an ``(A, S)`` Q-table."""
+    return jax.nn.one_hot(jnp.argmax(q, axis=0), q.shape[0], axis=0)
 
 
-_greedy_policy = cast(
-    Callable[[jax.Array], jax.Array],
-    jaxdp_greedy.q,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-)
-_evaluate_policy = cast(
-    Callable[[Mdp, jax.Array, float], jax.Array],
-    jaxdp_policy_evaluation.q,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-)
-_bellman_optimality = cast(
-    Callable[[Mdp, jax.Array, float], jax.Array],
-    jaxdp_bellman.q,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-)
+def _evaluate_policy(mdp: Mdp, policy: jax.Array, gamma: float) -> jax.Array:
+    """Return exact action values for a policy in a finite MDP."""
+    transition = jnp.einsum("as,axs->xs", policy, mdp.transition)
+    reward = jnp.einsum("as,asx->sx", policy, mdp.reward)
+    value = jnp.linalg.solve(
+        jnp.eye(mdp.state_size) - gamma * transition.T,
+        jnp.einsum("sx,sx->s", transition.T, reward),
+    )
+    return jnp.einsum("asx,axs->as", mdp.reward, mdp.transition) + gamma * jnp.einsum(
+        "axs,x->as",
+        mdp.transition,
+        value,
+    )
+
+
+def _bellman_optimality(mdp: Mdp, q: jax.Array, gamma: float) -> jax.Array:
+    """Apply the Bellman optimality operator to an ``(A, S)`` Q-table."""
+    reward = jnp.einsum("axs,asx->as", mdp.transition, mdp.reward)
+    next_value = jnp.einsum("axs,x->as", mdp.transition, jnp.max(q, axis=0))
+    return reward + gamma * next_value
 
 
 def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
@@ -59,9 +57,7 @@ def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
     Returns:
         Optimal Q-values with shape ``(A, S)``.
     """
-    q = jnp.zeros(  # pyright: ignore[reportUnknownMemberType]
-        (mdp.action_size, mdp.state_size)
-    )
+    q = jnp.zeros((mdp.action_size, mdp.state_size))
     for _ in range(n_iters):
         q = _evaluate_policy(mdp, _greedy_policy(q), gamma)
     return q
@@ -138,9 +134,7 @@ class Eval(Generic[AgentState]):
 
     def _q_values(self, agent_state: AgentState) -> jax.Array:
         """Read the complete Q-table through the agent protocol."""
-        all_states = jnp.arange(  # pyright: ignore[reportUnknownMemberType]
-            self.mdp.state_size
-        )
+        all_states = jnp.arange(self.mdp.state_size)
         q_values = self.agent.q_vals(agent_state, all_states)
         chex.assert_shape(
             q_values,
@@ -159,9 +153,7 @@ class Eval(Generic[AgentState]):
         """
         return self.State(
             prev_q=self._q_values(agent_state),
-            step=jnp.zeros(  # pyright: ignore[reportUnknownMemberType]
-                (), dtype=jnp.int32
-            ),
+            step=jnp.zeros((), dtype=jnp.int32),
         )
 
     def evaluate(
@@ -196,10 +188,8 @@ class Eval(Generic[AgentState]):
         value_error = new_q - self.opt_q
         value_l1 = jnp.sum(jnp.abs(value_error) * non_term) / n_non_term
         value_linf = jnp.max(jnp.abs(value_error) * non_term)
-        value_norm = cast(
-            jax.Array,
-            jnp.linalg.norm(value_error * non_term)
-            / jnp.linalg.norm(self.opt_q * non_term),
+        value_norm = jnp.linalg.norm(value_error * non_term) / jnp.linalg.norm(
+            self.opt_q * non_term
         )
 
         prev_pi = _greedy_policy(state.prev_q)

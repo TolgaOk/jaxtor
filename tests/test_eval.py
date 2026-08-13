@@ -5,10 +5,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from chex import dataclass
-from jaxdp.base import bellman_optimality_operator as bellman_op
-from jaxdp.base import greedy_policy, policy_evaluation
-from jaxdp.mdp import MDP
 from jaxtor.env import tabular
+from jaxtor.eval import tabular as tabular_eval
 from jaxtor.eval.tabular import Eval as TabularEval
 
 
@@ -35,15 +33,20 @@ class TableAgent:
 # =============================================================================
 
 
-def _opt_q(mdp, gamma, n_iters=2000):
+def _opt_q(mdp: tabular.Mdp, gamma: float, n_iters: int = 2000) -> jax.Array:
     """Compute optimal Q-values via Bellman iteration."""
     q = jnp.zeros((mdp.action_size, mdp.state_size))
     for _ in range(n_iters):
-        q = bellman_op.q(mdp, q, gamma)
+        q = tabular_eval._bellman_optimality(mdp, q, gamma)
     return q
 
 
-def _make_mdp(state_size, action_size, terminal=None, reward=None):
+def _make_mdp(
+    state_size: int,
+    action_size: int,
+    terminal: jax.Array | None = None,
+    reward: jax.Array | None = None,
+) -> tabular.Mdp:
     """Build a minimal MDP with identity transitions for testing."""
     S, A = state_size, action_size
     transition = jnp.eye(S)[None, :, :].repeat(A, axis=0)
@@ -52,12 +55,11 @@ def _make_mdp(state_size, action_size, terminal=None, reward=None):
     if terminal is None:
         terminal = jnp.zeros(S)
     initial = jnp.ones(S) / S
-    return MDP(
+    return tabular.Mdp(
         transition=transition,
         reward=reward,
         initial=initial,
         terminal=terminal,
-        validate=False,
     )
 
 
@@ -380,12 +382,11 @@ def test_tabular_single_state_single_action():
     S, A = 1, 1
     transition = jnp.ones((A, S, S))
     reward = jnp.array([[[0.5]]])
-    mdp = MDP(
+    mdp = tabular.Mdp(
         transition=transition,
         reward=reward,
         initial=jnp.ones(S),
         terminal=jnp.zeros(S),
-        validate=False,
     )
 
     opt_q = _opt_q(mdp, gamma=0.99)
@@ -462,7 +463,7 @@ def test_tabular_bellman_target_shape():
     mdp = env_state.mdp
 
     q = jnp.ones((mdp.action_size, mdp.state_size))
-    target = bellman_op.q(mdp, q, 0.99)
+    target = tabular_eval._bellman_optimality(mdp, q, 0.99)
 
     assert target.shape == (mdp.action_size, mdp.state_size)
 
@@ -477,7 +478,7 @@ def test_tabular_greedy_policy_sums_to_one():
     mdp = env_state.mdp
 
     opt_q = _opt_q(mdp, 0.99)
-    pi = greedy_policy.q(opt_q)
+    pi = tabular_eval._greedy_policy(opt_q)
 
     assert pi.shape == (mdp.action_size, mdp.state_size)
     assert jnp.allclose(jnp.sum(pi, axis=0), 1.0)
@@ -493,8 +494,8 @@ def test_tabular_policy_eval_returns_q_shape():
     mdp = env_state.mdp
 
     opt_q = _opt_q(mdp, 0.99)
-    pi = greedy_policy.q(opt_q)
-    greedy_q = policy_evaluation.q(mdp, pi, 0.99)
+    pi = tabular_eval._greedy_policy(opt_q)
+    greedy_q = tabular_eval._evaluate_policy(mdp, pi, 0.99)
 
     assert greedy_q.shape == (mdp.action_size, mdp.state_size)
 
@@ -518,8 +519,8 @@ def test_tabular_pi_eval_rho_uses_initial_distribution():
     metrics, state = evaluator.evaluate(state, agent_state)
 
     # Recompute pi_eval_rho manually
-    pi = greedy_policy.q(opt_q)
-    greedy_q = policy_evaluation.q(mdp, pi, 0.99)
+    pi = tabular_eval._greedy_policy(opt_q)
+    greedy_q = tabular_eval._evaluate_policy(mdp, pi, 0.99)
     greedy_v = jnp.max(greedy_q, axis=0)
     expected_rho = jnp.sum(mdp.initial * greedy_v)
 

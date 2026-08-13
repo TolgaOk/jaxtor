@@ -18,8 +18,8 @@ and α(k) = α_init / (1 + k / α_period)^α_power is a decaying step size.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
-import chex
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
@@ -67,25 +67,28 @@ class Agent:
 
     @dataclass
     class State:
-        key: chex.Array
-        q: chex.Array  # (A, S)
+        key: jax.Array
+        q: jax.Array  # (A, S)
 
-    def act(self, obs: chex.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
+    def act(self, obs: jax.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
         """Select an ε-greedy action."""
         key, act_key, explore_key = jrd.split(state.key, 3)
         q = state.q[:, obs]
         greedy = jnp.argmax(q)
         random = jrd.randint(act_key, (), 0, state.q.shape[0])
         action = jnp.where(jrd.uniform(explore_key) < self.epsilon, random, greedy)
-        return action, state.replace(key=key)
+        return action, replace(state, key=key)
 
-    def q_vals(self, state: Agent.State, obs: chex.Array) -> chex.Array:
+    def q_vals(self, state: Agent.State, obs: jax.Array) -> jax.Array:
         """Q-values for given state indices."""
         return state.q[:, obs]
 
 
+type TrainState = Imc.State[Mc.State[tabular.TabularEnv.State], Agent.State]
+
+
 @jax.jit
-def train_step(state: Imc.State, k: int) -> Imc.State:
+def train_step(state: TrainState, k: int) -> TrainState:
     """One transition + Q-learning update with decaying step size."""
     transition, state = imc.sample(state)
     q = state.agent.q
@@ -99,7 +102,7 @@ def train_step(state: Imc.State, k: int) -> Imc.State:
         q[:, transition.nobs],
     )
     new_q = q.at[transition.act, transition.obs].add(alpha * td)
-    return state.replace(agent=state.agent.replace(q=new_q))
+    return replace(state, agent=replace(state.agent, q=new_q))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -158,9 +161,4 @@ for k in track(range(cfg.n_steps), description="Training"):
         )
 
 elapsed = time.time() - t0
-print(
-    f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s"
-    f"  value_norm={float(m.value_norm):.6f}"
-    f"  bellman_linf={float(m.bellman_linf):.6f}"
-    f"  ρ*(π)={opt_rho:.3f}"
-)
+print(f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s  ρ*(π)={opt_rho:.3f}")
