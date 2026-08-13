@@ -55,7 +55,7 @@ lives in explicit state pytrees, while the algorithm loop remains in user code.
 | Agents | `Module`, `Model`, `NormModel`, semantic heads, `VPi`, `VQPi` |
 | Distributions | `Categorical`, `DiagNormal`, `Draw`, `Mode` |
 | Sampling | `Mc`, `VecMc`, `Imc`, `Roll`, `LoadedRoll`, `EpisodeStats` |
-| Estimation | `TDEst` |
+| Inference | `VNextVInference`, `VPiNextVInference` |
 | Utilities | `Minibatches`, `ObsNorm`, `RewardNorm`, `RunningStats` |
 | Evaluation | sampled-episode and exact tabular evaluators |
 

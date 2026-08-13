@@ -9,7 +9,7 @@ import pytest
 from chex import dataclass
 
 from jaxtor.dist import Categorical
-from jaxtor.estimate import TDEst
+from jaxtor.inference import VPiNextVInference
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll
 
 pytestmark = pytest.mark.integration
@@ -63,7 +63,7 @@ class CounterEnv:
 
 @dataclass
 class Pred:
-    """Value-policy output required by temporal-difference estimation."""
+    """Value-policy output replayed over collected transitions."""
 
     v: jax.Array
     pi: Categorical
@@ -101,17 +101,15 @@ class Agent:
         ), state
 
 
-def test_roll_estimate_and_stats_have_exact_values_and_work():
-    """The composed path selects T actions and evaluates only needed TD nodes."""
-    expected_adv = jnp.array([2.5, 2.0, 2.5, 2.0])
-    expected_ret = jnp.array([2.5, 3.0, 2.5, 3.0])
+def test_roll_inference_and_stats_have_exact_values_and_work():
+    """The composed path selects T actions and evaluates only needed nodes."""
     _replayed.clear()
     env = CounterEnv()
     agent = Agent()
     mc = Mc(max_eps_len=2, env=env)
     imc = Imc(agent=agent, mc=mc)
     roll = Roll(imc=imc, seq_len=4)
-    estimator = TDEst(agent=agent, gamma=0.5, lam=1.0)
+    inference = VPiNextVInference(agent=agent)
     stats = EpisodeStats()
     key = jax.random.key(0)
     state = imc.init(
@@ -120,19 +118,22 @@ def test_roll_estimate_and_stats_have_exact_values_and_work():
     )
 
     seq, state = jax.jit(roll.sample)(state)
-    est = jax.jit(estimator.estimate)(seq, state.agent)
+    infer = jax.jit(inference.apply)(seq, state.agent)
     metrics, _ = jax.jit(lambda seq: stats.drain(stats.update(seq, stats.init())))(seq)
     jax.effects_barrier()
 
     assert jnp.array_equal(seq.obs, jnp.array([0, 1, 0, 1]))
     assert jnp.array_equal(seq.nobs, jnp.array([1, 2, 1, 2]))
     assert jnp.array_equal(seq.trun, jnp.array([False, True, False, True]))
-    assert jnp.allclose(est.adv, expected_adv)
-    assert jnp.allclose(est.ret, expected_ret)
+    assert jnp.array_equal(infer.v_tm1, jnp.array([0.0, 1.0, 0.0, 1.0]))
+    assert jnp.array_equal(infer.v_t, jnp.array([1.0, 2.0, 1.0, 2.0]))
+    assert jnp.allclose(
+        seq.rew + 0.5 * infer.v_t - infer.v_tm1, jnp.array([1.5, 2.0, 1.5, 2.0])
+    )
     assert metrics.avg_eps_rew == 3
     assert metrics.avg_eps_len == 2
     assert metrics.n_episodes == 2
     assert state.agent.actions == 4
     assert len(_replayed) == 6
     assert sorted(_replayed) == [0, 0, 1, 1, 2, 2]
-    chex.assert_tree_all_finite((seq, est, metrics))
+    chex.assert_tree_all_finite((seq, infer, metrics))

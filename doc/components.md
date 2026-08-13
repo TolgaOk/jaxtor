@@ -127,9 +127,9 @@ Gradient transforms remain available along pure-JAX environment paths.
 ## Prediction and learning composition
 
 Agent components form a state tree that mirrors their configured children.
-Sampling consumes only `act`, while estimators replay the same agent through
-`apply`. This keeps rollout collection small and leaves learning data under the
-component that defines it.
+Sampling consumes only `act`, while inference components replay the same agent
+through `apply`. This keeps collection small and leaves target computation in
+the algorithm that defines it.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui, sans-serif","fontSize":"15px","lineColor":"#718096","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":40,"padding":12}}}%%
@@ -168,11 +168,13 @@ flowchart LR
     subgraph prepare["PREPARE"]
         direction TB
         rew["RewardNorm<br/>explicit return state"]
-        td["TDEst<br/>agent replay + TD(λ)"]
-        estimate[["Estimate<br/>pred · adv · ret"]]
+        inference["VPiNextVInference<br/>agent replay + successor alignment"]
+        infer[["Inference<br/>v_tm1 · pi_tm1 · v_t"]]
+        target["RLax TD(λ)<br/>algorithm target"]
         batch[["Algorithm batch"]]
         mini["Minibatches<br/>shuffle sample axes"]
-        rew --> td --> estimate --> batch --> mini
+        rew --> target
+        inference --> infer --> target --> batch --> mini
     end
 
     subgraph learn["LEARN"]
@@ -184,8 +186,9 @@ flowchart LR
     end
 
     agent -->|act| imc
-    agent -->|apply| td
+    agent -->|apply| inference
     seq --> rew
+    seq --> inference
     seq --> batch
     mini --> loss
     agent --> split
@@ -199,8 +202,8 @@ flowchart LR
 
     class module,norm,body,vhead,pihead,dist,select,agent model;
     class imc,roll,stats sampler;
-    class rew,td,mini prepareNode;
-    class seq,estimate,batch data;
+    class rew,inference,target,mini prepareNode;
+    class seq,infer,batch data;
     class split,loss,update learnNode;
 
     style model_tree fill:#FBF9FD,stroke:#D4C8E5,stroke-width:1px,color:#425466
