@@ -9,18 +9,18 @@ from chex import dataclass
 
 
 @dataclass
-class Param[ValueT]:
+class Param[Value]:
     """Mark one pytree as trainable without changing its JAX behavior.
 
     Attributes:
         value: Trainable array or nested array pytree.
     """
 
-    value: ValueT
+    value: Value
 
 
 @dataclass
-class Partition[ParamsT, FrozenT]:
+class Partition[Params, Frozen]:
     """Trainable and frozen views of one component state.
 
     Attributes:
@@ -28,8 +28,8 @@ class Partition[ParamsT, FrozenT]:
         frozen: Complementary state-shaped tree containing all other leaves.
     """
 
-    params: ParamsT
-    frozen: FrozenT
+    params: Params
+    frozen: Frozen
 
 
 def _is_param(value: Any) -> bool:
@@ -42,7 +42,7 @@ def _is_partition_leaf(value: Any) -> bool:
     return value is None or isinstance(value, Param)
 
 
-def partition[StateT](state: StateT) -> Partition[StateT, StateT]:
+def partition[S](state: S) -> Partition[S, S]:
     """Split a state into trainable and frozen state-shaped pytrees."""
     params = jax.tree.map(
         lambda value: value if isinstance(value, Param) else None,
@@ -57,7 +57,7 @@ def partition[StateT](state: StateT) -> Partition[StateT, StateT]:
     return Partition(params=params, frozen=frozen)
 
 
-def combine[StateT](params: StateT, frozen: StateT) -> StateT:
+def combine[S](params: S, frozen: S) -> S:
     """Reconstruct a component state from complementary partition trees."""
     return jax.tree.map(
         lambda param, fixed: fixed if param is None else param,
@@ -68,14 +68,14 @@ def combine[StateT](params: StateT, frozen: StateT) -> StateT:
 
 
 @runtime_checkable
-class Function[InputT, OutputT](Protocol):
+class Function[In, Out](Protocol):
     """Callable capability consumed by :class:`Module`."""
 
-    def __call__(self, x: InputT, /) -> OutputT: ...
+    def __call__(self, x: In, /) -> Out: ...
 
 
 @dataclass
-class Module[OutputT]:
+class Module[Out]:
     """Adapt a partitioned callable pytree to :class:`Transform`.
 
     The component holds the non-parameter partition. :class:`State` holds the
@@ -94,14 +94,14 @@ class Module[OutputT]:
         apply: Apply the reconstructed callable.
     """
 
-    static: Function[jax.Array, OutputT]
+    static: Function[jax.Array, Out]
     in_ndim: int = 1
 
     @dataclass
-    class State[ModuleOutputT]:
+    class State[Result]:
         """Dynamic parameter partition of a callable module."""
 
-        params: Param[Function[jax.Array, ModuleOutputT]]
+        params: Param[Function[jax.Array, Result]]
 
     def __post_init__(self) -> None:
         """Validate the rank consumed by one callable invocation."""
@@ -110,15 +110,15 @@ class Module[OutputT]:
 
     def init(
         self,
-        params: Function[jax.Array, OutputT],
-    ) -> Module.State[OutputT]:
+        params: Function[jax.Array, Out],
+    ) -> Module.State[Out]:
         """Store an initialized parameter partition."""
         return self.State(params=Param(value=params))
 
     def _combine(
         self,
-        params: Function[jax.Array, OutputT],
-    ) -> Function[jax.Array, OutputT]:
+        params: Function[jax.Array, Out],
+    ) -> Function[jax.Array, Out]:
         """Combine complementary parameter and static partitions."""
         return jax.tree.map(
             lambda array, static: static if array is None else array,
@@ -130,8 +130,8 @@ class Module[OutputT]:
     def apply(
         self,
         x: jax.Array,
-        state: Module.State[OutputT],
-    ) -> tuple[OutputT, Module.State[OutputT]]:
+        state: Module.State[Out],
+    ) -> tuple[Out, Module.State[Out]]:
         """Apply the callable independently over arbitrary leading axes."""
         if x.ndim < self.in_ndim:
             raise ValueError(f"input rank must be at least {self.in_ndim}")
@@ -152,19 +152,14 @@ class Module[OutputT]:
         return output, state
 
 
-class Transform[InputT, OutputT, StateT](Protocol):
+class Transform[In, Out, S](Protocol):
     """Stateful transformation capability consumed by :class:`Model`."""
 
-    def apply(
-        self,
-        x: InputT,
-        state: StateT,
-        /,
-    ) -> tuple[OutputT, StateT]: ...
+    def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
 
 @dataclass
-class Model[InputT, HiddenT, OutputT, BodyStateT, HeadStateT]:
+class Model[In, Feat, Pred, BodyS, HeadS]:
     """Apply one feature transform followed by one prediction head.
 
     Attributes:
@@ -179,55 +174,45 @@ class Model[InputT, HiddenT, OutputT, BodyStateT, HeadStateT]:
         apply: Produce predictions and advance child states.
     """
 
-    body: Transform[InputT, HiddenT, BodyStateT]
-    head: Transform[HiddenT, OutputT, HeadStateT]
+    body: Transform[In, Feat, BodyS]
+    head: Transform[Feat, Pred, HeadS]
 
     @dataclass
-    class State[BodyDataT, HeadDataT]:
+    class State[BodyData, HeadData]:
         """Shared-body model child-state tree."""
 
-        body: BodyDataT
-        head: HeadDataT
+        body: BodyData
+        head: HeadData
 
     def init(
         self,
-        body: BodyStateT,
-        head: HeadStateT,
-    ) -> Model.State[BodyStateT, HeadStateT]:
+        body: BodyS,
+        head: HeadS,
+    ) -> Model.State[BodyS, HeadS]:
         """Combine initialized child states."""
         return self.State(body=body, head=head)
 
     def apply(
         self,
-        x: InputT,
-        state: Model.State[BodyStateT, HeadStateT],
-    ) -> tuple[OutputT, Model.State[BodyStateT, HeadStateT]]:
+        x: In,
+        state: Model.State[BodyS, HeadS],
+    ) -> tuple[Pred, Model.State[BodyS, HeadS]]:
         """Produce hidden features, then apply the configured head."""
         hidden, body = self.body.apply(x, state.body)
         output, head = self.head.apply(hidden, state.head)
         return output, self.State(body=body, head=head)
 
 
-class Normalizer[InputT, StateT](Protocol):
+class Normalizer[Value, S](Protocol):
     """Normalization capability consumed by :class:`NormModel`."""
 
-    def apply(
-        self,
-        x: InputT,
-        state: StateT,
-        /,
-    ) -> tuple[InputT, StateT]: ...
+    def apply(self, x: Value, state: S, /) -> tuple[Value, S]: ...
 
-    def update(
-        self,
-        x: InputT,
-        state: StateT,
-        /,
-    ) -> StateT: ...
+    def update(self, x: Value, state: S, /) -> S: ...
 
 
 @dataclass
-class NormModel[InputT, OutputT, NormStateT, ModelStateT]:
+class NormModel[In, Pred, NormS, ModelS]:
     """Normalize inputs before applying a model.
 
     Applying the component reads normalization statistics without updating
@@ -247,29 +232,29 @@ class NormModel[InputT, OutputT, NormStateT, ModelStateT]:
         update: Update normalization state from new inputs.
     """
 
-    norm: Normalizer[InputT, NormStateT]
-    model: Transform[InputT, OutputT, ModelStateT]
+    norm: Normalizer[In, NormS]
+    model: Transform[In, Pred, ModelS]
 
     @dataclass
-    class State[NormDataT, ModelDataT]:
+    class State[NormData, ModelData]:
         """Normalization and model child-state tree."""
 
-        norm: NormDataT
-        model: ModelDataT
+        norm: NormData
+        model: ModelData
 
     def init(
         self,
-        norm: NormStateT,
-        model: ModelStateT,
-    ) -> NormModel.State[NormStateT, ModelStateT]:
+        norm: NormS,
+        model: ModelS,
+    ) -> NormModel.State[NormS, ModelS]:
         """Combine initialized normalization and model states."""
         return self.State(norm=norm, model=model)
 
     def apply(
         self,
-        x: InputT,
-        state: NormModel.State[NormStateT, ModelStateT],
-    ) -> tuple[OutputT, NormModel.State[NormStateT, ModelStateT]]:
+        x: In,
+        state: NormModel.State[NormS, ModelS],
+    ) -> tuple[Pred, NormModel.State[NormS, ModelS]]:
         """Normalize inputs without updating statistics, then apply the model."""
         x, norm = self.norm.apply(x, state.norm)
         output, model = self.model.apply(x, state.model)
@@ -277,9 +262,9 @@ class NormModel[InputT, OutputT, NormStateT, ModelStateT]:
 
     def update(
         self,
-        x: InputT,
-        state: NormModel.State[NormStateT, ModelStateT],
-    ) -> NormModel.State[NormStateT, ModelStateT]:
+        x: In,
+        state: NormModel.State[NormS, ModelS],
+    ) -> NormModel.State[NormS, ModelS]:
         """Update normalization state while preserving model state."""
         return self.State(
             norm=self.norm.update(x, state.norm),
