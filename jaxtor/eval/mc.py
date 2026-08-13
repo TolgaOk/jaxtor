@@ -23,22 +23,20 @@ class Transition(Protocol):
     trun: jax.Array
 
 
-TransitionType = TypeVar("TransitionType", bound=Transition, covariant=True)
-ImcState = TypeVar("ImcState")
-CarryState = TypeVar("CarryState")
-
-
-class Imc(Protocol[TransitionType, ImcState]):
+class Imc[TransitionT: Transition, StateT](Protocol):
     """Single-step sampler surface consumed by ``Eval``."""
 
     def sample(
         self,
-        state: ImcState,
-    ) -> tuple[TransitionType, ImcState]: ...
+        state: StateT,
+    ) -> tuple[TransitionT, StateT]: ...
+
+
+ImcT = TypeVar("ImcT", covariant=True)
 
 
 @dataclass  # pyright: ignore[reportUntypedClassDecorator]
-class Eval(Generic[TransitionType, ImcState]):
+class Eval(Generic[ImcT]):
     """Evaluate completed episodes from a fixed-length rollout.
 
     Attributes:
@@ -47,7 +45,7 @@ class Eval(Generic[TransitionType, ImcState]):
         unroll: Loop unroll factor for ``jax.lax.scan``.
     """
 
-    imc: Imc[TransitionType, ImcState]
+    imc: ImcT
     episode_len: int
     unroll: int = 1
 
@@ -78,7 +76,7 @@ class Eval(Generic[TransitionType, ImcState]):
         n_truncated: jax.Array
 
     @dataclass  # pyright: ignore[reportUntypedClassDecorator]
-    class _Carry(Generic[CarryState]):
+    class _Carry[CarryState]:
         """Evaluation scan state.
 
         Attributes:
@@ -196,18 +194,21 @@ class Eval(Generic[TransitionType, ImcState]):
             trun_rate=accumulator.n_truncated.astype(dtype) / count,
         )
 
-    def _step(
-        self,
-        carry: Eval._Carry[ImcState],
+    def _step[TransitionT: Transition, StateT](
+        self: Eval[Imc[TransitionT, StateT]],
+        carry: Eval._Carry[StateT],
         unused: None,
-    ) -> tuple[Eval._Carry[ImcState], None]:
+    ) -> tuple[Eval._Carry[StateT], None]:
         """Sample and accumulate one evaluation step."""
         del unused
         transition, imc = self.imc.sample(carry.imc)
         accumulator, _ = self._accumulate(carry.accumulator, transition)
         return self._Carry(imc=imc, accumulator=accumulator), None
 
-    def evaluate(self, state: ImcState) -> tuple[Eval.Metrics, ImcState]:
+    def evaluate[TransitionT: Transition, StateT](
+        self: Eval[Imc[TransitionT, StateT]],
+        state: StateT,
+    ) -> tuple[Eval.Metrics, StateT]:
         """Evaluate completed episodes and return the advanced sampler state.
 
         The input state is expected to begin at an episode boundary. Metrics
