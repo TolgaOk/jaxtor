@@ -23,9 +23,32 @@ def _make_state(n_envs: int) -> RewardNorm.State:
 # =============================================================================
 
 
+def test_init_creates_per_environment_returns():
+    """Initialization owns both return and running-statistics state."""
+    state = RewardNorm(gamma=0.99, rms=RunningStats()).init(batch_shape=(3,))
+
+    assert state.ret.shape == (3,)
+    assert state.rms.mean.shape == ()
+    assert state.rms.var.shape == ()
+
+
+def test_disabled_reward_norm_is_a_static_noop():
+    """Disabled normalization preserves rewards and state under JIT."""
+    norm = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1, enabled=False)
+    state = norm.init(batch_shape=(2,))
+    rewards = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    dones = jnp.zeros_like(rewards, dtype=jnp.bool_)
+
+    output, updated = jax.jit(norm.update)(rewards, dones, state)
+
+    assert jnp.array_equal(output, rewards)
+    assert jnp.array_equal(updated.ret, state.ret)
+    assert updated.rms.count == state.rms.count
+
+
 def test_update_returns_normalized_rewards():
     """Update returns rewards divided by std of rolling return."""
-    rn = RewardNorm(gamma=0.99, rms=RunningStats())
+    rn = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
     state = _make_state(n_envs=2)
     rewards = jnp.ones((2, 4))
     dones = jnp.zeros((2, 4), dtype=jnp.bool_)
@@ -36,9 +59,24 @@ def test_update_returns_normalized_rewards():
     assert new_state.rms.count > state.rms.count
 
 
+def test_default_axis_supports_scalar_rollouts():
+    """The default sequence-first convention accepts rewards shaped ``(T,)``."""
+    norm = RewardNorm(gamma=0.99, rms=RunningStats())
+    rewards = jnp.ones(4)
+
+    output, state = norm.update(
+        rewards,
+        jnp.zeros_like(rewards, dtype=jnp.bool_),
+        norm.init(),
+    )
+
+    assert output.shape == (4,)
+    assert state.ret.shape == ()
+
+
 def test_update_output_shape():
     """Output reward shape matches input reward shape."""
-    rn = RewardNorm(gamma=0.99, rms=RunningStats())
+    rn = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
     state = _make_state(n_envs=4)
     rewards = jnp.ones((4, 10))
     dones = jnp.zeros((4, 10), dtype=jnp.bool_)
@@ -49,7 +87,7 @@ def test_update_output_shape():
 
 def test_update_clip():
     """Normalized rewards are clipped when clip is set."""
-    rn = RewardNorm(gamma=0.99, rms=RunningStats(), clip=5.0)
+    rn = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1, clip=5.0)
     state = _make_state(n_envs=2)
     # Large rewards to trigger clipping
     rewards = jnp.full((2, 4), 1000.0)
@@ -62,8 +100,8 @@ def test_update_clip():
 
 def test_update_no_clip():
     """Without clip, normalized rewards differ from clipped version."""
-    rn_noclip = RewardNorm(gamma=0.99, rms=RunningStats())
-    rn_clip = RewardNorm(gamma=0.99, rms=RunningStats(), clip=0.5)
+    rn_noclip = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
+    rn_clip = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1, clip=0.5)
     state = _make_state(n_envs=2)
     rewards = jnp.full((2, 4), 1000.0)
     dones = jnp.zeros((2, 4), dtype=jnp.bool_)
@@ -81,23 +119,20 @@ def test_update_no_clip():
 
 
 def test_rolling_return_resets_on_done():
-    """Done flag resets the rolling return to zero."""
-    rn = RewardNorm(gamma=0.99, rms=RunningStats())
+    """Rewards ``[1, 1]`` record return ``1.99``, then clear the carry."""
+    rn = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
     state = _make_state(n_envs=1)
-    # Step 0: reward=1 (no done) -> ret = 0.99*0 + 1 = 1
-    # Step 1: done=True, reward=1 -> ret = 0.99*0*1 + 1 = 1 (reset by done)
     rewards = jnp.array([[1.0, 1.0]])
     dones = jnp.array([[False, True]])
 
     _, new_state = rn.update(rewards, dones, state)
-    # After done, ret resets: next ret starts from 0 * gamma * (1-done) + rew
-    # Final ret = 0.99 * (1-1) * prev_ret + 1 = 1.0
-    assert jnp.allclose(new_state.ret, jnp.array([1.0]))
+    assert jnp.allclose(new_state.ret, jnp.array([0.0]))
+    assert jnp.allclose(new_state.rms.mean, jnp.array(1.495), atol=1e-3)
 
 
 def test_rolling_return_accumulates():
     """Without dones, return accumulates as gamma * ret + rew."""
-    rn = RewardNorm(gamma=0.5, rms=RunningStats())
+    rn = RewardNorm(gamma=0.5, rms=RunningStats(), seq_axis=1)
     state = _make_state(n_envs=1)
     rewards = jnp.array([[1.0, 1.0, 1.0]])
     dones = jnp.zeros((1, 3), dtype=jnp.bool_)
@@ -117,7 +152,7 @@ def test_rolling_return_accumulates():
 def test_matches_ppo_inline():
     """Output matches the inline normalize_rewards from ppo.py."""
     gamma = 0.99
-    rn = RewardNorm(gamma=gamma, rms=RunningStats(), clip=10.0)
+    rn = RewardNorm(gamma=gamma, rms=RunningStats(), seq_axis=1, clip=10.0)
     state = _make_state(n_envs=4)
 
     key = jax.random.PRNGKey(7)
@@ -128,13 +163,16 @@ def test_matches_ppo_inline():
     norm_rew, new_state = rn.update(rewards, dones, state)
 
     # Inline version from ppo.py
-    def scan_fn(ret, step_data):
+    def scan_fn(
+        ret: jax.Array,
+        step_data: tuple[jax.Array, jax.Array],
+    ) -> tuple[jax.Array, jax.Array]:
         rew, done = step_data
-        ret = ret * gamma * (1.0 - done) + rew
-        return ret, ret
+        ret = ret * gamma + rew
+        return jnp.where(done, 0, ret), ret
 
     rew_t = jnp.transpose(rewards)
-    done_t = jnp.transpose(dones.astype(jnp.float32))
+    done_t = jnp.transpose(dones.astype(jnp.bool_))
     final_ret, all_rets = jax.lax.scan(scan_fn, state.ret, (rew_t, done_t))
 
     # Inline update_stats
@@ -164,7 +202,7 @@ def test_matches_ppo_inline():
 
 def test_update_jit():
     """Update works under JIT."""
-    rn = RewardNorm(gamma=0.99, rms=RunningStats(), clip=10.0)
+    rn = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1, clip=10.0)
     state = _make_state(n_envs=2)
     rewards = jnp.ones((2, 4))
     dones = jnp.zeros((2, 4), dtype=jnp.bool_)

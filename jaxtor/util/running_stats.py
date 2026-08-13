@@ -13,7 +13,7 @@ Example:
 
 from __future__ import annotations
 
-import chex
+import jax
 import jax.numpy as jnp
 from chex import dataclass
 
@@ -24,6 +24,14 @@ class RunningStats:
 
     Attributes:
         clip: If not None, clip normalized output to [-clip, clip].
+
+    Public dataclasses:
+        State: Mean, variance, and sample count.
+
+    Public methods:
+        init: Initialize unit statistics for one feature shape.
+        update: Merge a batch into the running statistics.
+        normalize: Normalize values with the current statistics.
     """
 
     clip: float | None = None
@@ -38,13 +46,19 @@ class RunningStats:
             count: Total number of samples seen.
         """
 
-        mean: chex.Array
-        var: chex.Array
-        count: chex.Numeric
+        mean: jax.Array
+        var: jax.Array
+        count: jax.Array
 
-    def update(
-        self, batch: chex.Array, state: RunningStats.State
-    ) -> RunningStats.State:
+    def init(self, shape: tuple[int, ...] = ()) -> RunningStats.State:
+        """Initialize unit statistics for one feature shape."""
+        return self.State(
+            mean=jnp.zeros(shape),
+            var=jnp.ones(shape),
+            count=jnp.float32(1e-4),
+        )
+
+    def update(self, batch: jax.Array, state: RunningStats.State) -> RunningStats.State:
         """Update running mean/variance with a batch of samples.
 
         Uses the parallel Welford algorithm to merge batch statistics
@@ -70,7 +84,7 @@ class RunningStats:
         new_var = m2 / total
         return RunningStats.State(mean=new_mean, var=new_var, count=total)
 
-    def normalize(self, x: chex.Array, state: RunningStats.State) -> chex.Array:
+    def normalize(self, x: jax.Array, state: RunningStats.State) -> jax.Array:
         """Normalize by mean/variance, optionally clip per config.
 
         Args:

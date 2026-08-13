@@ -10,6 +10,16 @@ from jaxtor.util.running_stats import RunningStats
 # =============================================================================
 
 
+def test_init_creates_unit_statistics():
+    """Initialization follows the requested feature shape."""
+    state = RunningStats().init((3,))
+
+    assert state.mean.shape == (3,)
+    assert jnp.array_equal(state.mean, jnp.zeros(3))
+    assert jnp.array_equal(state.var, jnp.ones(3))
+    assert state.count > 0
+
+
 def test_update_single_batch_mean():
     """Update with one batch recovers batch mean."""
     rs = RunningStats()
