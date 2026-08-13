@@ -159,3 +159,36 @@ def test_update_checks_sequence_and_batch_shapes():
             ),
             vector_stats.init((2,)),
         )
+
+
+def test_both_boundary_flags_complete_only_one_episode():
+    """A transition marked terminal and truncated is still one boundary."""
+    stats = EpisodeStats()
+    state = stats.update(
+        Sequence(
+            rew=jnp.array([4.0]),
+            term=jnp.array([True]),
+            trun=jnp.array([True]),
+        ),
+        stats.init(),
+    )
+    metrics, _ = stats.drain(state)
+
+    assert metrics.n_episodes == 1
+    assert metrics.avg_eps_rew == 4
+    assert metrics.avg_eps_len == 1
+
+
+def test_empty_sequences_are_rejected_before_indexing_state():
+    """An empty sequence fails clearly instead of indexing a missing first step."""
+    stats = EpisodeStats()
+
+    with pytest.raises(ValueError, match="sequence must not be empty"):
+        stats.update(
+            Sequence(
+                rew=jnp.empty((0,)),
+                term=jnp.empty((0,), dtype=jnp.bool_),
+                trun=jnp.empty((0,), dtype=jnp.bool_),
+            ),
+            stats.init(),
+        )

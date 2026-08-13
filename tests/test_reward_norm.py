@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 from jaxtor.util.reward_norm import RewardNorm
 from jaxtor.util.running_stats import RunningStats
 
@@ -30,6 +31,20 @@ def test_init_creates_per_environment_returns():
     assert state.ret.shape == (3,)
     assert state.rms.mean.shape == ()
     assert state.rms.var.shape == ()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"gamma": -0.1}, "gamma must be between zero and one"),
+        ({"gamma": 1.1}, "gamma must be between zero and one"),
+        ({"gamma": 0.9, "clip": -1.0}, "clip must be nonnegative"),
+    ],
+)
+def test_invalid_static_configuration_is_rejected(kwargs, message):
+    """Invalid discounting and clipping fail at component construction."""
+    with pytest.raises(ValueError, match=message):
+        RewardNorm(rms=RunningStats(), **kwargs)
 
 
 def test_disabled_reward_norm_is_a_static_noop():
@@ -83,6 +98,18 @@ def test_update_output_shape():
 
     norm_rew, _ = rn.update(rewards, dones, state)
     assert norm_rew.shape == (4, 10)
+
+
+def test_update_rejects_misaligned_environment_state():
+    """The return carry must have one entry for every non-sequence lane."""
+    norm = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
+
+    with pytest.raises(AssertionError):
+        norm.update(
+            jnp.ones((2, 4)),
+            jnp.zeros((2, 4), dtype=jnp.bool_),
+            norm.init(batch_shape=(3,)),
+        )
 
 
 def test_update_clip():

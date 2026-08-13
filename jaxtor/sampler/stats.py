@@ -143,6 +143,8 @@ class EpisodeStats:
             0,
         )
         chex.assert_equal_shape([rew, term, trun])
+        if rew.shape[0] < 1:
+            raise ValueError("sequence must not be empty")
         chex.assert_equal_shape([rew[0], state.eps_rew])
 
         state, _ = jax.lax.scan(

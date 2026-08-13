@@ -78,6 +78,24 @@ def test_categorical_mode_and_known_statistics():
     assert jnp.allclose(evaluation.entropy, jnp.log(4.0))
 
 
+def test_categorical_masked_actions_have_finite_entropy():
+    """Zero-probability actions keep entropy and its gradient finite."""
+    logits = jnp.array([0.0, -jnp.inf])
+
+    def entropy(logits: jax.Array) -> jax.Array:
+        """Evaluate categorical entropy for gradient inspection."""
+        return Categorical(logits=logits).evaluate(jnp.array(0)).entropy
+
+    evaluation = Categorical(logits=logits).evaluate(jnp.array(0))
+    gradient = jax.grad(entropy)(logits)
+
+    assert evaluation.logp == 0
+    assert evaluation.entropy == 0
+    assert jnp.isfinite(evaluation.entropy)
+    assert jnp.all(jnp.isfinite(gradient))
+    assert jnp.array_equal(gradient, jnp.zeros(2))
+
+
 def test_categorical_supports_vmap_and_distribution_pytrees():
     """Categorical distributions and outputs remain ordinary mapped pytrees."""
     dist = Categorical(logits=jnp.zeros((3, 4)))

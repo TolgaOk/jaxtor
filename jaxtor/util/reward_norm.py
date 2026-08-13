@@ -79,6 +79,13 @@ class RewardNorm[RmsStateT: Variance]:
         rew: jax.Array
         done: jax.Array
 
+    def __post_init__(self) -> None:
+        """Validate discounting and optional clipping configuration."""
+        if not 0.0 <= self.gamma <= 1.0:
+            raise ValueError("gamma must be between zero and one")
+        if self.clip is not None and self.clip < 0:
+            raise ValueError("clip must be nonnegative")
+
     def init(
         self,
         batch_shape: tuple[int, ...] = (),

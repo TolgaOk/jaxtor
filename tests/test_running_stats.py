@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 from jaxtor.util.running_stats import RunningStats
 
 
@@ -84,6 +85,28 @@ def test_update_scalar_stats():
     state = rs.update(batch, state)
     assert state.mean.shape == ()
     assert state.var.shape == ()
+
+
+def test_update_rejects_empty_batches_before_corrupting_state():
+    """An empty update fails instead of replacing statistics with NaNs."""
+    stats = RunningStats()
+
+    with pytest.raises(ValueError, match="batch must not be empty"):
+        stats.update(jnp.empty((0, 2)), stats.init((2,)))
+
+
+def test_update_rejects_a_mismatched_feature_shape():
+    """Batch feature axes must match the state initialized for the component."""
+    stats = RunningStats()
+
+    with pytest.raises(ValueError, match="expected batch feature shape"):
+        stats.update(jnp.ones((4, 3)), stats.init((2,)))
+
+
+def test_negative_clip_is_rejected():
+    """A negative symmetric clipping bound is not meaningful."""
+    with pytest.raises(ValueError, match="clip must be nonnegative"):
+        RunningStats(clip=-1.0)
 
 
 def test_update_matches_ppo_inline():

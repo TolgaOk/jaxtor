@@ -145,7 +145,12 @@ class Categorical:
     def evaluate(self, act: jax.Array) -> Evaluation:
         """Compute log-probability and entropy for ``act``."""
         log_probs = self._log_probs()
-        entropy = -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
+        probs = jax.nn.softmax(self.logits, axis=-1)
+        safe_logits = jnp.where(jnp.isfinite(self.logits), self.logits, 0)
+        entropy = jax.nn.logsumexp(self.logits, axis=-1) - jnp.sum(
+            probs * safe_logits,
+            axis=-1,
+        )
         return Evaluation(
             logp=self._select(log_probs, act),
             entropy=entropy,

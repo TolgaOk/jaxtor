@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from jaxtor.util import ObsNorm, RunningStats
 
@@ -34,3 +35,11 @@ def test_disabled_obs_norm_is_a_static_noop():
     assert jnp.array_equal(applied.stats.mean, state.stats.mean)
     assert jnp.array_equal(updated.stats.mean, state.stats.mean)
     assert updated.stats.count == state.stats.count
+
+
+def test_update_rejects_observations_with_the_wrong_feature_suffix():
+    """Leading sample axes are free, but trailing feature axes are contractual."""
+    norm = ObsNorm(stats=RunningStats())
+
+    with pytest.raises(ValueError, match="expected observation suffix"):
+        norm.update(jnp.ones((3, 4)), norm.init((2,)))

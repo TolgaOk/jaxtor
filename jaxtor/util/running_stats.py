@@ -50,6 +50,11 @@ class RunningStats:
         var: jax.Array
         count: jax.Array
 
+    def __post_init__(self) -> None:
+        """Validate the optional symmetric clipping bound."""
+        if self.clip is not None and self.clip < 0:
+            raise ValueError("clip must be nonnegative")
+
     def init(self, shape: tuple[int, ...] = ()) -> RunningStats.State:
         """Initialize unit statistics for one feature shape."""
         return self.State(
@@ -71,6 +76,13 @@ class RunningStats:
         Returns:
             Updated running statistics.
         """
+        if batch.ndim < 1 or batch.shape[0] < 1:
+            raise ValueError("batch must not be empty")
+        if batch.shape[1:] != state.mean.shape:
+            raise ValueError(
+                f"expected batch feature shape {state.mean.shape}, got {batch.shape[1:]}"
+            )
+
         batch_mean = jnp.mean(batch, axis=0)
         batch_var = jnp.var(batch, axis=0)
         batch_count = batch.shape[0]
