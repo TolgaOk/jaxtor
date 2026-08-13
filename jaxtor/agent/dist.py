@@ -107,7 +107,7 @@ class DiagNormal:
         )
 
     def mode(self) -> jax.Array:
-        """Return the most likely action."""
+        """Return the distribution location."""
         loc, _ = self._broadcast()
         return loc
 

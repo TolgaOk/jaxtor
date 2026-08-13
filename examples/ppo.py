@@ -34,12 +34,12 @@ from jaxtor.agent import (
     NormModel,
     VHead,
     VPi,
+    VPiNextVInference,
     combine,
     partition,
 )
 from jaxtor.env import gymnax
 from jaxtor.eval.mc import Eval
-from jaxtor.inference import VPiNextVInference
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 from jaxtor.util import Minibatches, ObsNorm, RewardNorm, RunningStats
 

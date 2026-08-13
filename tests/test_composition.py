@@ -8,8 +8,7 @@ import jax.numpy as jnp
 import pytest
 from chex import dataclass
 
-from jaxtor.dist import Categorical
-from jaxtor.inference import VPiNextVInference
+from jaxtor.agent import Categorical, VPiNextVInference
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll
 
 pytestmark = pytest.mark.integration

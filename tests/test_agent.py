@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from chex import dataclass
 
 from jaxtor.agent import (
+    Categorical,
     CategoricalHead,
     DiagNormalHead,
     Draw,
@@ -24,7 +25,6 @@ from jaxtor.agent import (
     combine,
     partition,
 )
-from jaxtor.dist import Categorical
 from jaxtor.util import ObsNorm, RunningStats
 
 

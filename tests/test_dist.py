@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from jaxtor.dist import Categorical, DiagNormal
+from jaxtor.agent import Categorical, DiagNormal
 
 
 def test_diag_normal_sample_matches_evaluation():

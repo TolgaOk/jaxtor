@@ -7,8 +7,7 @@ import pytest
 from chex import dataclass
 from jax.experimental import checkify
 
-from jaxtor.dist import Categorical
-from jaxtor.inference import VNextVInference, VPiNextVInference
+from jaxtor.agent import Categorical, VNextVInference, VPiNextVInference
 
 
 @dataclass
