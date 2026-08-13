@@ -38,7 +38,7 @@ flowchart TB
         agent_api(["Agent protocol<br/>act(observation, state)<br/>→ action · state"])
         imc["Imc<br/>select action · advance MC<br/>state: mc · agent"]
         imc_api(["Sampler protocol<br/>sample(state) → transition · state"])
-        loaded_agent_api(["Loaded agent protocol<br/>infer(observation, state)<br/>→ output · state"])
+        loaded_agent_api(["Loaded agent protocol<br/>apply(observation, state)<br/>→ output · state"])
         output[["Agent output<br/>act · learning data"]]
         agent_api --> imc
         mc_api --> imc
@@ -48,8 +48,8 @@ flowchart TB
 
     subgraph collection["4 · COLLECT / EVALUATE"]
         direction LR
-        roll["Roll<br/>scan any sampler over T steps<br/>trajectory: stacked samples"]
-        loaded_roll["LoadedRoll<br/>infer endpoints · advance MC over T steps<br/>trajectory: pre · mc · succ<br/>state: mc · agent"]
+        roll["Roll<br/>scan any sampler over T steps<br/>sequence: stacked samples"]
+        loaded_roll["LoadedRoll<br/>predict endpoints · advance MC over T steps<br/>sequence: dec · mc · succ<br/>state: mc · agent"]
         ep_stats["EpisodeStats<br/>partial episodes · completed sums<br/>state: return · length · count"]
         mc_eval["McEval<br/>sampled episode metrics"]
     end
@@ -58,8 +58,8 @@ flowchart TB
     imc_api --> mc_eval
     output --> loaded_roll
     mc_api --> loaded_roll
-    roll -->|transition trajectory| ep_stats
-    loaded_roll -->|MC trajectory| ep_stats
+    roll -->|transition sequence| ep_stats
+    loaded_roll -->|MC sequence| ep_stats
 
     subgraph tabular_branch["TABULAR OPERATIONS"]
         direction LR
@@ -85,8 +85,8 @@ flowchart TB
         report["Evaluation · logging"]
     end
 
-    roll -->|aligned trajectory| update
-    loaded_roll -->|loaded trajectory| update
+    roll -->|aligned sequence| update
+    loaded_roll -->|loaded sequence| update
     sweep -->|batched transitions| update
     exp_sweep -->|value / occupancy sequences| update
     ep_stats -->|training episode metrics| report
@@ -123,6 +123,92 @@ relationships. Components are configured objects, while dynamic data lives in
 explicit state pytrees. The composition can be wrapped in `jit`; `VecMc` uses
 `vmap`, while `Roll`, `LoadedRoll`, `EpisodeStats`, and `McEval` use `scan`.
 Gradient transforms remain available along pure-JAX environment paths.
+
+## Prediction and learning composition
+
+Agent components form a state tree that mirrors their configured children.
+Sampling consumes only `act`, while estimators replay the same agent through
+`apply`. This keeps rollout collection small and leaves learning data under the
+component that defines it.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui, sans-serif","fontSize":"15px","lineColor":"#718096","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":40,"padding":12}}}%%
+flowchart LR
+    subgraph model_tree["AGENT STATE TREE"]
+        direction TB
+        module["Module<br/>callable parameters"]
+        norm["ObsNorm + NormModel<br/>explicit statistics"]
+        body["Body transform<br/>observation → features"]
+        vhead["VHead / QHead / QsaHead<br/>semantic values"]
+        pihead["CategoricalHead / DiagNormalHead<br/>policy parameters"]
+        dist["Categorical / DiagNormal<br/>pure distributions"]
+        select["Draw / Mode<br/>action selection"]
+        agent["VPi / VQPi<br/>apply → prediction<br/>act → action"]
+
+        module --> norm --> body
+        module --> vhead
+        module --> pihead --> dist
+        body --> vhead
+        body --> pihead
+        vhead --> agent
+        dist --> agent
+        select --> agent
+    end
+
+    subgraph collect["COLLECT"]
+        direction TB
+        imc["Imc<br/>agent.act + MC.sample"]
+        roll["Roll<br/>fixed sequence"]
+        seq[["Sequence<br/>obs · act · rew · term · trun · nobs"]]
+        stats["EpisodeStats"]
+        imc --> roll --> seq
+        seq --> stats
+    end
+
+    subgraph prepare["PREPARE"]
+        direction TB
+        rew["RewardNorm<br/>explicit return state"]
+        td["TDEst<br/>agent replay + TD(λ)"]
+        estimate[["Estimate<br/>pred · adv · ret"]]
+        batch[["Algorithm batch"]]
+        mini["Minibatches<br/>shuffle sample axes"]
+        rew --> td --> estimate --> batch --> mini
+    end
+
+    subgraph learn["LEARN"]
+        direction TB
+        split["partition / combine<br/>trainable · frozen state"]
+        loss["Algorithm loss"]
+        update["Optimizer update"]
+        split --> loss --> update
+    end
+
+    agent -->|act| imc
+    agent -->|apply| td
+    seq --> rew
+    seq --> batch
+    mini --> loss
+    agent --> split
+    update -->|new agent state| agent
+
+    classDef model fill:#F0EAF8,stroke:#76559A,color:#35254C,stroke-width:1.4px;
+    classDef sampler fill:#E4F4F1,stroke:#2B7A78,color:#153C3B,stroke-width:1.4px;
+    classDef prepareNode fill:#FFF2DE,stroke:#B7791F,color:#51330B,stroke-width:1.4px;
+    classDef data fill:#F2F4F7,stroke:#7C8798,color:#273444,stroke-width:1.2px;
+    classDef learnNode fill:#E8F0FE,stroke:#4E73A8,color:#172A46,stroke-width:1.4px;
+
+    class module,norm,body,vhead,pihead,dist,select,agent model;
+    class imc,roll,stats sampler;
+    class rew,td,mini prepareNode;
+    class seq,estimate,batch data;
+    class split,loss,update learnNode;
+
+    style model_tree fill:#FBF9FD,stroke:#D4C8E5,stroke-width:1px,color:#425466
+    style collect fill:#F7FCFA,stroke:#BBDAD4,stroke-width:1px,color:#425466
+    style prepare fill:#FFFCF7,stroke:#E8D3AD,stroke-width:1px,color:#425466
+    style learn fill:#F8FAFD,stroke:#C8D5E6,stroke-width:1px,color:#425466
+    linkStyle default stroke:#718096,stroke-width:1.35px;
+```
 
 ## Host-backed Gymnasium boundary
 

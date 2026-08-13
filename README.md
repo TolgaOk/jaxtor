@@ -4,13 +4,9 @@
 [![JAX 0.8+](https://img.shields.io/badge/JAX-0.8%2B-green)](https://github.com/jax-ml/jax)
 [![version](https://img.shields.io/badge/version-0.2.0-orange)](https://github.com/TolgaOk/jaxtor)
 
-Composable **sampling** and **evaluation** components for reinforcement learning in <img src="https://raw.githubusercontent.com/jax-ml/jax/main/images/jax_logo_250px.png" height="16" alt="JAX" style="vertical-align: middle">.
+Composable components for building reinforcement learning algorithms in <img src="https://raw.githubusercontent.com/jax-ml/jax/main/images/jax_logo_250px.png" height="16" alt="JAX" style="vertical-align: middle">.
 
-![banner](doc/banner.svg)
-
-> **Compositionality over inheritance**: Components are `@dataclass` namespaces of pure functions with explicit state.
-
-> **Protocols over concrete types**: Each component declares its own protocol; any object satisfying it has a valid type.
+![Jaxtor component banner](doc/banner.svg)
 
 ## Installation
 
@@ -23,93 +19,49 @@ uv add "jaxtor[example] @ git+https://github.com/TolgaOk/jaxtor@v0.2.0"
 ```
 
 
-## Components
+## Usage
 
-Components nest bottom-up. Plug together an env, sampler, and agent, then `jit` the whole thing:
+Components nest directly. Connect an environment, sampler, and agent, then
+transform the resulting operation with JAX.
 
 ```python
-roll = Roll(                                # N-step rollout collector
-    seqlen=2048,
+roll = Roll(                                # fixed-length collector
+    seq_len=2048,
     imc=Imc(                                # agent + sampler interaction (Induced MC)
         agent=agent,
         mc=Mc(                              # episode lifecycle (Markov Chain)
-            max_episode_len=1000,
+            max_eps_len=1000,
             env=gymnax.make("CartPole-v1"),
         ),
     ),
 )
 roll_state = roll.imc.init(...)
-trans, roll_state = jax.jit(roll.sample)(roll_state)
+seq, roll_state = jax.jit(roll.sample)(roll_state)
 
->>> trans.obs.shape
+>>> seq.obs.shape
 (2048, ...)
 ```
 
-Component reference. All environments expose the same unified protocol; swap `gymnax` for `gymnasium` and every sampler, evaluator, and JAX transform works unchanged.
+The construction exposes the dependency tree. Each component owns a narrow
+role and declares the smallest protocol it consumes, so compatible
+implementations can be substituted without changing their users. Dynamic data
+lives in explicit state pytrees, while the algorithm loop remains in user code.
 
-<table>
-  <tr>
-    <th>Layer</th><th>Components</th><th>Description</th><th>Dependencies</th>
-  </tr>
-  <tr>
-    <td rowspan="4"><a href="jaxtor/env/README.md"><b>Environments</b></a></td>
-    <td><code>tabular</code></td>
-    <td>Index-based MDPs</td>
-    <td><a href="https://github.com/TolgaOk/jaxdp">jaxdp</a></td>
-  </tr>
-  <tr>
-    <td><code>gymnax</code></td>
-    <td>Pure-JAX envs</td>
-    <td><a href="https://github.com/RobertTLange/gymnax">gymnax</a></td>
-  </tr>
-  <tr>
-    <td><code>mjx</code></td>
-    <td>GPU-native MuJoCo (v5 locomotion), one-to-one with Gymnasium</td>
-    <td><a href="https://mujoco.readthedocs.io/en/stable/mjx.html">mujoco-mjx</a></td>
-  </tr>
-  <tr>
-    <td><code>gymnasium</code></td>
-    <td>CPU envs (MuJoCo, Atari) via io_callback</td>
-    <td><a href="https://github.com/Farama-Foundation/Gymnasium">gymnasium</a></td>
-  </tr>
-  <tr>
-    <td rowspan="5"><a href="jaxtor/sampler/README.md"><b>Samplers</b></a></td>
-    <td><code>Mc</code> · <code>VecMc</code></td>
-    <td>Single-env and parallel episode sampler</td>
-    <td>—</td>
-  </tr>
-  <tr>
-    <td><code>Imc</code></td>
-    <td>Wires agent to Mc</td>
-    <td>—</td>
-  </tr>
-  <tr>
-    <td><code>MuImc</code></td>
-    <td>Imc + behavior log-prob</td>
-    <td>—</td>
-  </tr>
-  <tr>
-    <td><code>Roll</code></td>
-    <td>N-step trajectory via scan</td>
-    <td>—</td>
-  </tr>
-  <tr>
-    <td><code>Sweep</code> · <code>ExpSweep</code></td>
-    <td>All (s,a) pairs — stochastic / exact</td>
-    <td><a href="https://github.com/TolgaOk/jaxdp">jaxdp</a></td>
-  </tr>
-  <tr>
-    <td rowspan="2"><b>Evaluation</b></td>
-    <td><code>McEval</code></td>
-    <td>Episode stats from rollouts</td>
-    <td>—</td>
-  </tr>
-  <tr>
-    <td><code>TabularEval</code></td>
-    <td>Exact convergence diagnostics</td>
-    <td><a href="https://github.com/TolgaOk/jaxdp">jaxdp</a></td>
-  </tr>
-</table>
+## Components
+
+| Area | Components |
+| --- | --- |
+| Environments | `tabular`, `gymnax`, `gymnasium`, `envpool`, `mjx` |
+| Agents | `Module`, `Model`, `NormModel`, semantic heads, `VPi`, `VQPi` |
+| Distributions | `Categorical`, `DiagNormal`, `Draw`, `Mode` |
+| Sampling | `Mc`, `VecMc`, `Imc`, `Roll`, `LoadedRoll`, `EpisodeStats` |
+| Estimation | `TDEst` |
+| Utilities | `Minibatches`, `ObsNorm`, `RewardNorm`, `RunningStats` |
+| Evaluation | sampled-episode and exact tabular evaluators |
+
+See the [component architecture](doc/components.md), [component design
+rules](doc/component-design.md), [environment adapters](jaxtor/env/README.md),
+[samplers](jaxtor/sampler/README.md), and [evaluation](jaxtor/eval/README.md).
 
 ## Examples
 
@@ -117,5 +69,5 @@ Single-script implementations of common RL algorithms.
 
 - [`examples/q_learning.py`](examples/q_learning.py) — tabular Q-learning on Garnet MDP (`jaxdp`)
 - [`examples/reinforce.py`](examples/reinforce.py) — REINFORCE on CartPole-v1 (`gymnax`)
-- [`examples/naf.py`](examples/naf.py) — [NAF](https://arxiv.org/abs/1603.00748) on MuJoCo (`gymnasium`)
-- [`examples/ppo.py`](examples/ppo.py) — [PPO](https://arxiv.org/abs/1707.06347) on MuJoCo (`gymnasium`)
+- [`examples/naf.py`](examples/naf.py) — [NAF](https://arxiv.org/abs/1603.00748) on continuous-control environments (`gymnasium` or `envpool`)
+- [`examples/ppo.py`](examples/ppo.py) — [PPO](https://arxiv.org/abs/1707.06347) on CartPole-v1 (`gymnax`)
