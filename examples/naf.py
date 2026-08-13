@@ -25,7 +25,9 @@ Training:
 
 from __future__ import annotations
 
+import math
 import time
+from dataclasses import replace
 from typing import Literal
 
 import chex
@@ -120,7 +122,7 @@ class MLP(eqx.Module):
         hiddens: tuple[int, ...],
         out_dim: int,
         *,
-        output_gain: float = jnp.sqrt(2),
+        output_gain: float = math.sqrt(2),
         layer_norm: bool = False,
         key: jax.Array,
     ):
@@ -128,7 +130,7 @@ class MLP(eqx.Module):
         dims = [in_dim, *hiddens, out_dim]
         self.layers = []
         for i in range(len(dims) - 1):
-            gain = output_gain if i == len(dims) - 2 else jnp.sqrt(2)
+            gain = output_gain if i == len(dims) - 2 else math.sqrt(2)
             w = _ortho_init(keys[i], (dims[i], dims[i + 1]), gain)
             b = jnp.zeros(dims[i + 1])
             self.layers.append((w, b))
@@ -179,13 +181,13 @@ class Agent:
         p_net: MLP
         obs_stats: RunningStats.State
 
-    def _precision(self, obs: chex.Array, state: Agent.State) -> jax.Array:
+    def _precision(self, obs: jax.Array, state: Agent.State) -> jax.Array:
         """Diagonal precision p = softplus(net(s)) + ε."""
         return jax.nn.softplus(state.p_net(obs)) + self.noise_eps
 
     def act(
         self,
-        obs: chex.Array,
+        obs: jax.Array,
         state: Agent.State,
     ) -> tuple[jax.Array, Agent.State]:
         """Select a deterministic or exploratory NAF action."""
@@ -202,10 +204,10 @@ class Agent:
             p = self._precision(policy_obs, state)
             eps = jrd.normal(k, mu_raw.shape)
             action = jnp.tanh(mu_raw + self.noise_scale * eps / jnp.sqrt(p))
-            state = state.replace(key=key)
+            state = replace(state, key=key)
         return action, state
 
-    def q_val(self, obs: chex.Array, act: chex.Array, state: Agent.State) -> jax.Array:
+    def q_val(self, obs: jax.Array, act: jax.Array, state: Agent.State) -> jax.Array:
         """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
         v = state.v_net(obs).squeeze(-1)
         mu = jnp.tanh(state.mu_net(obs))
@@ -223,14 +225,14 @@ class Agent:
 class Batch:
     """Flattened minibatch for NAF updates."""
 
-    obs: chex.Array
-    act: chex.Array
+    obs: jax.Array
+    act: jax.Array
     ret: chex.Array
 
 
 @dataclass
 class State:
-    """Flat training state — single source of truth, updated via .replace()."""
+    """Flat training state threaded immutably through NAF updates."""
 
     mc: Mc.State
     agent: Agent.State
@@ -255,7 +257,8 @@ def train_step(
     seq, imc_state = roll.sample(imc_state)
     stats_state = stats.update(seq, state.stats)
     sam_metrics, stats_state = stats.drain(stats_state)
-    state = state.replace(
+    state = replace(
+        state,
         mc=imc_state.mc,
         agent=imc_state.agent,
         stats=stats_state,
@@ -268,7 +271,7 @@ def train_step(
             seq.obs.reshape(-1, seq.obs.shape[-1]),
             state.agent.obs_stats,
         )
-        state = state.replace(agent=state.agent.replace(obs_stats=obs_stats))
+        state = replace(state, agent=replace(state.agent, obs_stats=obs_stats))
         obs_n = agent.obs_norm.normalize(seq.obs, state.agent.obs_stats)
         nobs_n = agent.obs_norm.normalize(
             seq.nobs,
@@ -284,7 +287,7 @@ def train_step(
             dones,
             state.rew_norm,
         )
-        state = state.replace(rew_norm=rew_state)
+        state = replace(state, rew_norm=rew_state)
     else:
         rewards = seq.rew
 
@@ -313,7 +316,7 @@ def train_step(
     # 6. Epoch loop: shuffle and minibatch SGD over fixed targets
     def epoch_step(state, _):
         key, perm_key = jrd.split(state.agent.key)
-        state = state.replace(agent=state.agent.replace(key=key))
+        state = replace(state, agent=replace(state.agent, key=key))
         shuffled = jax.tree.map(
             lambda x: x[jrd.permutation(perm_key, batch_size)], batch
         )
@@ -327,7 +330,7 @@ def train_step(
 
             def loss_fn(params):
                 v_net, mu_net, p_net = params
-                s = state.agent.replace(v_net=v_net, mu_net=mu_net, p_net=p_net)
+                s = replace(state.agent, v_net=v_net, mu_net=mu_net, p_net=p_net)
                 q = jax.vmap(lambda o, a: agent.q_val(o, a, s))(mb.obs, mb.act)
                 loss = jnp.mean((q - mb.ret) ** 2)
                 return loss, dict(
@@ -337,8 +340,14 @@ def train_step(
             (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
             updates, opt_state = tx.update(grads, state.opt, params)
             new_v, new_mu, new_p = eqx.apply_updates(params, updates)
-            return state.replace(
-                agent=state.agent.replace(v_net=new_v, mu_net=new_mu, p_net=new_p),
+            return replace(
+                state,
+                agent=replace(
+                    state.agent,
+                    v_net=new_v,
+                    mu_net=new_mu,
+                    p_net=new_p,
+                ),
                 opt=opt_state,
             ), info
 
@@ -409,7 +418,12 @@ def train(cfg: Config) -> State:
     )
 
     obs_rs = RunningStats(clip=10.0) if cfg.normalize_obs else None
-    rew_norm = RewardNorm(gamma=cfg.gamma, rms=RunningStats(), clip=10.0)
+    rew_norm = RewardNorm(
+        gamma=cfg.gamma,
+        rms=RunningStats(),
+        seq_axis=1,
+        clip=10.0,
+    )
     agent = Agent(
         deterministic=False,
         noise_eps=cfg.noise_eps,
@@ -466,6 +480,12 @@ def train(cfg: Config) -> State:
         layer_norm=cfg.layer_norm,
         key=a_key,
     )
+    if (
+        not isinstance(v_net, MLP)
+        or not isinstance(mu_net, MLP)
+        or not isinstance(p_net, MLP)
+    ):
+        raise TypeError("Equinox returned an unexpected module type")
 
     agent_state = Agent.State(
         key=agent_key,
@@ -483,15 +503,8 @@ def train(cfg: Config) -> State:
         mc=train_mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
         agent=agent_state,
         stats=stats.init(batch_shape=(cfg.n_envs,)),
-        rew_norm=RewardNorm.State(
-            ret=jnp.zeros(cfg.n_envs),
-            rms=RunningStats.State(
-                mean=jnp.float32(0.0),
-                var=jnp.float32(1.0),
-                count=jnp.float32(1e-4),
-            ),
-        ),
-        opt=tx.init((v_net, mu_net, p_net)),
+        rew_norm=rew_norm.init(batch_shape=(cfg.n_envs,)),
+        opt=tx.init(eqx.filter((v_net, mu_net, p_net), eqx.is_inexact_array)),
     )
 
     @jax.jit
@@ -524,7 +537,7 @@ def train(cfg: Config) -> State:
             m, eval_state = evaluate(
                 evaluator.imc.init(
                     eval_mc_state,
-                    state.agent.replace(key=eval_key),
+                    replace(state.agent, key=eval_key),
                 )
             )
             steps = (i + 1) * cfg.n_envs * cfg.seq_len
@@ -548,11 +561,7 @@ def train(cfg: Config) -> State:
             eval_env.close(eval_state.mc.env)
 
     elapsed = time.time() - t0
-    print(
-        f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s"
-        f"  rew={float(m.avg_eps_rew):.1f}\u00b1{float(m.std_eps_rew):.1f}"
-        f"  (over {int(m.n_episodes)} eps)"
-    )
+    print(f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s")
 
     env.close(state.mc.env)
     return state

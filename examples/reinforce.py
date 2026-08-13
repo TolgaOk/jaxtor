@@ -23,6 +23,7 @@ A baseline-free variant with an entropy bonus H(π) to encourage exploration:
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import equinox as eqx
 import jax
@@ -35,7 +36,7 @@ from chex import dataclass
 from rich import print
 from rich.progress import track
 
-from jaxtor.env.gymnax import make
+from jaxtor.env.gymnax import GymnaxEnv, make
 from jaxtor.eval.mc import Eval as Evaluator
 from jaxtor.sampler import Mc, VecMc, Imc, Roll
 
@@ -102,14 +103,14 @@ class Agent:
     @dataclass
     class State:
         key: jax.Array
-        params: eqx.Module
+        params: MLP
 
-    def act(self, obs: chex.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
+    def act(self, obs: jax.Array, state: Agent.State) -> tuple[jax.Array, Agent.State]:
         """Sample one action for an observation."""
         key, act_key = jrd.split(state.key)
         logits = state.params(obs)
         action = jrd.categorical(act_key, logits / self.tau)
-        return action, state.replace(key=key)
+        return action, replace(state, key=key)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ class Agent:
 
 
 def reinforce_loss(
-    params: eqx.Module,
+    params: MLP,
     seq: Mc.Transition,
     gamma: float,
     entropy_coef: float,
@@ -171,8 +172,11 @@ evaluator = Evaluator(
 )
 
 
+type TrainState = Imc.State[Mc.State[GymnaxEnv.State], Agent.State]
+
+
 @jax.jit
-def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
+def train_step(state: TrainState) -> tuple[TrainState, jax.Array]:
     """Sample a rollout, compute REINFORCE loss, and update params."""
     seq, state = roll.sample(state)
     params = state.agent.params
@@ -194,9 +198,12 @@ print("[bold green]CartPole REINFORCE[/bold green]")
 
 # Init states
 key, params_key, env_key, agent_key, eval_key = jrd.split(key, 5)
+params = MLP(4, cfg.hidden, 2, key=params_key)
+if not isinstance(params, MLP):
+    raise TypeError("Equinox returned an unexpected module type")
 imc_state = roll.imc.init(
     vec_mc.init(jrd.split(key, cfg.n_envs), env=env.init(env_key)),
-    Agent.State(key=agent_key, params=MLP(4, cfg.hidden, 2, key=params_key)),
+    Agent.State(key=agent_key, params=params),
 )
 
 t0 = time.time()
@@ -208,7 +215,7 @@ for i in track(range(cfg.n_iters), description="Training"):
         m, eval_state = jit_eval(
             evaluator.imc.init(
                 vec_mc.init(jrd.split(k, cfg.eval_envs), env.init(env_key)),
-                imc_state.agent.replace(key=eval_key),
+                replace(imc_state.agent, key=eval_key),
             )
         )
         steps = (i + 1) * cfg.n_envs * cfg.seq_len
@@ -220,8 +227,4 @@ for i in track(range(cfg.n_iters), description="Training"):
         )
 
 elapsed = time.time() - t0
-print(
-    f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s"
-    f"  rew={float(m.avg_eps_rew):.1f}±{float(m.std_eps_rew):.1f}"
-    f"  (over {int(m.n_episodes)} eps)"
-)
+print(f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s")
