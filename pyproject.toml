@@ -57,6 +57,8 @@ exclude = ["dev", "scripts"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "backend: exercises optional third-party environment adapters",
+    "integration: composes multiple Jaxtor components end to end",
     "statistical: marks tests as statistical (verify probabilistic properties)",
 ]
 filterwarnings = [
