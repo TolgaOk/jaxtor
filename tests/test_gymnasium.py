@@ -13,6 +13,8 @@ from jaxtor.sampler.mc import Mc, VecMc
 from jaxtor.sampler.imc import Imc
 from jaxtor.sampler.rollout import Roll
 
+pytestmark = pytest.mark.backend
+
 
 # =============================================================================
 # Fixtures
@@ -244,6 +246,25 @@ def test_raw_step_reset_single_env():
     key, reset_key = jrd.split(key)
     reset_obs, reset_state = env.reset(reset_key, new_state)
     assert reset_obs.shape == (OBS_DIM,)
+
+
+def test_mc_boundary_retains_successor_and_carries_reset_observation():
+    """A backend truncation preserves nobs while the next step starts reset."""
+    env = gymnasium.make("CartPole-v1", max_episode_steps=1)
+    mc = Mc(max_eps_len=1, env=env)
+    key = jrd.PRNGKey(25)
+    state = mc.init(key, env.init(key))
+
+    transition, state = jax.jit(mc.sample)(jnp.int32(0), state)
+    reset_obs = state.last_obs
+    following, state = jax.jit(mc.sample)(jnp.int32(0), state)
+    env.close(state.env)
+
+    assert transition.trun
+    assert state.eps_idx == 0
+    assert not jnp.array_equal(transition.nobs, reset_obs)
+    assert jnp.array_equal(reset_obs, following.obs)
+    assert jnp.array_equal(state.last_obs, env.obs(state.env))
 
 
 def test_raw_vmap_step_without_mc():

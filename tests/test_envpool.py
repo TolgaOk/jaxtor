@@ -26,6 +26,8 @@ try:
 except ImportError:  # pragma: no cover - depends on the host environment
     pytest.skip("envpool is not installed", allow_module_level=True)
 
+pytestmark = pytest.mark.backend
+
 
 # =============================================================================
 # Fixtures
@@ -320,6 +322,29 @@ def test_terminated_env_restarts_near_init_state():
     # well below the 0.7 healthy threshold.
     restarted_height = np.array(mc_state.last_obs)[done][:, 0]
     assert np.all(restarted_height > 0.7)
+
+
+def test_truncated_pool_carries_reset_observation_into_next_step():
+    """Every backend truncation retains nobs and advances from its reset obs."""
+    n_envs = 2
+    env = _make_env(num_envs=n_envs, max_episode_steps=1)
+    vec_mc, state = _init_vec(
+        jrd.PRNGKey(12),
+        env,
+        axis_size=n_envs,
+        max_len=1,
+    )
+    acts = jnp.zeros((n_envs, ACT_DIM))
+
+    transition, state = jax.jit(vec_mc.sample)(acts, state)
+    reset_obs = state.last_obs
+    following, state = jax.jit(vec_mc.sample)(acts, state)
+
+    assert jnp.all(transition.trun)
+    assert jnp.all(state.eps_idx == 0)
+    assert not jnp.array_equal(transition.nobs, reset_obs)
+    assert jnp.array_equal(reset_obs, following.obs)
+    assert jnp.array_equal(state.last_obs, env.obs(state.env))
 
 
 # =============================================================================

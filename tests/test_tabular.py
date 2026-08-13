@@ -104,6 +104,27 @@ def test_reset_samples_from_initial_distribution():
     assert len(states_seen) >= 2
 
 
+def test_reset_clears_dirty_episode_state_without_rebuilding_the_mdp():
+    """Reset restores the initial state and step while preserving MDP arrays."""
+    config = tabular.gridworld.Config(
+        board=("#####", "#P @#", "#####"),
+        p_slip=0.0,
+    )
+    env = tabular.gridworld.make(config)
+    init_key, reset_key, step_key = jax.random.split(jax.random.key(3), 3)
+    initial = env.init(init_key)
+    initial_obs, state = env.reset(reset_key, initial)
+    _, dirty = env.step(step_key, 1, state)
+
+    obs, reset = jax.jit(env.reset)(reset_key, dirty)
+
+    assert dirty.step == 1
+    assert reset.step == 0
+    assert obs == initial_obs
+    assert reset.s == obs
+    assert jax.tree.all(jax.tree.map(jnp.array_equal, reset.mdp, dirty.mdp))
+
+
 def test_obs_returns_state_index():
     """Test that obs() returns state.s."""
     key = jax.random.PRNGKey(0)

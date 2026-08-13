@@ -24,6 +24,8 @@ from jaxtor.sampler.mc import Mc, VecMc
 from jaxtor.sampler.imc import Imc
 from jaxtor.sampler.rollout import Roll
 
+pytestmark = pytest.mark.backend
+
 
 # =============================================================================
 # Fixtures
@@ -340,6 +342,24 @@ def test_reset_is_deterministic_in_key():
 
     assert jnp.array_equal(obs_a, obs_b)
     assert not jnp.array_equal(obs_a, obs_c)
+
+
+def test_mc_truncation_carries_a_fresh_reset_observation():
+    """A sampler limit preserves true nobs and resets MJX before the next step."""
+    env = mjx.make("Hopper-v5")
+    mc = Mc(max_eps_len=1, env=env)
+    key = jrd.PRNGKey(31)
+    state = mc.init(key, env.init(key))
+
+    transition, state = jax.jit(mc.sample)(jnp.zeros(HOPPER_NU), state)
+    reset_obs = state.last_obs
+    following, state = jax.jit(mc.sample)(jnp.zeros(HOPPER_NU), state)
+
+    assert transition.trun
+    assert state.eps_idx == 0
+    assert not jnp.array_equal(transition.nobs, reset_obs)
+    assert jnp.array_equal(reset_obs, following.obs)
+    assert jnp.array_equal(state.last_obs, env.obs(state.env))
 
 
 # =============================================================================
