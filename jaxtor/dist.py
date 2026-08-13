@@ -1,8 +1,8 @@
-"""Stateless probability-distribution components for action selection.
+"""Probability-distribution values for action selection.
 
-Distribution parameters are explicit input pytrees, typically produced by a
-policy network elsewhere. Components contain no network parameters, random
-state, or initialization lifecycle.
+Distributions are pytrees of parameter arrays, typically produced by policy
+heads. Their methods are pure: sampling receives an explicit random key, and
+no distribution has persistent state or an initialization lifecycle.
 """
 
 from __future__ import annotations
@@ -43,26 +43,23 @@ class Evaluation:
     entropy: jax.Array
 
 
-class Distribution[ParamsT](Protocol):
-    """Stateless action-distribution capability.
+class Distribution(Protocol):
+    """Pure action-distribution capability over stored parameter arrays."""
 
-    Implementations consume explicit parameter pytrees and therefore require
-    neither persistent state nor initialization.
-    """
+    def sample(self, key: jax.Array) -> Sample: ...
 
-    def sample(self, key: jax.Array, params: ParamsT) -> Sample: ...
+    def evaluate(self, act: jax.Array) -> Evaluation: ...
 
-    def evaluate(self, params: ParamsT, act: jax.Array) -> Evaluation: ...
-
-    def mode(self, params: ParamsT) -> jax.Array: ...
+    def mode(self) -> jax.Array: ...
 
 
 @dataclass
 class DiagNormal:
     """Diagonal Normal distribution over one vector-valued event axis.
 
-    Public dataclasses:
-        Params: Location and log-scale arrays with a final event axis.
+    Attributes:
+        loc: Distribution location, shaped ``(..., action_dim)``.
+        log_scale: Log standard deviation, broadcastable to ``loc``.
 
     Public methods:
         sample: Draw an action and return its joint log-probability.
@@ -70,22 +67,12 @@ class DiagNormal:
         mode: Return the distribution location.
     """
 
-    @dataclass
-    class Params:
-        """Parameters of a diagonal Normal distribution.
+    loc: jax.Array
+    log_scale: jax.Array
 
-        Attributes:
-            loc: Distribution location, shaped ``(..., action_dim)``.
-            log_scale: Log standard deviation, broadcastable to ``loc``.
-        """
-
-        loc: jax.Array
-        log_scale: jax.Array
-
-    @staticmethod
-    def _broadcast(params: DiagNormal.Params) -> tuple[jax.Array, jax.Array]:
+    def _broadcast(self) -> tuple[jax.Array, jax.Array]:
         """Broadcast location and log-scale to a common parameter shape."""
-        loc, log_scale = jnp.broadcast_arrays(params.loc, params.log_scale)
+        loc, log_scale = jnp.broadcast_arrays(self.loc, self.log_scale)
         return loc, log_scale
 
     @staticmethod
@@ -105,27 +92,23 @@ class DiagNormal:
         entropy = log_scale + 0.5 * (1.0 + _LOG_TWO_PI)
         return jnp.sum(entropy, axis=-1)
 
-    def sample(self, key: jax.Array, params: DiagNormal.Params) -> Sample:
+    def sample(self, key: jax.Array) -> Sample:
         """Draw an action and return its joint log-probability."""
-        loc, log_scale = self._broadcast(params)
+        loc, log_scale = self._broadcast()
         act = loc + jnp.exp(log_scale) * jax.random.normal(key, loc.shape)
         return Sample(act=act, logp=self._logp(loc, log_scale, act))
 
-    def evaluate(
-        self,
-        params: DiagNormal.Params,
-        act: jax.Array,
-    ) -> Evaluation:
+    def evaluate(self, act: jax.Array) -> Evaluation:
         """Compute joint log-probability and entropy for ``act``."""
-        loc, log_scale = self._broadcast(params)
+        loc, log_scale = self._broadcast()
         return Evaluation(
             logp=self._logp(loc, log_scale, act),
             entropy=self._entropy(log_scale),
         )
 
-    def mode(self, params: DiagNormal.Params) -> jax.Array:
+    def mode(self) -> jax.Array:
         """Return the most likely action."""
-        loc, _ = self._broadcast(params)
+        loc, _ = self._broadcast()
         return loc
 
 
@@ -133,8 +116,8 @@ class DiagNormal:
 class Categorical:
     """Categorical distribution over the final logits axis.
 
-    Public dataclasses:
-        Params: Unnormalized logits with a final category axis.
+    Attributes:
+        logits: Unnormalized logits, shaped ``(..., n_categories)``.
 
     Public methods:
         sample: Draw a category and return its log-probability.
@@ -142,20 +125,11 @@ class Categorical:
         mode: Return the highest-logit category.
     """
 
-    @dataclass
-    class Params:
-        """Parameters of a categorical distribution.
+    logits: jax.Array
 
-        Attributes:
-            logits: Unnormalized logits, shaped ``(..., n_categories)``.
-        """
-
-        logits: jax.Array
-
-    @staticmethod
-    def _log_probs(params: Categorical.Params) -> jax.Array:
+    def _log_probs(self) -> jax.Array:
         """Normalize logits in log space."""
-        return jax.nn.log_softmax(params.logits, axis=-1)
+        return jax.nn.log_softmax(self.logits, axis=-1)
 
     @staticmethod
     def _select(log_probs: jax.Array, act: jax.Array) -> jax.Array:
@@ -163,24 +137,20 @@ class Categorical:
         indices = jnp.expand_dims(act.astype(jnp.int32), axis=-1)
         return jnp.take_along_axis(log_probs, indices, axis=-1).squeeze(-1)
 
-    def sample(self, key: jax.Array, params: Categorical.Params) -> Sample:
+    def sample(self, key: jax.Array) -> Sample:
         """Draw a category and return its log-probability."""
-        act = jax.random.categorical(key, params.logits, axis=-1)
-        return Sample(act=act, logp=self._select(self._log_probs(params), act))
+        act = jax.random.categorical(key, self.logits, axis=-1)
+        return Sample(act=act, logp=self._select(self._log_probs(), act))
 
-    def evaluate(
-        self,
-        params: Categorical.Params,
-        act: jax.Array,
-    ) -> Evaluation:
+    def evaluate(self, act: jax.Array) -> Evaluation:
         """Compute log-probability and entropy for ``act``."""
-        log_probs = self._log_probs(params)
+        log_probs = self._log_probs()
         entropy = -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
         return Evaluation(
             logp=self._select(log_probs, act),
             entropy=entropy,
         )
 
-    def mode(self, params: Categorical.Params) -> jax.Array:
+    def mode(self) -> jax.Array:
         """Return the highest-logit category."""
-        return jnp.argmax(params.logits, axis=-1)
+        return jnp.argmax(self.logits, axis=-1)
