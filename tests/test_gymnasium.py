@@ -20,7 +20,7 @@ from jaxtor.sampler.rollout import Roll
 
 NUM_ENVS = 4
 OBS_DIM = 4  # CartPole-v1 obs dimension
-MAX_EPISODE_LEN = 500
+MAX_EPS_LEN = 500
 COMPONENT_NUM_ENVS = 3
 COMPONENT_ROLLOUT_LEN = 4
 
@@ -56,7 +56,7 @@ def _make_env(num_envs=NUM_ENVS):
 
 
 def _make_mc(env):
-    return Mc(max_eps_len=MAX_EPISODE_LEN, env=env)
+    return Mc(max_eps_len=MAX_EPS_LEN, env=env)
 
 
 def _init_vec(key, env):
@@ -397,7 +397,7 @@ def test_auto_reset_keeps_valid_episode_state():
 
     assert jnp.all(jnp.isfinite(mc_state.last_obs))
     assert jnp.all(mc_state.eps_idx >= 0)
-    assert jnp.all(mc_state.eps_idx < MAX_EPISODE_LEN)
+    assert jnp.all(mc_state.eps_idx < MAX_EPS_LEN)
 
 
 def test_auto_reset_obs_continuity():

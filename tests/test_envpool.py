@@ -35,7 +35,7 @@ ENV_ID = "Hopper-v5"
 NUM_ENVS = 4
 OBS_DIM = 11
 ACT_DIM = 3
-MAX_EPISODE_LEN = 1000
+MAX_EPS_LEN = 1000
 
 
 @pytest.fixture(autouse=True)
@@ -46,11 +46,11 @@ def _close_backend_runtimes():
 
 
 def _make_env(num_envs=NUM_ENVS, **kwargs):
-    kwargs.setdefault("max_episode_steps", MAX_EPISODE_LEN)
+    kwargs.setdefault("max_episode_steps", MAX_EPS_LEN)
     return envpool.make(ENV_ID, num_envs=num_envs, **kwargs)
 
 
-def _init_vec(key, env, axis_size=None, max_len=MAX_EPISODE_LEN):
+def _init_vec(key, env, axis_size=None, max_len=MAX_EPS_LEN):
     """Init env + mc + vec_mc over ``axis_size`` envs; return (vec_mc, mc_state)."""
     axis_size = env.num_envs if axis_size is None else axis_size
     vec_mc = VecMc(mc=Mc(max_eps_len=max_len, env=env))
@@ -208,7 +208,7 @@ def test_vecmc_consecutive_observations_match():
 def test_scalar_path_single_env():
     """num_envs=1 works through plain Mc without vmap."""
     env = _make_env(1)
-    mc = Mc(max_eps_len=MAX_EPISODE_LEN, env=env)
+    mc = Mc(max_eps_len=MAX_EPS_LEN, env=env)
     key = jrd.PRNGKey(11)
 
     mc_state = mc.init(key, env.init(key))

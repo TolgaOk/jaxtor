@@ -14,7 +14,7 @@ from __future__ import annotations
 import atexit
 import itertools
 import threading
-from dataclasses import dataclass as py_dataclass
+from dataclasses import dataclass as py_dataclass, replace
 from typing import Any, Callable, Generic, ParamSpec, Protocol, TypeVar, cast
 
 import chex
@@ -258,9 +258,7 @@ class CallbackIO:
         runtime: Leaf
         reset_obs: Leaf
 
-    def __init__(
-        self, schema: Schema, num_envs: int | None, allow_subset: bool
-    ):
+    def __init__(self, schema: Schema, num_envs: int | None, allow_subset: bool):
         self.schema = schema
         self.num_envs = num_envs
         self.allow_subset = allow_subset
@@ -653,7 +651,8 @@ class GymEnv:
                 term=result.term,
                 trun=result.trun,
             ),
-            state.replace(  # type: ignore[reportAttributeAccessIssue]
+            replace(
+                state,
                 runtime=result.runtime,
                 obs=result.nobs,
                 reset_obs=reset_obs,

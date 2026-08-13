@@ -28,17 +28,39 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Protocol
+from collections.abc import Callable
+from typing import Protocol, TypedDict, Unpack
 
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
 import chex
 from chex import dataclass
-import mujoco
+from mujoco import _structs as structs
 from mujoco import mjx
 
 _INF = float("inf")
+
+
+class LocomotionOptions(TypedDict, total=False):
+    """Typed task overrides accepted by locomotion builders."""
+
+    forward_reward_weight: float
+    ctrl_cost_weight: float
+    healthy_reward: float
+    terminate_when_unhealthy: bool
+    healthy_z_range: tuple[float, float]
+    healthy_angle_range: tuple[float, float]
+    healthy_state_range: tuple[float, float]
+    exclude_positions: int
+    velocity_clip: float
+
+
+class MakeOptions(LocomotionOptions, total=False):
+    """Typed environment and task overrides accepted by :func:`make`."""
+
+    reset_noise_scale: float
+    frame_skip: int
 
 
 class Task(Protocol):
@@ -134,19 +156,18 @@ class Backend:
     nconmax: int | None = None
     njmax: int | None = None
 
-    def put_model(self, model: mujoco.MjModel) -> mjx.Model:
+    def put_model(self, model: structs.MjModel) -> mjx.Model:
         """Put a host model on device under this backend."""
-        kwargs = {} if self.impl is None else {"impl": self.impl}
-        return mjx.put_model(model, **kwargs)
+        return mjx.put_model(model, impl=self.impl)
 
     def make_data(self, model: mjx.Model) -> mjx.Data:
         """Allocate a fresh data buffer; Warp contact/constraint caps if set."""
-        kwargs = {} if self.impl is None else {"impl": self.impl}
-        if self.nconmax is not None:
-            kwargs["nconmax"] = self.nconmax
-        if self.njmax is not None:
-            kwargs["njmax"] = self.njmax
-        return mjx.make_data(model, **kwargs)
+        return mjx.make_data(
+            model,
+            impl=self.impl,
+            nconmax=self.nconmax,
+            njmax=self.njmax,
+        )
 
 
 @dataclass
@@ -248,7 +269,7 @@ class MjxEnv:
                 term=self.task.terminal(data),
                 trun=jnp.bool_(False),
             ),
-            state.replace(data=data),
+            dataclasses.replace(state, data=data),
         )
 
     def reset(self, key: chex.PRNGKey, state: State) -> tuple[chex.Array, State]:
@@ -274,7 +295,7 @@ class MjxEnv:
             )
         data = self.backend.make_data(self.mjx_model).replace(qpos=qpos, qvel=qvel)
         data = mjx.forward(self.mjx_model, data)
-        return self.task.obs(data), state.replace(data=data)
+        return self.task.obs(data), dataclasses.replace(state, data=data)
 
     def obs(self, state: State) -> chex.Array:
         """Get the observation from a state.
@@ -288,14 +309,14 @@ class MjxEnv:
         return self.task.obs(state.data)
 
 
-def _load_model(xml_file: str) -> mujoco.MjModel:
+def _load_model(xml_file: str) -> structs.MjModel:
     """Load a Gymnasium MuJoCo asset by filename into a ``mujoco.MjModel``."""
     import gymnasium.envs.mujoco as _gym_mujoco
 
     path = os.path.join(os.path.dirname(_gym_mujoco.__file__), "assets", xml_file)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Gymnasium MuJoCo asset not found: {path}")
-    return mujoco.MjModel.from_xml_path(path)
+    return structs.MjModel.from_xml_path(path)
 
 
 def _build(
@@ -322,59 +343,79 @@ def _build(
 
 
 def _hopper(
-    backend: Backend, reset_noise_scale: float = 5e-3, frame_skip: int = 4, **overrides
+    backend: Backend,
+    reset_noise_scale: float = 5e-3,
+    frame_skip: int = 4,
+    **overrides: Unpack[LocomotionOptions],
 ) -> MjxEnv:
     """Build the ``Hopper-v5`` MJX environment."""
-    config = dict(
-        forward_reward_weight=1.0,
-        ctrl_cost_weight=1e-3,
-        healthy_reward=1.0,
-        terminate_when_unhealthy=True,
-        healthy_z_range=(0.7, _INF),
-        healthy_angle_range=(-0.2, 0.2),
-        healthy_state_range=(-100.0, 100.0),
-        exclude_positions=1,
-        velocity_clip=10.0,
-    )
-    config.update(overrides)
     return _build(
-        "hopper.xml", Locomotion(**config), frame_skip, reset_noise_scale, backend
+        "hopper.xml",
+        dataclasses.replace(
+            Locomotion(
+                forward_reward_weight=1.0,
+                ctrl_cost_weight=1e-3,
+                healthy_reward=1.0,
+                terminate_when_unhealthy=True,
+                healthy_z_range=(0.7, _INF),
+                healthy_angle_range=(-0.2, 0.2),
+                healthy_state_range=(-100.0, 100.0),
+                exclude_positions=1,
+                velocity_clip=10.0,
+            ),
+            **overrides,
+        ),
+        frame_skip,
+        reset_noise_scale,
+        backend,
     )
 
 
 def _walker2d(
-    backend: Backend, reset_noise_scale: float = 5e-3, frame_skip: int = 4, **overrides
+    backend: Backend,
+    reset_noise_scale: float = 5e-3,
+    frame_skip: int = 4,
+    **overrides: Unpack[LocomotionOptions],
 ) -> MjxEnv:
     """Build the ``Walker2d-v5`` MJX environment."""
-    config = dict(
-        forward_reward_weight=1.0,
-        ctrl_cost_weight=1e-3,
-        healthy_reward=1.0,
-        terminate_when_unhealthy=True,
-        healthy_z_range=(0.8, 2.0),
-        healthy_angle_range=(-1.0, 1.0),
-        exclude_positions=1,
-        velocity_clip=10.0,
-    )
-    config.update(overrides)
     return _build(
-        "walker2d_v5.xml", Locomotion(**config), frame_skip, reset_noise_scale, backend
+        "walker2d_v5.xml",
+        dataclasses.replace(
+            Locomotion(
+                forward_reward_weight=1.0,
+                ctrl_cost_weight=1e-3,
+                healthy_reward=1.0,
+                terminate_when_unhealthy=True,
+                healthy_z_range=(0.8, 2.0),
+                healthy_angle_range=(-1.0, 1.0),
+                exclude_positions=1,
+                velocity_clip=10.0,
+            ),
+            **overrides,
+        ),
+        frame_skip,
+        reset_noise_scale,
+        backend,
     )
 
 
 def _half_cheetah(
-    backend: Backend, reset_noise_scale: float = 0.1, frame_skip: int = 5, **overrides
+    backend: Backend,
+    reset_noise_scale: float = 0.1,
+    frame_skip: int = 5,
+    **overrides: Unpack[LocomotionOptions],
 ) -> MjxEnv:
     """Build the ``HalfCheetah-v5`` MJX environment (no termination)."""
-    config = dict(
-        forward_reward_weight=1.0,
-        ctrl_cost_weight=0.1,
-        exclude_positions=1,
-    )
-    config.update(overrides)
     return _build(
         "half_cheetah.xml",
-        Locomotion(**config),
+        dataclasses.replace(
+            Locomotion(
+                forward_reward_weight=1.0,
+                ctrl_cost_weight=0.1,
+                exclude_positions=1,
+            ),
+            **overrides,
+        ),
         frame_skip,
         reset_noise_scale,
         backend,
@@ -383,21 +424,32 @@ def _half_cheetah(
 
 
 def _swimmer(
-    backend: Backend, reset_noise_scale: float = 0.1, frame_skip: int = 4, **overrides
+    backend: Backend,
+    reset_noise_scale: float = 0.1,
+    frame_skip: int = 4,
+    **overrides: Unpack[LocomotionOptions],
 ) -> MjxEnv:
     """Build the ``Swimmer-v5`` MJX environment (no termination)."""
-    config = dict(
-        forward_reward_weight=1.0,
-        ctrl_cost_weight=1e-4,
-        exclude_positions=2,
-    )
-    config.update(overrides)
     return _build(
-        "swimmer.xml", Locomotion(**config), frame_skip, reset_noise_scale, backend
+        "swimmer.xml",
+        dataclasses.replace(
+            Locomotion(
+                forward_reward_weight=1.0,
+                ctrl_cost_weight=1e-4,
+                exclude_positions=2,
+            ),
+            **overrides,
+        ),
+        frame_skip,
+        reset_noise_scale,
+        backend,
     )
 
 
-_REGISTRY = {
+Builder = Callable[..., MjxEnv]
+
+
+_REGISTRY: dict[str, Builder] = {
     "Hopper-v5": _hopper,
     "Walker2d-v5": _walker2d,
     "HalfCheetah-v5": _half_cheetah,
@@ -410,7 +462,7 @@ def make(
     impl: str | None = None,
     nconmax: int | None = None,
     njmax: int | None = None,
-    **kwargs,
+    **kwargs: Unpack[MakeOptions],
 ) -> MjxEnv:
     """Create an MJX environment adapter.
 

@@ -14,6 +14,7 @@ import jax.random as jrd
 import numpy as np
 import pytest
 from chex import dataclass
+from typing import Protocol, TypeGuard
 
 import gymnasium
 from mujoco import mjx as _mjx
@@ -39,6 +40,67 @@ ENV_SPECS = [
     pytest.param("HalfCheetah-v5", 6, 17, False, False, id="halfcheetah"),
     pytest.param("Swimmer-v5", 2, 8, False, False, id="swimmer"),
 ]
+
+
+class GymModel(Protocol):
+    """MuJoCo model fields used by the parity tests."""
+
+    nq: int
+    nv: int
+
+
+class GymData(Protocol):
+    """MuJoCo data fields used by the parity tests."""
+
+    qpos: np.ndarray
+    qvel: np.ndarray
+
+
+class GymMujocoEnv(Protocol):
+    """Backend-specific Gymnasium capability exercised by parity tests."""
+
+    data: GymData
+    model: GymModel
+    init_qpos: np.ndarray
+    init_qvel: np.ndarray
+    is_healthy: bool
+
+    def reset(self, *, seed: int | None = None): ...
+
+    def step(
+        self,
+        action: np.ndarray,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
+
+    def set_state(self, qpos: np.ndarray, qvel: np.ndarray) -> None: ...
+
+    def _get_obs(self) -> np.ndarray: ...
+
+
+def _is_gym_mujoco(env: object) -> TypeGuard[GymMujocoEnv]:
+    """Check the private MuJoCo surface absent from Gymnasium's base type."""
+    return all(
+        hasattr(env, name)
+        for name in (
+            "data",
+            "model",
+            "init_qpos",
+            "init_qvel",
+            "is_healthy",
+            "reset",
+            "step",
+            "set_state",
+            "_get_obs",
+        )
+    )
+
+
+def _gym_mujoco(name: str) -> GymMujocoEnv:
+    """Create and validate the concrete Gymnasium MuJoCo environment."""
+    env = gymnasium.make(name).unwrapped
+    if not _is_gym_mujoco(env):
+        raise TypeError(f"{name!r} is not a Gymnasium MuJoCo environment")
+    return env
 
 
 @dataclass
@@ -85,7 +147,7 @@ def _sync_state(env, qpos, qvel):
 def test_dynamics_parity_free_rollout(name, nu, obs_dim, terminates, clips):
     """MJX env matches its Gymnasium v5 counterpart to ~machine precision."""
     with jax.enable_x64():
-        raw = gymnasium.make(name).unwrapped
+        raw = _gym_mujoco(name)
         raw.reset(seed=0)
         env = mjx.make(name)
         state = _sync_state(env, raw.data.qpos.copy(), raw.data.qvel.copy())
@@ -119,7 +181,7 @@ def test_dynamics_parity_free_rollout(name, nu, obs_dim, terminates, clips):
 def test_obs_termination_parity_random_states(name, nu, obs_dim, terminates, clips):
     """Observation and termination match Gymnasium across diverse states."""
     with jax.enable_x64():
-        raw = gymnasium.make(name).unwrapped
+        raw = _gym_mujoco(name)
         raw.reset(seed=2)
         env = mjx.make(name)
         rng = np.random.default_rng(3)
@@ -140,6 +202,7 @@ def test_obs_termination_parity_random_states(name, nu, obs_dim, terminates, cli
                 ),
             )
             obs_m = np.asarray(env.task.obs(data))
+            assert obs_m.shape == (obs_dim,)
             term_m = bool(env.task.terminal(data))
 
             max_obs = max(max_obs, np.abs(obs_g - obs_m).max())
@@ -150,7 +213,6 @@ def test_obs_termination_parity_random_states(name, nu, obs_dim, terminates, cli
             else:
                 term_mismatch += int(term_m)
 
-        assert obs_m.shape == (obs_dim,)
         assert max_obs < 1e-9
         assert term_mismatch == 0
         assert saw_unhealthy == terminates
@@ -162,7 +224,7 @@ def test_qvel_clip_parity(name, nu, obs_dim, terminates, clips):
     if not clips:
         pytest.skip(f"{name} does not clip observation velocities")
     with jax.enable_x64():
-        raw = gymnasium.make(name).unwrapped
+        raw = _gym_mujoco(name)
         raw.reset(seed=5)
         env = mjx.make(name)
 
