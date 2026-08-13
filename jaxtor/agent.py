@@ -582,12 +582,14 @@ class VPi[PiT: Distribution, BodyStateT, ValueStateT, PiStateT]:
         VPi.State[BodyStateT, ValueStateT, PiStateT],
     ]:
         """Select only the action required by a minimal sampler."""
-        pred, state = self.apply(obs, state)
-        sample, key = self.select.select(pred.pi, state.select)
+        features, body = self.body.apply(obs, state.body)
+        _assert_feature_array(features)
+        pi, pi_state = self.pi.apply(features, state.pi)
+        sample, key = self.select.select(pi, state.select)
         return sample.act, self.State(
-            body=state.body,
+            body=body,
             v=state.v,
-            pi=state.pi,
+            pi=pi_state,
             select=key,
         )
 
@@ -690,13 +692,15 @@ class VQPi[
         VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT],
     ]:
         """Select only the action required by a minimal sampler."""
-        pred, state = self.apply(obs, state)
-        sample, key = self.select.select(pred.pi, state.select)
+        features, body = self.body.apply(obs, state.body)
+        _assert_feature_array(features)
+        pi, pi_state = self.pi.apply(features, state.pi)
+        sample, key = self.select.select(pi, state.select)
         return sample.act, self.State(
-            body=state.body,
+            body=body,
             v=state.v,
             q=state.q,
-            pi=state.pi,
+            pi=pi_state,
             select=key,
         )
 
