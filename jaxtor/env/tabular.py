@@ -50,7 +50,7 @@ def _sample_transition(
 class ConfigProtocol(Protocol):
     """Protocol for tabular MDP configurations."""
 
-    max_episode_len: int
+    max_eps_len: int
 
     def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP: ...
 
@@ -71,13 +71,13 @@ class TabularEnv:
             mdp: Underlying jaxdp MDP instance.
             s: Current state index.
             step: Current step within the episode.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
         mdp: JaxdpMDP
         s: chex.Numeric
         step: chex.Numeric
-        max_episode_len: chex.Numeric
+        max_eps_len: chex.Numeric
 
     @dataclass
     class Step:
@@ -111,7 +111,7 @@ class TabularEnv:
             Step result and next state.
         """
         s_next, rew, term = _sample_transition(key, state.mdp, state.s, act)
-        trun = state.step >= state.max_episode_len - 1
+        trun = state.step >= state.max_eps_len - 1
         new_state = state.replace(s=s_next, step=state.step + 1)  # type: ignore[attr-defined]
         return (
             TabularEnv.Step(
@@ -137,7 +137,7 @@ class TabularEnv:
             mdp=mdp,
             s=jnp.array(-1),
             step=jnp.array(0),
-            max_episode_len=jnp.array(self.config.max_episode_len),
+            max_eps_len=jnp.array(self.config.max_eps_len),
         )
 
     def obs(self, state: TabularEnv.State) -> chex.Numeric:
@@ -181,7 +181,7 @@ class garnet:
             branch_size: Number of successor states per state-action pair.
             min_reward: Minimum reward value.
             max_reward: Maximum reward value.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
         state_size: int = 50
@@ -189,7 +189,7 @@ class garnet:
         branch_size: int = 5
         min_reward: float = 0.0
         max_reward: float = 1.0
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a Garnet MDP from this config."""
@@ -226,10 +226,10 @@ class graph:
         This is a fixed 6-state graph with predefined edge structure.
 
         Attributes:
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a Graph MDP from this config."""
@@ -267,7 +267,7 @@ class gridworld:
         Attributes:
             board: Tuple of strings representing the 2D grid layout.
             p_slip: Probability of slipping to unintended action.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
 
         Example:
             >>> config = gridworld.Config(
@@ -292,7 +292,7 @@ class gridworld:
             "#######",
         )
         p_slip: float = 0.0
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
         def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
             """Initialize a GridWorld MDP from this config."""

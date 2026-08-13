@@ -288,7 +288,7 @@ def test_reset_is_deterministic_in_key():
 def test_mc_scalar_path():
     """Plain Mc samples transitions with scalar reward/termination."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     key = jrd.PRNGKey(6)
     env_state = env.init(key)
     mc_state = mc.init(key, env_state)
@@ -302,7 +302,7 @@ def test_mc_scalar_path():
 def test_vecmc_sample_shapes():
     """VecMc samples batched transitions with correct per-env shapes."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(7)
     env_state = env.init(key)
@@ -330,7 +330,7 @@ def test_jit_step():
 def test_roll_chain_jit():
     """Imc + VecMc + Roll collects batched trajectories under jit."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(9)
 
@@ -341,19 +341,19 @@ def test_roll_chain_jit():
     imc = Imc(agent=RandomAgent(), mc=vec_mc)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))
 
-    seqlen = 16
-    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
-    trajectory, imc_state = jax.jit(roll.sample)(imc_state)
+    seq_len = 16
+    roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
+    seq, imc_state = jax.jit(roll.sample)(imc_state)
 
-    assert trajectory.obs.shape == (NUM_ENVS, seqlen, HOPPER_OBS)
-    assert trajectory.act.shape == (NUM_ENVS, seqlen, HOPPER_NU)
-    assert trajectory.rew.shape == (NUM_ENVS, seqlen)
+    assert seq.obs.shape == (NUM_ENVS, seq_len, HOPPER_OBS)
+    assert seq.act.shape == (NUM_ENVS, seq_len, HOPPER_NU)
+    assert seq.rew.shape == (NUM_ENVS, seq_len)
 
 
 def test_roll_single_env():
-    """Imc + single-env Mc + Roll collects a trajectory."""
+    """Imc + single-env Mc + Roll collects a sequence."""
     env = mjx.make("Hopper-v5")
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     imc = Imc(agent=ScalarRandomAgent(), mc=mc)
     key = jrd.PRNGKey(30)
 
@@ -362,9 +362,9 @@ def test_roll_single_env():
     mc_state = mc.init(k2, env_state)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
 
-    seqlen = 10
-    roll = Roll(imc=imc, seqlen=seqlen)
-    trajectory, _ = roll.sample(imc_state)
+    seq_len = 10
+    roll = Roll(imc=imc, seq_len=seq_len)
+    seq, _ = roll.sample(imc_state)
 
-    assert trajectory.obs.shape == (seqlen, HOPPER_OBS)
-    assert trajectory.act.shape == (seqlen, HOPPER_NU)
+    assert seq.obs.shape == (seq_len, HOPPER_OBS)
+    assert seq.act.shape == (seq_len, HOPPER_NU)

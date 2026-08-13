@@ -49,7 +49,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
     :meth:`observe` does not inspect backend-specific environment state.
 
     Attributes:
-        max_episode_len: Maximum number of transitions in one episode.
+        max_eps_len: Maximum number of transitions in one episode.
         env: Environment implementing ``reset`` and non-autoreset ``step``.
 
     Public dataclasses:
@@ -62,7 +62,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         sample: Advance once and autoreset at an episode boundary.
     """
 
-    max_episode_len: int
+    max_eps_len: int
     env: Env[EnvStateT, EnvStepT]
 
     @dataclass
@@ -113,8 +113,8 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
 
     def __post_init__(self) -> None:
         """Validate the static episode limit."""
-        if self.max_episode_len < 1:
-            raise ValueError("max_episode_len must be positive")
+        if self.max_eps_len < 1:
+            raise ValueError("max_eps_len must be positive")
 
     def init(
         self,
@@ -168,7 +168,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         chex.assert_rank([rew, term, env_trun], 0)
         chex.assert_equal_shape([state.last_obs, nobs])
 
-        reached_limit = state.eps_idx + 1 >= self.max_episode_len
+        reached_limit = state.eps_idx + 1 >= self.max_eps_len
         transition = self.Transition(
             obs=state.last_obs,
             act=act,

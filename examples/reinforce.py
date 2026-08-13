@@ -56,8 +56,8 @@ class Config:
     entropy_coef: float = 0.01
     tau_pi: float = 1e-4  # target policy temperature
     n_envs: int = 16
-    seqlen: int = 200
-    max_episode_len: int = 500
+    seq_len: int = 200
+    max_eps_len: int = 500
     tau_mu: float = 1.0  # behavior policy temperature
     eval_freq: int = 5
     eval_envs: int = 20
@@ -119,22 +119,22 @@ class Agent:
 
 def reinforce_loss(
     params: eqx.Module,
-    trajectory: Mc.Transition,
+    seq: Mc.Transition,
     gamma: float,
     entropy_coef: float,
 ) -> chex.Numeric:
     """REINFORCE policy gradient loss with entropy bonus."""
-    logits = jax.vmap(jax.vmap(params))(trajectory.obs)
+    logits = jax.vmap(jax.vmap(params))(seq.obs)
 
-    discount_t = jnp.where(trajectory.term, 0.0, gamma)
+    discount_t = jnp.where(seq.term, 0.0, gamma)
 
     returns = jax.vmap(rlax.discounted_returns, in_axes=(0, 0, None))(
-        trajectory.rew, discount_t, jnp.float32(0.0)
+        seq.rew, discount_t, jnp.float32(0.0)
     )
 
     w_t = jnp.ones_like(returns)
     pg_loss = jax.vmap(rlax.policy_gradient_loss)(
-        logits, trajectory.act.astype(jnp.int32), returns, w_t
+        logits, seq.act.astype(jnp.int32), returns, w_t
     ).mean()
     ent_loss = jax.vmap(rlax.entropy_loss)(logits, w_t).mean()
 
@@ -150,7 +150,7 @@ key = jrd.PRNGKey(cfg.seed)
 env = make("CartPole-v1")
 vec_mc = VecMc(
     mc=Mc(
-        max_episode_len=cfg.max_episode_len,
+        max_eps_len=cfg.max_eps_len,
         env=env,
     )
 )
@@ -160,24 +160,24 @@ target_agent = Agent(tau=cfg.tau_pi)
 # Training rollout sampler
 roll = Roll(
     imc=Imc(agent=behavior_agent, mc=vec_mc),
-    seqlen=cfg.seqlen,
+    seq_len=cfg.seq_len,
     seq_axis=1,
 )
 
 # Eval component
 evaluator = Evaluator(
     imc=Imc(agent=target_agent, mc=vec_mc),
-    episode_len=cfg.max_episode_len,
+    episode_len=cfg.max_eps_len,
 )
 
 
 @jax.jit
 def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
     """Sample a rollout, compute REINFORCE loss, and update params."""
-    trajectory, state = roll.sample(state)
+    seq, state = roll.sample(state)
     params = state.agent.params
     loss, grads = jax.value_and_grad(reinforce_loss)(
-        params, trajectory, cfg.gamma, cfg.entropy_coef
+        params, seq, cfg.gamma, cfg.entropy_coef
     )
     new_params = jax.tree.map(lambda p, g: p - cfg.lr * g, params, grads)
     state = eqx.tree_at(lambda s: s.agent.params, state, new_params)
@@ -211,7 +211,7 @@ for i in track(range(cfg.n_iters), description="Training"):
                 imc_state.agent.replace(key=eval_key),
             )
         )
-        steps = (i + 1) * cfg.n_envs * cfg.seqlen
+        steps = (i + 1) * cfg.n_envs * cfg.seq_len
         print(
             f"  iter {i + 1:4d}  loss={float(loss):+.4f}"
             f"  rew={float(m.avg_eps_rew):.1f}±{float(m.std_eps_rew):.1f}"

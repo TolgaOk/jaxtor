@@ -98,11 +98,11 @@ def test_sample_deterministic_one_step_goal():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
@@ -127,11 +127,11 @@ def test_sample_truncation_rate_dead_end():
     config = tabular.gridworld.Config(
         board=["#####", "#P @#", "#####"],
         p_slip=0.0,
-        max_episode_len=5,
+        max_eps_len=5,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=5, env=env)
+    mc = Mc(max_eps_len=5, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -152,11 +152,11 @@ def test_sample_more_episodes_gives_more_data():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -180,10 +180,10 @@ def test_sample_jit_compilation():
     """Verify evaluate() and its returned state can be JIT compiled."""
     key = jax.random.PRNGKey(15)
 
-    config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
+    config = tabular.garnet.Config(state_size=5, action_size=2, max_eps_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -202,10 +202,10 @@ def test_sample_key_determinism():
     """Same imc_state produces identical metrics."""
     key = jax.random.PRNGKey(16)
 
-    config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
+    config = tabular.garnet.Config(state_size=5, action_size=2, max_eps_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 
@@ -234,11 +234,11 @@ def test_sample_truncation_rate_zero_when_all_terminate():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
 
@@ -253,18 +253,18 @@ def test_sample_truncation_rate_zero_when_all_terminate():
 
 
 def test_sample_dead_end_episode_length_equals_max():
-    """Truncated episodes have length equal to max_episode_len."""
+    """Truncated episodes have length equal to max_eps_len."""
     key = jax.random.PRNGKey(31)
 
     max_len = 5
     config = tabular.gridworld.Config(
         board=["#####", "#P @#", "#####"],
         p_slip=0.0,
-        max_episode_len=max_len,
+        max_eps_len=max_len,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=max_len, env=env)
+    mc = Mc(max_eps_len=max_len, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=max_len * 3)
 
@@ -285,11 +285,11 @@ def test_sample_std_zero_for_identical_episodes():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=50)
 
@@ -311,11 +311,11 @@ def test_sample_metrics_include_all_completed_episodes():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=100)
 
@@ -339,9 +339,9 @@ def test_sample_vmap_init_produces_batched_mc_state():
     """Vectorized initialization batches every dynamic ``Mc`` state field."""
     key = jax.random.PRNGKey(40)
 
-    config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
+    config = tabular.garnet.Config(state_size=5, action_size=2, max_eps_len=10)
     env = tabular.garnet.make(config)
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
 
     n_envs = 4
     init_key, env_key = jrd.split(key)
@@ -361,10 +361,10 @@ def test_sample_episode_count_matches_expected():
     config = tabular.gridworld.Config(
         board=["####", "#P@#", "####"],
         p_slip=0.0,
-        max_episode_len=10,
+        max_eps_len=10,
     )
     env = tabular.gridworld.make(config)
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -388,10 +388,10 @@ def test_sample_metrics_all_scalar():
     """Every field in Metrics is a scalar array."""
     key = jax.random.PRNGKey(43)
 
-    config = tabular.garnet.Config(state_size=5, action_size=2, max_episode_len=10)
+    config = tabular.garnet.Config(state_size=5, action_size=2, max_eps_len=10)
     env = tabular.garnet.make(config)
 
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
     evaluator = SampleEval(imc=imc, episode_len=20)
 

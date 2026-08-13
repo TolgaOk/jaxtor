@@ -1,4 +1,4 @@
-"""Fixed-length rollout with agent outputs at transition endpoints."""
+"""Fixed-length sequences with agent outputs at transition endpoints."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ class AgentOutput(Protocol):
 
 
 class Agent[OutputT: AgentOutput, StateT](Protocol):
-    """Inference capability required by ``LoadedRoll``."""
+    """Agent application capability required by ``LoadedRoll``."""
 
-    def infer(
+    def apply(
         self,
         obs: jax.Array,
         state: StateT,
@@ -54,42 +54,41 @@ class LoadedRoll[
 ]:
     """Collect rich agent outputs before and after each MC transition.
 
-    Agent output at a normal successor is reused as the next predecessor
-    output. At a terminal or truncated boundary, the true successor remains in
-    the trajectory and a separate output is inferred from the reset
-    observation.
+    Agent output at a normal successor is reused as the next decision. At a
+    terminal or truncated boundary, the true successor remains in the sequence
+    and a separate decision is predicted from the reset observation.
 
     Reuse is confined to the private scan carry. The returned :class:`State`
     contains no derived output, so changing its agent state cannot leave stale
-    inference behind. The final inferred predecessor state is discarded
-    because its action was not consumed; the next call infers it again from
+    agent output behind. The final decision state is discarded because its
+    action was not consumed; the next call computes it again from
     the then-current agent state.
 
     Attributes:
         agent: Agent producing a typed output that includes an action.
         mc: Open Markov-chain sampler advanced by agent actions.
-        seqlen: Number of transitions in the trajectory.
+        seq_len: Number of transitions in the sequence.
         seq_axis: Output axis carrying the temporal sequence.
         _unroll: Loop-unroll factor passed to :func:`jax.lax.scan`.
 
     Public dataclasses:
         State: Persistent Markov-chain and agent states.
-        Trajectory: Agent outputs and MC transitions aligned over T steps.
+        Sequence: Agent outputs and MC transitions aligned over T steps.
 
     Public methods:
         init: Combine initialized child states.
-        sample: Collect one fixed-length information-loaded trajectory.
+        sample: Collect one fixed-length information-loaded sequence.
     """
 
     agent: Agent[OutputT, AgentStateT]
     mc: MarkovChain[McT, McStateT]
-    seqlen: int
+    seq_len: int
     seq_axis: int = 0
     _unroll: int = 1
 
     @dataclass
     class State[McDataT, AgentDataT]:
-        """Persistent state threaded between loaded rollouts.
+        """Persistent state threaded between loaded sequences.
 
         Attributes:
             mc: State of the open Markov chain.
@@ -100,43 +99,43 @@ class LoadedRoll[
         agent: AgentDataT
 
     @dataclass
-    class Trajectory[OutputDataT, McDataT]:
-        """Time-aligned predecessor, transition, and successor pytrees.
+    class Sequence[OutputDataT, McDataT]:
+        """Time-aligned decision, transition, and successor pytrees.
 
         Attributes:
-            pre: Agent outputs whose actions produced the transitions.
+            dec: Agent outputs whose actions produced the transitions.
             mc: Markov-chain transitions produced by those actions.
-            succ: Agent outputs inferred at each true successor observation.
+            succ: Agent outputs predicted at each true successor observation.
         """
 
-        pre: OutputDataT
+        dec: OutputDataT
         mc: McDataT
         succ: OutputDataT
 
     @dataclass
     class _Carry[McDataT, AgentDataT, OutputDataT]:
-        """Scan-local state with one loaded predecessor output.
+        """Scan-local state with one loaded decision output.
 
         Attributes:
             mc: Current Markov-chain state.
-            agent_before_pre: Agent state from which ``pre`` was inferred.
-            agent_after_pre: Agent state after inferring ``pre``.
-            pre: Loaded output for the current predecessor observation.
+            agent_before_dec: Agent state from which ``dec`` was computed.
+            agent_after_dec: Agent state after computing ``dec``.
+            dec: Loaded decision for the current observation.
         """
 
         mc: McDataT
-        agent_before_pre: AgentDataT
-        agent_after_pre: AgentDataT
-        pre: OutputDataT
+        agent_before_dec: AgentDataT
+        agent_after_dec: AgentDataT
+        dec: OutputDataT
 
     @dataclass
     class _Next[McDataT, AgentDataT, OutputDataT]:
-        """Data used to choose the next loaded predecessor.
+        """Data used to choose the next loaded decision.
 
         Attributes:
             mc: Markov-chain state after the transition and possible reset.
-            agent: State after the current predecessor inference.
-            succ: Output inferred at the true successor.
+            agent: State after the current decision application.
+            succ: Output computed at the true successor.
             succ_agent: Agent state returned with ``succ``.
         """
 
@@ -147,8 +146,8 @@ class LoadedRoll[
 
     def __post_init__(self) -> None:
         """Validate the static scan configuration."""
-        if self.seqlen < 1:
-            raise ValueError("seqlen must be positive")
+        if self.seq_len < 1:
+            raise ValueError("seq_len must be positive")
         if self._unroll < 1:
             raise ValueError("_unroll must be positive")
 
@@ -164,24 +163,24 @@ class LoadedRoll[
         self,
         state: LoadedRoll.State[McStateT, AgentStateT],
     ) -> LoadedRoll._Carry[McStateT, AgentStateT, OutputT]:
-        """Infer the first predecessor and create the scan carry."""
-        pre, agent_after_pre = self.agent.infer(
+        """Predict the first decision and create the scan carry."""
+        dec, agent_after_dec = self.agent.apply(
             self.mc.observe(state.mc),
             state.agent,
         )
         return self._Carry(
             mc=state.mc,
-            agent_before_pre=state.agent,
-            agent_after_pre=agent_after_pre,
-            pre=pre,
+            agent_before_dec=state.agent,
+            agent_after_dec=agent_after_dec,
+            dec=dec,
         )
 
-    def _reset_pre(
+    def _reset_dec(
         self,
         next_data: LoadedRoll._Next[McStateT, AgentStateT, OutputT],
     ) -> tuple[OutputT, AgentStateT]:
-        """Infer the next predecessor from the possibly reset MC state."""
-        return self.agent.infer(
+        """Predict the next decision from the possibly reset MC state."""
+        return self.agent.apply(
             self.mc.observe(next_data.mc),
             next_data.agent,
         )
@@ -190,7 +189,7 @@ class LoadedRoll[
     def _reuse_succ(
         next_data: LoadedRoll._Next[McStateT, AgentStateT, OutputT],
     ) -> tuple[OutputT, AgentStateT]:
-        """Reuse the true successor as the next predecessor."""
+        """Reuse the true successor as the next decision."""
         return next_data.succ, next_data.succ_agent
 
     def _advance(
@@ -199,57 +198,57 @@ class LoadedRoll[
         unused: None,
     ) -> tuple[
         LoadedRoll._Carry[McStateT, AgentStateT, OutputT],
-        LoadedRoll.Trajectory[OutputT, McT],
+        LoadedRoll.Sequence[OutputT, McT],
     ]:
-        """Advance once and retain a valid predecessor for the next step."""
+        """Advance once and retain a valid decision for the next step."""
         del unused
-        transition, mc = self.mc.sample(carry.pre.act, carry.mc)
-        succ, succ_agent = self.agent.infer(
+        transition, mc = self.mc.sample(carry.dec.act, carry.mc)
+        succ, succ_agent = self.agent.apply(
             transition.nobs,
-            carry.agent_after_pre,
+            carry.agent_after_dec,
         )
         next_data = self._Next(
             mc=mc,
-            agent=carry.agent_after_pre,
+            agent=carry.agent_after_dec,
             succ=succ,
             succ_agent=succ_agent,
         )
         boundary = jnp.any(jnp.logical_or(transition.term, transition.trun))
-        pre, agent_after_pre = jax.lax.cond(
+        dec, agent_after_dec = jax.lax.cond(
             boundary,
-            self._reset_pre,
+            self._reset_dec,
             self._reuse_succ,
             next_data,
         )
         return (
             self._Carry(
                 mc=mc,
-                agent_before_pre=carry.agent_after_pre,
-                agent_after_pre=agent_after_pre,
-                pre=pre,
+                agent_before_dec=carry.agent_after_dec,
+                agent_after_dec=agent_after_dec,
+                dec=dec,
             ),
-            self.Trajectory(pre=carry.pre, mc=transition, succ=succ),
+            self.Sequence(dec=carry.dec, mc=transition, succ=succ),
         )
 
     def sample(
         self,
         state: LoadedRoll.State[McStateT, AgentStateT],
     ) -> tuple[
-        LoadedRoll.Trajectory[OutputT, McT],
+        LoadedRoll.Sequence[OutputT, McT],
         LoadedRoll.State[McStateT, AgentStateT],
     ]:
-        """Collect a rollout while reusing endpoint inference only locally."""
-        carry, trajectory = jax.lax.scan(
+        """Collect a sequence while reusing endpoint predictions only locally."""
+        carry, seq = jax.lax.scan(
             self._advance,
             self._start(state),
             xs=None,
-            length=self.seqlen,
+            length=self.seq_len,
             unroll=self._unroll,
         )
         if self.seq_axis != 0:
-            trajectory = jax.tree.map(
+            seq = jax.tree.map(
                 lambda x: jnp.moveaxis(x, 0, self.seq_axis),
-                trajectory,
+                seq,
             )
-        state = self.State(mc=carry.mc, agent=carry.agent_before_pre)
-        return trajectory, state
+        state = self.State(mc=carry.mc, agent=carry.agent_before_dec)
+        return seq, state

@@ -6,7 +6,7 @@ Components:
     Imc: Minimal action-only agent-MC interaction.
     Roll: Fixed-length collection from a minimal Imc.
     LoadedRoll: Fixed-length collection with agent outputs at both endpoints.
-    EpisodeStats: Completed-episode statistics from trajectories.
+    EpisodeStats: Completed-episode statistics from sequences.
     Sweep: Stochastic sweep over all (s,a) pairs.
     ExpSweep: Exact n-step propagation (backward/forward).
 """

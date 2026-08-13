@@ -22,11 +22,11 @@ def test_mc_init():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
     obs = sampler.observe(state)
@@ -39,11 +39,11 @@ def test_mc_init():
 
 
 @pytest.mark.parametrize(
-    ("max_episode_len", "message"),
-    [(0, "max_episode_len must be positive")],
+    ("max_eps_len", "message"),
+    [(0, "max_eps_len must be positive")],
 )
 def test_mc_rejects_nonpositive_static_configuration(
-    max_episode_len,
+    max_eps_len,
     message,
 ):
     """The episode limit is validated when ``Mc`` is configured."""
@@ -51,7 +51,7 @@ def test_mc_rejects_nonpositive_static_configuration(
 
     with pytest.raises(ValueError, match=message):
         Mc(
-            max_episode_len=max_episode_len,
+            max_eps_len=max_eps_len,
             env=env,
         )
 
@@ -63,11 +63,11 @@ def test_mc_single_sample():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -87,11 +87,11 @@ def test_mc_jit_compilation():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -110,11 +110,11 @@ def test_mc_consecutive_observations():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -195,7 +195,7 @@ def test_chex_mc_nonscalar_reward():
     key = jax.random.PRNGKey(0)
 
     env = NonScalarRewardEnv()
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     state = sampler.init(key, NonScalarRewardEnv.State(key=key))
 
     with pytest.raises(AssertionError):
@@ -207,7 +207,7 @@ def test_chex_mc_mismatched_obs_nobs():
     key = jax.random.PRNGKey(0)
 
     env = MismatchedObsEnv()
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     state = sampler.init(key, MismatchedObsEnv.State(key=key))
 
     with pytest.raises(AssertionError):
@@ -219,10 +219,10 @@ def test_chex_vecmc_wrong_batch_action():
     key = jax.random.PRNGKey(0)
     n_env = 4
 
-    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=50)
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_eps_len=50)
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     vec_mc = mc.VecMc(mc=sampler)
 
     env_state = env.init(key)

@@ -24,7 +24,7 @@ def test_garnet_init():
     assert state.mdp.action_size == config.action_size
     assert state.s == -1
     assert state.step == 0
-    assert state.max_episode_len == 1000
+    assert state.max_eps_len == 1000
 
     # After reset, s is a valid index
     obs, state = env.reset(reset_key, state)
@@ -262,15 +262,15 @@ def test_episode_accumulates_reward():
 # ============================================================================
 
 
-def test_truncation_at_max_episode_len():
-    """Test that truncation flag is set at max_episode_len."""
+def test_truncation_at_max_eps_len():
+    """Test that truncation flag is set at max_eps_len."""
     key = jax.random.PRNGKey(0)
     init_key, reset_key = jax.random.split(key)
 
     # Create environment with very short episode length
-    max_episode_len = 5
+    max_eps_len = 5
     config = tabular.garnet.Config(
-        state_size=10, action_size=4, max_episode_len=max_episode_len
+        state_size=10, action_size=4, max_eps_len=max_eps_len
     )
     env = tabular.garnet.make(config)
     state = env.init(init_key)
@@ -278,13 +278,13 @@ def test_truncation_at_max_episode_len():
 
     # Run until truncation
     truncated = False
-    for i in range(max_episode_len + 5):
+    for i in range(max_eps_len + 5):
         step_key, key = jax.random.split(key)
         transition, state = env.step(step_key, 0, state)
 
         # Check truncation at correct step
-        if i == max_episode_len - 1:
-            # At step max_episode_len-1, trun should be True
+        if i == max_eps_len - 1:
+            # At step max_eps_len-1, trun should be True
             assert transition.trun, f"Expected truncation at step {i}"
             truncated = True
             break
@@ -298,14 +298,14 @@ def test_truncation_at_max_episode_len():
 
 
 def test_episode_length_limit():
-    """Test that episodes respect the max_episode_len limit."""
+    """Test that episodes respect the max_eps_len limit."""
     key = jax.random.PRNGKey(0)
     init_key, reset_key = jax.random.split(key)
 
     # Create environment with very short episode length
-    max_episode_len = 5
+    max_eps_len = 5
     config = tabular.garnet.Config(
-        state_size=10, action_size=4, max_episode_len=max_episode_len
+        state_size=10, action_size=4, max_eps_len=max_eps_len
     )
     env = tabular.garnet.make(config)
     state = env.init(init_key)
@@ -322,8 +322,8 @@ def test_episode_length_limit():
         if transition.term or transition.trun:
             break
 
-    # Should have stopped at or before max_episode_len
-    assert steps_taken <= max_episode_len
+    # Should have stopped at or before max_eps_len
+    assert steps_taken <= max_eps_len
 
 
 def test_truncation_flag():
@@ -607,7 +607,7 @@ def test_jit_obs():
 
 def test_jit_full_episode():
     """Test running a full episode with JIT-compiled functions."""
-    config = tabular.garnet.Config(state_size=10, action_size=4, max_episode_len=20)
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_eps_len=20)
     env = tabular.garnet.make(config)
 
     jit_init = jax.jit(env.init)

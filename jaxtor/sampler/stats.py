@@ -1,4 +1,4 @@
-"""Completed-episode statistics from fixed-length trajectories."""
+"""Completed-episode statistics from fixed-length sequences."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import jax.numpy as jnp
 from chex import dataclass
 
 
-class EpisodeTrajectory(Protocol):
-    """Trajectory fields consumed by ``EpisodeStats``.
+class Sequence(Protocol):
+    """Sequence fields consumed by ``EpisodeStats``.
 
     Each field has the same shape and contains at least one sequence axis. A
     scalar rollout uses ``(T,)``. A vector rollout commonly uses ``(N, T)``
@@ -30,9 +30,9 @@ class EpisodeTrajectory(Protocol):
 
 @dataclass
 class EpisodeStats:
-    """Accumulate completed-episode statistics across trajectory batches.
+    """Accumulate completed-episode statistics across sequence batches.
 
-    ``seq_axis`` identifies the trajectory time axis. Every other axis in the
+    ``seq_axis`` identifies the sequence time axis. Every other axis in the
     reward and boundary arrays identifies an independent environment lane.
     Partial episodes remain in state across calls to :meth:`update`.
 
@@ -45,7 +45,7 @@ class EpisodeStats:
 
     Public methods:
         init: Initialize statistics for an environment batch shape.
-        update: Accumulate one fixed-length trajectory.
+        update: Accumulate one fixed-length sequence.
         drain: Read completed-episode metrics and clear their accumulators.
     """
 
@@ -125,18 +125,18 @@ class EpisodeStats:
 
     def update(
         self,
-        trajectory: EpisodeTrajectory,
+        seq: Sequence,
         state: EpisodeStats.State,
     ) -> EpisodeStats.State:
-        """Accumulate completed and partial episodes from ``trajectory``."""
-        rew = jnp.moveaxis(jnp.asarray(trajectory.rew), self.seq_axis, 0)
+        """Accumulate completed and partial episodes from ``seq``."""
+        rew = jnp.moveaxis(jnp.asarray(seq.rew), self.seq_axis, 0)
         term = jnp.moveaxis(
-            jnp.asarray(trajectory.term, dtype=jnp.bool_),
+            jnp.asarray(seq.term, dtype=jnp.bool_),
             self.seq_axis,
             0,
         )
         trun = jnp.moveaxis(
-            jnp.asarray(trajectory.trun, dtype=jnp.bool_),
+            jnp.asarray(seq.trun, dtype=jnp.bool_),
             self.seq_axis,
             0,
         )

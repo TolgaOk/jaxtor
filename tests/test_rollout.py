@@ -83,41 +83,41 @@ class CountingAgent:
 def make_roll(
     key: jax.Array,
     *,
-    seqlen: int,
+    seq_len: int,
 ) -> tuple[Roll, Imc.State]:
     """Build a scalar minimal rollout and its state."""
     env = CounterEnv()
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=CountingAgent(), mc=mc)
     state = imc.init(
         mc.init(key, env.init()),
         CountingAgent.State(actions=jnp.array(0, dtype=jnp.int32)),
     )
-    return Roll(imc=imc, seqlen=seqlen), state
+    return Roll(imc=imc, seq_len=seq_len), state
 
 
 def test_roll_stacks_mc_transitions_directly():
     """The MC transition pytree receives the configured sequence length."""
-    roll, state = make_roll(jax.random.key(0), seqlen=5)
+    roll, state = make_roll(jax.random.key(0), seq_len=5)
 
-    trajectory, _ = roll.sample(state)
+    seq, _ = roll.sample(state)
 
-    chex.assert_shape(trajectory.act, (5,))
-    chex.assert_shape(trajectory.obs, (5,))
-    chex.assert_shape(trajectory.rew, (5,))
-    chex.assert_shape(trajectory.nobs, (5,))
+    chex.assert_shape(seq.act, (5,))
+    chex.assert_shape(seq.obs, (5,))
+    chex.assert_shape(seq.rew, (5,))
+    chex.assert_shape(seq.nobs, (5,))
 
 
 def test_roll_exposes_normal_and_boundary_alignment():
     """Normal successors continue while terminal successors precede reset."""
-    roll, state = make_roll(jax.random.key(0), seqlen=4)
+    roll, state = make_roll(jax.random.key(0), seq_len=4)
 
-    trajectory, state = roll.sample(state)
+    seq, state = roll.sample(state)
 
-    assert jnp.array_equal(trajectory.obs, jnp.array([0, 1, 2, 0]))
-    assert jnp.array_equal(trajectory.nobs, jnp.array([1, 2, 3, 1]))
+    assert jnp.array_equal(seq.obs, jnp.array([0, 1, 2, 0]))
+    assert jnp.array_equal(seq.nobs, jnp.array([1, 2, 3, 1]))
     assert jnp.array_equal(
-        trajectory.term,
+        seq.term,
         jnp.array([False, False, True, False]),
     )
     assert state.mc.last_obs == 1
@@ -125,7 +125,7 @@ def test_roll_exposes_normal_and_boundary_alignment():
 
 def test_roll_recomputes_from_updated_agent_state_between_calls():
     """Ordinary Roll carries no derived agent output between calls."""
-    roll, state = make_roll(jax.random.key(0), seqlen=2)
+    roll, state = make_roll(jax.random.key(0), seq_len=2)
     _, state = roll.sample(state)
     state = state.replace(agent=state.agent.replace(actions=jnp.array(100)))
 
@@ -135,42 +135,42 @@ def test_roll_recomputes_from_updated_agent_state_between_calls():
 
 
 def test_roll_is_jittable():
-    """The complete minimal trajectory collection compiles under JIT."""
-    roll, state = make_roll(jax.random.key(0), seqlen=5)
+    """The complete minimal sequence collection compiles under JIT."""
+    roll, state = make_roll(jax.random.key(0), seq_len=5)
 
-    trajectory, state = jax.jit(roll.sample)(state)
+    seq, state = jax.jit(roll.sample)(state)
 
-    chex.assert_shape(trajectory.obs, (5,))
+    chex.assert_shape(seq.obs, (5,))
     assert state.agent.actions == 5
 
 
 def test_roll_moves_one_sequence_axis_consistently():
     """Vectorized rollouts place both sequences on the configured axis."""
     n_envs = 3
-    seqlen = 4
+    seq_len = 4
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
+    mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     imc = Imc(agent=CountingAgent(), mc=mc)
     state = imc.init(
         mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
         CountingAgent.State(actions=jnp.array(0, dtype=jnp.int32)),
     )
-    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+    roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
 
-    trajectory, _ = jax.jit(roll.sample)(state)
+    seq, _ = jax.jit(roll.sample)(state)
 
-    chex.assert_shape(trajectory.act, (n_envs, seqlen))
-    chex.assert_shape(trajectory.obs, (n_envs, seqlen))
-    chex.assert_shape(trajectory.rew, (n_envs, seqlen))
-    chex.assert_shape(trajectory.nobs, (n_envs, seqlen))
+    chex.assert_shape(seq.act, (n_envs, seq_len))
+    chex.assert_shape(seq.obs, (n_envs, seq_len))
+    chex.assert_shape(seq.rew, (n_envs, seq_len))
+    chex.assert_shape(seq.nobs, (n_envs, seq_len))
 
 
 def test_roll_unroll_factor_preserves_results():
-    """Changing scan unrolling does not change the trajectory."""
-    roll, state = make_roll(jax.random.key(0), seqlen=6)
+    """Changing scan unrolling does not change the sequence."""
+    roll, state = make_roll(jax.random.key(0), seq_len=6)
     expected, _ = roll.sample(state)
 
-    actual, _ = Roll(imc=roll.imc, seqlen=6, _unroll=3).sample(state)
+    actual, _ = Roll(imc=roll.imc, seq_len=6, _unroll=3).sample(state)
 
     assert all(
         bool(jnp.array_equal(left, right))

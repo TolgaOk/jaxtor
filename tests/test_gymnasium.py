@@ -56,7 +56,7 @@ def _make_env(num_envs=NUM_ENVS):
 
 
 def _make_mc(env):
-    return Mc(max_episode_len=MAX_EPISODE_LEN, env=env)
+    return Mc(max_eps_len=MAX_EPISODE_LEN, env=env)
 
 
 def _init_vec(key, env):
@@ -470,7 +470,7 @@ def test_scan_threads_runtime_token():
     key = jrd.PRNGKey(70)
     vec_mc, mc_state = _init_vec(key, env)
     actions = jnp.zeros(NUM_ENVS, dtype=jnp.int32)
-    seqlen = 24
+    seq_len = 24
 
     @jax.jit
     def sample_n(state):
@@ -478,13 +478,13 @@ def test_scan_threads_runtime_token():
             _, carry = vec_mc.sample(actions, carry)
             return carry, None
 
-        return jax.lax.scan(body, state, None, length=seqlen)[0]
+        return jax.lax.scan(body, state, None, length=seq_len)[0]
 
     mc_state = sample_n(mc_state)
 
-    assert jnp.all(mc_state.env.token == seqlen)
+    assert jnp.all(mc_state.env.token == seq_len)
     runtime = gymnasium.lookup_runtime(mc_state.env.runtime_id)
-    assert runtime.token == seqlen
+    assert runtime.token == seq_len
 
 
 def test_one_compiled_sampler_routes_multiple_runtimes():
@@ -546,15 +546,15 @@ def test_roll_eager():
     k1, k2 = jrd.split(key)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))
 
-    seqlen = 32
-    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+    seq_len = 32
+    roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
     transitions, new_state = roll.sample(imc_state)
 
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
-    assert transitions.rew.shape == (NUM_ENVS, seqlen)
-    assert transitions.act.shape == (NUM_ENVS, seqlen)
-    assert transitions.term.shape == (NUM_ENVS, seqlen)
-    assert transitions.nobs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.obs.shape == (NUM_ENVS, seq_len, OBS_DIM)
+    assert transitions.rew.shape == (NUM_ENVS, seq_len)
+    assert transitions.act.shape == (NUM_ENVS, seq_len)
+    assert transitions.term.shape == (NUM_ENVS, seq_len)
+    assert transitions.nobs.shape == (NUM_ENVS, seq_len, OBS_DIM)
 
 
 def test_roll_jit():
@@ -568,15 +568,15 @@ def test_roll_jit():
     k1, k2 = jrd.split(key)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))
 
-    seqlen = 16
-    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+    seq_len = 16
+    roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
     jit_roll = jax.jit(roll.sample)
 
     transitions, imc_state = jit_roll(imc_state)
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.obs.shape == (NUM_ENVS, seq_len, OBS_DIM)
 
     transitions, imc_state = jit_roll(imc_state)
-    assert transitions.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
+    assert transitions.obs.shape == (NUM_ENVS, seq_len, OBS_DIM)
 
 
 def test_roll_multiple_iterations_with_metrics():
@@ -590,14 +590,14 @@ def test_roll_multiple_iterations_with_metrics():
     k1, k2 = jrd.split(key)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))
 
-    roll = Roll(imc=imc, seqlen=64, seq_axis=1)
+    roll = Roll(imc=imc, seq_len=64, seq_axis=1)
     stats = EpisodeStats(seq_axis=1)
     stats_state = stats.init((NUM_ENVS,))
     jit_roll = jax.jit(roll.sample)
 
     for _ in range(10):
-        trajectory, imc_state = jit_roll(imc_state)
-        stats_state = stats.update(trajectory, stats_state)
+        seq, imc_state = jit_roll(imc_state)
+        stats_state = stats.update(seq, stats_state)
 
     metrics, _ = stats.drain(stats_state)
 
@@ -632,7 +632,7 @@ def test_eval_returns_live_runtime_state():
 def test_scalar_path_single_env():
     """Default num_envs with plain Mc works under jit without vmap."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, env=env)
+    mc = Mc(max_eps_len=500, env=env)
     key = jrd.PRNGKey(11)
 
     env_state = env.init(key)
@@ -651,7 +651,7 @@ def test_scalar_path_single_env():
 def test_scalar_path_multiple_steps():
     """Scalar path runs many steps with auto-reset."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, env=env)
+    mc = Mc(max_eps_len=500, env=env)
     key = jrd.PRNGKey(12)
 
     env_state = env.init(key)
@@ -673,7 +673,7 @@ def test_scalar_path_multiple_steps():
 def test_roll_single_env():
     """Imc + single-env Mc + Roll collects trajectories."""
     env = gymnasium.make("CartPole-v1")
-    mc = Mc(max_episode_len=500, env=env)
+    mc = Mc(max_eps_len=500, env=env)
     agent = ScalarRandomAgent()
     imc = Imc(agent=agent, mc=mc)
 
@@ -683,14 +683,14 @@ def test_roll_single_env():
     mc_state = mc.init(k2, env_state)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
 
-    seqlen = 10
-    roll = Roll(imc=imc, seqlen=seqlen)
+    seq_len = 10
+    roll = Roll(imc=imc, seq_len=seq_len)
     transitions, new_state = roll.sample(imc_state)
 
-    assert transitions.obs.shape == (seqlen, OBS_DIM)
-    assert transitions.nobs.shape == (seqlen, OBS_DIM)
-    assert transitions.rew.shape == (seqlen,)
-    assert transitions.act.shape == (seqlen,)
+    assert transitions.obs.shape == (seq_len, OBS_DIM)
+    assert transitions.nobs.shape == (seq_len, OBS_DIM)
+    assert transitions.rew.shape == (seq_len,)
+    assert transitions.act.shape == (seq_len,)
 
 
 @pytest.mark.parametrize("name, obs_shape, act_shape, continuous", ENV_CASES)
@@ -702,7 +702,7 @@ def test_scalar_component_rollout_across_envs(
 ):
     """Mc, Imc, and Roll compose under jit across scalar Gymnasium envs."""
     env = gymnasium.make(name)
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     imc = Imc(
         agent=ZeroAgent(
             obs_shape=obs_shape,
@@ -711,7 +711,7 @@ def test_scalar_component_rollout_across_envs(
         ),
         mc=mc,
     )
-    roll = Roll(imc=imc, seqlen=COMPONENT_ROLLOUT_LEN)
+    roll = Roll(imc=imc, seq_len=COMPONENT_ROLLOUT_LEN)
 
     env_key, mc_key, agent_key = jrd.split(jrd.PRNGKey(0), 3)
     mc_state = mc.init(mc_key, env.init(env_key))
@@ -739,7 +739,7 @@ def test_vector_component_rollout_across_envs(
 ):
     """VecMc, Imc, and Roll compose under jit across vector Gymnasium envs."""
     env = gymnasium.make(name, num_envs=COMPONENT_NUM_ENVS)
-    mc = Mc(max_episode_len=1000, env=env)
+    mc = Mc(max_eps_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     imc = Imc(
         agent=ZeroAgent(
@@ -751,7 +751,7 @@ def test_vector_component_rollout_across_envs(
     )
     roll = Roll(
         imc=imc,
-        seqlen=COMPONENT_ROLLOUT_LEN,
+        seq_len=COMPONENT_ROLLOUT_LEN,
         seq_axis=1,
     )
 
@@ -777,14 +777,14 @@ def test_vector_component_rollout_across_envs(
 
 
 # =============================================================================
-# Trajectory Reproducibility Tests
+# Sequence reproducibility tests
 # =============================================================================
 
 
-def test_trajectory_reproducible_with_same_key():
-    """Same key on fresh envs produces identical trajectories."""
+def test_sequence_reproducible_with_same_key():
+    """The same key on fresh environments produces identical sequences."""
     seed = jrd.PRNGKey(50)
-    seqlen = 16
+    seq_len = 16
 
     def _collect(seed):
         env = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
@@ -799,7 +799,7 @@ def test_trajectory_reproducible_with_same_key():
         mc_state = vec_mc.init(keys, env_state)
         imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
 
-        roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+        roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
         transitions, imc_state = roll.sample(imc_state)
         env.close(imc_state.mc.env)
         return transitions
@@ -807,17 +807,17 @@ def test_trajectory_reproducible_with_same_key():
     t1 = _collect(seed)
     t2 = _collect(seed)
 
-    assert jnp.array_equal(t1.mc.obs, t2.mc.obs)
+    assert jnp.array_equal(t1.obs, t2.obs)
     assert jnp.array_equal(t1.act, t2.act)
-    assert jnp.array_equal(t1.mc.rew, t2.mc.rew)
-    assert jnp.array_equal(t1.mc.nobs, t2.mc.nobs)
-    assert jnp.array_equal(t1.mc.term, t2.mc.term)
-    assert jnp.array_equal(t1.mc.trun, t2.mc.trun)
+    assert jnp.array_equal(t1.rew, t2.rew)
+    assert jnp.array_equal(t1.nobs, t2.nobs)
+    assert jnp.array_equal(t1.term, t2.term)
+    assert jnp.array_equal(t1.trun, t2.trun)
 
 
-def test_trajectory_differs_with_different_key():
-    """Different keys on fresh envs produce different trajectories."""
-    seqlen = 16
+def test_sequence_differs_with_different_key():
+    """Different keys on fresh environments produce different sequences."""
+    seq_len = 16
 
     def _collect(seed):
         env = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
@@ -832,7 +832,7 @@ def test_trajectory_differs_with_different_key():
         mc_state = vec_mc.init(keys, env_state)
         imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
 
-        roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+        roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
         transitions, imc_state = roll.sample(imc_state)
         env.close(imc_state.mc.env)
         return transitions
@@ -840,7 +840,7 @@ def test_trajectory_differs_with_different_key():
     t1 = _collect(jrd.PRNGKey(0))
     t2 = _collect(jrd.PRNGKey(999))
 
-    assert not jnp.array_equal(t1.mc.obs, t2.mc.obs)
+    assert not jnp.array_equal(t1.obs, t2.obs)
 
 
 # =============================================================================

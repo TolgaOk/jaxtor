@@ -1,4 +1,4 @@
-"""Fixed-length trajectory collection from a step sampler."""
+"""Fixed-length sequence collection from a step sampler."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class Roll[SampleT, StateT]:
 
     Attributes:
         imc: Stateful single-step sampler.
-        seqlen: Number of transitions in the trajectory.
+        seq_len: Number of transitions in the sequence.
         seq_axis: Output axis carrying the temporal sequence.
         _unroll: Loop-unroll factor passed to :func:`jax.lax.scan`.
 
@@ -30,14 +30,14 @@ class Roll[SampleT, StateT]:
     """
 
     imc: Sampler[SampleT, StateT]
-    seqlen: int
+    seq_len: int
     seq_axis: int = 0
     _unroll: int = 1
 
     def __post_init__(self) -> None:
         """Validate the static scan configuration."""
-        if self.seqlen < 1:
-            raise ValueError("seqlen must be positive")
+        if self.seq_len < 1:
+            raise ValueError("seq_len must be positive")
         if self._unroll < 1:
             raise ValueError("_unroll must be positive")
 
@@ -55,12 +55,12 @@ class Roll[SampleT, StateT]:
         self,
         state: StateT,
     ) -> tuple[SampleT, StateT]:
-        """Stack ``seqlen`` samples and advance the sampler state."""
+        """Stack ``seq_len`` samples and advance the sampler state."""
         state, samples = jax.lax.scan(
             self._advance,
             state,
             xs=None,
-            length=self.seqlen,
+            length=self.seq_len,
             unroll=self._unroll,
         )
         if self.seq_axis != 0:

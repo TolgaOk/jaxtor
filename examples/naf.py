@@ -66,8 +66,8 @@ class Config:
     env_id: str = "Hopper-v5"
     n_iters: int = 500
     n_envs: int = 16
-    seqlen: int = 2048
-    max_episode_len: int = 1000
+    seq_len: int = 2048
+    max_eps_len: int = 1000
     seed: int = 0
 
     v_hiddens: tuple[int, ...] = (128, 128)
@@ -85,7 +85,7 @@ class Config:
     noise_scale: float = 0.1
 
     n_epochs: int = 10
-    n_minibatches: int = 32
+    n_batches: int = 32
 
     normalize_obs: bool = True
     normalize_reward: bool = True
@@ -252,47 +252,47 @@ def train_step(
     """One NAF iteration: collect rollout, compute Q(λ) targets, train Q."""
     # 1. Collect rollout
     imc_state = roll.imc.init(state.mc, state.agent)
-    trajectory, imc_state = roll.sample(imc_state)
-    stats_state = stats.update(trajectory, state.stats)
+    seq, imc_state = roll.sample(imc_state)
+    stats_state = stats.update(seq, state.stats)
     sam_metrics, stats_state = stats.drain(stats_state)
     state = state.replace(
         mc=imc_state.mc,
         agent=imc_state.agent,
         stats=stats_state,
     )
-    dones = jnp.logical_or(trajectory.term, trajectory.trun)
+    dones = jnp.logical_or(seq.term, seq.trun)
 
     # 2. Obs normalization
     if agent.obs_norm is not None:
         obs_stats = agent.obs_norm.update(
-            trajectory.obs.reshape(-1, trajectory.obs.shape[-1]),
+            seq.obs.reshape(-1, seq.obs.shape[-1]),
             state.agent.obs_stats,
         )
         state = state.replace(agent=state.agent.replace(obs_stats=obs_stats))
-        obs_n = agent.obs_norm.normalize(trajectory.obs, state.agent.obs_stats)
+        obs_n = agent.obs_norm.normalize(seq.obs, state.agent.obs_stats)
         nobs_n = agent.obs_norm.normalize(
-            trajectory.nobs,
+            seq.nobs,
             state.agent.obs_stats,
         )
     else:
-        obs_n, nobs_n = trajectory.obs, trajectory.nobs
+        obs_n, nobs_n = seq.obs, seq.nobs
 
     # 3. Reward normalization
     if cfg.normalize_reward:
         rewards, rew_state = rew_norm.update(
-            trajectory.rew,
+            seq.rew,
             dones,
             state.rew_norm,
         )
         state = state.replace(rew_norm=rew_state)
     else:
-        rewards = trajectory.rew
+        rewards = seq.rew
 
     # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
-    discount_t = cfg.gamma * (1.0 - trajectory.term.astype(jnp.float32))
+    discount_t = cfg.gamma * (1.0 - seq.term.astype(jnp.float32))
     v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
     q_t = jax.vmap(jax.vmap(lambda o, a: agent.q_val(o, a, state.agent)))(
-        obs_n[:, 1:], trajectory.act[:, 1:]
+        obs_n[:, 1:], seq.act[:, 1:]
     )
     c_t = cfg.trace_lambda * (1.0 - dones[:, :-1].astype(jnp.float32))
 
@@ -303,11 +303,11 @@ def train_step(
     )(q_t, v_t, rewards, discount_t, c_t)
 
     # 5. Flatten batch
-    batch_size = cfg.n_envs * cfg.seqlen
-    mb_size = batch_size // cfg.n_minibatches
+    batch_size = cfg.n_envs * cfg.seq_len
+    mb_size = batch_size // cfg.n_batches
     batch = jax.tree.map(
         lambda x: x.reshape(batch_size, *x.shape[2:]),
-        Batch(obs=obs_n, act=trajectory.act, ret=targets),
+        Batch(obs=obs_n, act=seq.act, ret=targets),
     )
 
     # 6. Epoch loop: shuffle and minibatch SGD over fixed targets
@@ -342,7 +342,7 @@ def train_step(
                 opt=opt_state,
             ), info
 
-        starts = jnp.arange(cfg.n_minibatches) * mb_size
+        starts = jnp.arange(cfg.n_batches) * mb_size
         state, infos = jax.lax.scan(minibatch_step, state, starts)
         return state, infos
 
@@ -351,8 +351,8 @@ def train_step(
     infos["sam_rew"] = sam_metrics.avg_eps_rew
 
     # Diagnostics
-    infos["act_mean"] = jnp.mean(jnp.abs(trajectory.act))
-    infos["act_max"] = jnp.max(jnp.abs(trajectory.act))
+    infos["act_mean"] = jnp.mean(jnp.abs(seq.act))
+    infos["act_max"] = jnp.max(jnp.abs(seq.act))
     mu_vals = jax.vmap(jax.vmap(state.agent.mu_net))(obs_n)
     infos["mu_mean"] = jnp.mean(jnp.abs(mu_vals))
     infos["mu_max"] = jnp.max(jnp.abs(mu_vals))
@@ -362,7 +362,7 @@ def train_step(
     infos["p_mean"] = jnp.mean(p_vals)
     infos["ret_mean"] = jnp.mean(targets)
     infos["ret_std"] = jnp.std(targets)
-    infos["rew_raw_mean"] = jnp.mean(trajectory.rew)
+    infos["rew_raw_mean"] = jnp.mean(seq.rew)
     infos["rew_norm_mean"] = jnp.mean(rewards)
     return state, infos
 
@@ -376,14 +376,14 @@ def _make_env(cfg: Config, num_envs: int):
     """Build the rollout env from the configured backend.
 
     ``gymnasium`` works for any env; ``envpool`` is fast CPU MuJoCo (its
-    ``max_episode_steps`` is aligned to ``max_episode_len`` so its truncation
+    ``max_episode_steps`` is aligned to ``max_eps_len`` so its truncation
     matches ``Mc``'s).
     """
     if cfg.env_backend == "envpool":
         from jaxtor.env import envpool
 
         return envpool.make(
-            cfg.env_id, num_envs=num_envs, max_episode_steps=cfg.max_episode_len
+            cfg.env_id, num_envs=num_envs, max_episode_steps=cfg.max_eps_len
         )
     return gymnasium.make(cfg.env_id, num_envs=num_envs, async_envs=cfg.async_envs)
 
@@ -398,7 +398,7 @@ def train(cfg: Config) -> State:
     (obs_dim,) = env.obs_shape
     (act_dim,) = env.act_shape
 
-    total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_minibatches
+    total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_batches
     if cfg.lr_schedule == "linear":
         lr = optax.linear_schedule(cfg.lr, 0.0, total_updates)
     else:
@@ -420,12 +420,12 @@ def train(cfg: Config) -> State:
 
     train_mc = VecMc(
         mc=Mc(
-            max_episode_len=cfg.max_episode_len,
+            max_eps_len=cfg.max_eps_len,
             env=env,
         )
     )
     roll = Roll(
-        seqlen=cfg.seqlen,
+        seq_len=cfg.seq_len,
         seq_axis=1,
         imc=Imc(agent=agent, mc=train_mc),
     )
@@ -433,12 +433,12 @@ def train(cfg: Config) -> State:
 
     eval_mc = VecMc(
         mc=Mc(
-            max_episode_len=cfg.max_episode_len,
+            max_eps_len=cfg.max_eps_len,
             env=eval_env,
         )
     )
     evaluator = Evaluator(
-        episode_len=cfg.max_episode_len,
+        episode_len=cfg.max_eps_len,
         imc=Imc(agent=eval_agent, mc=eval_mc),
     )
 
@@ -527,7 +527,7 @@ def train(cfg: Config) -> State:
                     state.agent.replace(key=eval_key),
                 )
             )
-            steps = (i + 1) * cfg.n_envs * cfg.seqlen
+            steps = (i + 1) * cfg.n_envs * cfg.seq_len
             print(
                 f"  iter {i + 1:4d}  q_loss={float(metrics['q_loss']):.4f}"
                 f"  sam_rew={float(metrics['sam_rew']):.1f}"

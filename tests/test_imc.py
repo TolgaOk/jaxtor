@@ -88,7 +88,7 @@ def make_imc_state(
 ) -> tuple[Imc, Imc.State]:
     """Build a scalar minimal IMC and its state."""
     env = CounterEnv()
-    mc = Mc(max_episode_len=10, env=env)
+    mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=CountingAgent(), mc=mc)
     return imc, imc.init(
         mc.init(key, env.init()),
@@ -152,7 +152,7 @@ def test_vec_mc_preserves_action_batch_axes():
     """A batched action agent composes directly with ``VecMc``."""
     n_envs = 3
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
+    mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     imc = Imc(agent=CountingAgent(), mc=mc)
     state = imc.init(
         mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),

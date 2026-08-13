@@ -113,7 +113,7 @@ agent = Agent(epsilon=cfg.epsilon)
 imc = Imc(
     agent=agent,
     mc=Mc(
-        max_episode_len=env.config.max_episode_len,
+        max_eps_len=env.config.max_eps_len,
         env=env,
     ),
 )

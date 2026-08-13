@@ -1,4 +1,4 @@
-"""Tests for information-loaded rollout collection."""
+"""Tests for information-loaded sequence collection."""
 
 import chex
 import jax
@@ -64,10 +64,10 @@ class RichAgent:
 
     @dataclass
     class State:
-        """Value offset and number of committed inferences."""
+        """Value offset and number of committed calls."""
 
         offset: jax.Array
-        inferences: jax.Array
+        calls: jax.Array
 
     @dataclass
     class Output:
@@ -78,112 +78,112 @@ class RichAgent:
         value: jax.Array
         token: jax.Array
 
-    def infer(
+    def apply(
         self,
         obs: jax.Array,
         state: State,
     ) -> tuple[Output, State]:
-        """Infer rich data and advance the functional inference counter."""
+        """Predict rich data and advance the functional call counter."""
         value = obs.astype(jnp.float32) + state.offset
         output = self.Output(
             act=jnp.zeros_like(obs, dtype=jnp.int32),
             log_mu=-obs.astype(jnp.float32),
             value=value,
-            token=jnp.zeros_like(value) + state.inferences,
+            token=jnp.zeros_like(value) + state.calls,
         )
         return output, state.replace(  # type: ignore[reportAttributeAccessIssue]
-            inferences=state.inferences + 1
+            calls=state.calls + 1
         )
 
 
 def make_loaded_roll(
     key: jax.Array,
     *,
-    seqlen: int,
+    seq_len: int,
 ) -> tuple[LoadedRoll, LoadedRoll.State]:
-    """Build a scalar loaded rollout and its persistent state."""
+    """Build a scalar loaded sequence component and its persistent state."""
     env = CounterEnv()
-    mc = Mc(max_episode_len=10, env=env)
-    rollout = LoadedRoll(agent=RichAgent(), mc=mc, seqlen=seqlen)
-    state = rollout.init(
+    mc = Mc(max_eps_len=10, env=env)
+    roll = LoadedRoll(agent=RichAgent(), mc=mc, seq_len=seq_len)
+    state = roll.init(
         mc.init(key, env.init()),
         RichAgent.State(
             offset=jnp.array(10.0),
-            inferences=jnp.array(0, dtype=jnp.int32),
+            calls=jnp.array(0, dtype=jnp.int32),
         ),
     )
-    return rollout, state
+    return roll, state
 
 
 def test_loaded_roll_aligns_rich_outputs_with_mc_transitions():
-    """Predecessor and true-successor outputs align around every MC step."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=2)
+    """Decision and true-successor outputs align around every MC step."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=2)
 
-    trajectory, state = rollout.sample(state)
+    seq, state = roll.sample(state)
 
-    assert jnp.array_equal(trajectory.pre.value, jnp.array([10.0, 11.0]))
-    assert jnp.array_equal(trajectory.mc.obs, jnp.array([0, 1]))
-    assert jnp.array_equal(trajectory.mc.nobs, jnp.array([1, 2]))
-    assert jnp.array_equal(trajectory.succ.value, jnp.array([11.0, 12.0]))
-    assert jnp.array_equal(trajectory.pre.act, trajectory.mc.act)
-    assert state.agent.inferences == 2
-
-
-def test_loaded_roll_reuses_normal_successors_inside_one_rollout():
-    """A normal successor becomes the exact next predecessor output."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=2)
-
-    trajectory, _ = rollout.sample(state)
-
-    assert trajectory.succ.value[0] == trajectory.pre.value[1]
-    assert trajectory.succ.log_mu[0] == trajectory.pre.log_mu[1]
-    assert trajectory.succ.token[0] == trajectory.pre.token[1]
+    assert jnp.array_equal(seq.dec.value, jnp.array([10.0, 11.0]))
+    assert jnp.array_equal(seq.mc.obs, jnp.array([0, 1]))
+    assert jnp.array_equal(seq.mc.nobs, jnp.array([1, 2]))
+    assert jnp.array_equal(seq.succ.value, jnp.array([11.0, 12.0]))
+    assert jnp.array_equal(seq.dec.act, seq.mc.act)
+    assert state.agent.calls == 2
 
 
-def test_loaded_roll_separates_true_successor_from_reset_predecessor():
-    """A boundary retains terminal inference and loads reset inference next."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=4)
+def test_loaded_roll_reuses_normal_successors_inside_one_sequence():
+    """A normal successor becomes the exact next decision."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=2)
 
-    trajectory, state = rollout.sample(state)
+    seq, _ = roll.sample(state)
 
-    assert jnp.array_equal(trajectory.mc.obs, jnp.array([0, 1, 2, 0]))
-    assert trajectory.succ.value[2] == 13
-    assert trajectory.pre.value[3] == 10
-    assert state.agent.inferences == 4
+    assert seq.succ.value[0] == seq.dec.value[1]
+    assert seq.succ.log_mu[0] == seq.dec.log_mu[1]
+    assert seq.succ.token[0] == seq.dec.token[1]
+
+
+def test_loaded_roll_separates_true_successor_from_reset_decision():
+    """A boundary retains terminal output and loads reset output next."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=4)
+
+    seq, state = roll.sample(state)
+
+    assert jnp.array_equal(seq.mc.obs, jnp.array([0, 1, 2, 0]))
+    assert seq.succ.value[2] == 13
+    assert seq.dec.value[3] == 10
+    assert state.agent.calls == 4
 
 
 def test_loaded_roll_does_not_persist_outputs_between_calls():
-    """The next call infers its first predecessor from updated agent state."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=2)
-    _, state = rollout.sample(state)
+    """The next call recomputes its first decision from updated agent state."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=2)
+    _, state = roll.sample(state)
     state = state.replace(  # type: ignore[reportAttributeAccessIssue]
         agent=state.agent.replace(offset=jnp.array(100.0))
     )
 
-    trajectory, _ = rollout.sample(state)
+    seq, _ = roll.sample(state)
 
-    assert trajectory.pre.value[0] == 102
-    assert not hasattr(state, "pre")
+    assert seq.dec.value[0] == 102
+    assert not hasattr(state, "dec")
 
 
 def test_loaded_roll_is_jittable_and_tree_compatible():
-    """Loaded trajectory collection remains a regular JAX pytree under JIT."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=4)
+    """A loaded sequence remains a regular JAX pytree under JIT."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=4)
 
-    trajectory, state = jax.jit(rollout.sample)(state)
-    copied = jax.tree.map(lambda leaf: leaf, trajectory)
+    seq, state = jax.jit(roll.sample)(state)
+    copied = jax.tree.map(lambda leaf: leaf, seq)
 
-    chex.assert_shape(trajectory.pre.value, (4,))
-    chex.assert_shape(trajectory.succ.value, (4,))
-    assert jax.tree.structure(copied) == jax.tree.structure(trajectory)
-    assert state.agent.inferences == 4
+    chex.assert_shape(seq.dec.value, (4,))
+    chex.assert_shape(seq.succ.value, (4,))
+    assert jax.tree.structure(copied) == jax.tree.structure(seq)
+    assert state.agent.calls == 4
 
 
 def test_loaded_roll_handles_mixed_vector_boundaries():
-    """Only reset lanes differ between true successors and next predecessors."""
+    """Only reset lanes differ between true successors and next decisions."""
     n_envs = 3
     env = CounterEnv()
-    mc = VecMc(mc=Mc(max_episode_len=10, env=env))
+    mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     mc_state = mc.init(jax.random.split(jax.random.key(0), n_envs), env.init())
     obs = jnp.array([0, 2, 1], dtype=jnp.int32)
     mc_state = mc_state.replace(  # type: ignore[reportAttributeAccessIssue]
@@ -192,28 +192,28 @@ def test_loaded_roll_handles_mixed_vector_boundaries():
         ),
         last_obs=obs,
     )
-    rollout = LoadedRoll(
+    roll = LoadedRoll(
         agent=RichAgent(),
         mc=mc,
-        seqlen=2,
+        seq_len=2,
         seq_axis=1,
     )
-    state = rollout.init(
+    state = roll.init(
         mc_state,
-        RichAgent.State(offset=jnp.array(10.0), inferences=jnp.array(0)),
+        RichAgent.State(offset=jnp.array(10.0), calls=jnp.array(0)),
     )
 
-    trajectory, _ = jax.jit(rollout.sample)(state)
+    seq, _ = jax.jit(roll.sample)(state)
 
-    chex.assert_shape(trajectory.pre.value, (n_envs, 2))
-    chex.assert_shape(trajectory.succ.value, (n_envs, 2))
-    assert jnp.array_equal(trajectory.succ.value[:, 0], jnp.array([11, 13, 12]))
-    assert jnp.array_equal(trajectory.pre.value[:, 1], jnp.array([11, 10, 12]))
+    chex.assert_shape(seq.dec.value, (n_envs, 2))
+    chex.assert_shape(seq.succ.value, (n_envs, 2))
+    assert jnp.array_equal(seq.succ.value[:, 0], jnp.array([11, 13, 12]))
+    assert jnp.array_equal(seq.dec.value[:, 1], jnp.array([11, 10, 12]))
 
 
 def test_nested_vmap_preserves_loaded_roll_structure():
-    """A scalar loaded rollout supports more than one mapped leading axis."""
-    rollout, state = make_loaded_roll(jax.random.key(0), seqlen=3)
+    """A scalar loaded sequence supports more than one mapped leading axis."""
+    roll, state = make_loaded_roll(jax.random.key(0), seq_len=3)
     state = jax.tree.map(
         lambda leaf: jnp.broadcast_to(
             jnp.asarray(leaf),
@@ -222,9 +222,9 @@ def test_nested_vmap_preserves_loaded_roll_structure():
         state,
     )
 
-    trajectory, state = jax.jit(jax.vmap(jax.vmap(rollout.sample)))(state)
+    seq, state = jax.jit(jax.vmap(jax.vmap(roll.sample)))(state)
 
-    chex.assert_shape(trajectory.pre.value, (2, 3, 3))
-    chex.assert_shape(trajectory.mc.nobs, (2, 3, 3))
-    chex.assert_shape(trajectory.succ.value, (2, 3, 3))
-    chex.assert_shape(state.agent.inferences, (2, 3))
+    chex.assert_shape(seq.dec.value, (2, 3, 3))
+    chex.assert_shape(seq.mc.nobs, (2, 3, 3))
+    chex.assert_shape(seq.succ.value, (2, 3, 3))
+    chex.assert_shape(state.agent.calls, (2, 3))

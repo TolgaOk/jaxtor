@@ -1,7 +1,7 @@
 """Minimal agent-induced Markov-chain sampling.
 
 ``Imc`` asks an agent for one action and returns the transition produced by an
-open Markov chain. Rich agent inference belongs to ``LoadedRoll``.
+open Markov chain. Rich agent predictions belong to ``LoadedRoll``.
 """
 
 from __future__ import annotations

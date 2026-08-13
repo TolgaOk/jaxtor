@@ -53,7 +53,7 @@ def _make_env(num_envs=NUM_ENVS, **kwargs):
 def _init_vec(key, env, axis_size=None, max_len=MAX_EPISODE_LEN):
     """Init env + mc + vec_mc over ``axis_size`` envs; return (vec_mc, mc_state)."""
     axis_size = env.num_envs if axis_size is None else axis_size
-    vec_mc = VecMc(mc=Mc(max_episode_len=max_len, env=env))
+    vec_mc = VecMc(mc=Mc(max_eps_len=max_len, env=env))
     env_state = env.init(key)
     return vec_mc, vec_mc.init(jrd.split(key, axis_size), env_state)
 
@@ -208,7 +208,7 @@ def test_vecmc_consecutive_observations_match():
 def test_scalar_path_single_env():
     """num_envs=1 works through plain Mc without vmap."""
     env = _make_env(1)
-    mc = Mc(max_episode_len=MAX_EPISODE_LEN, env=env)
+    mc = Mc(max_eps_len=MAX_EPISODE_LEN, env=env)
     key = jrd.PRNGKey(11)
 
     mc_state = mc.init(key, env.init(key))
@@ -336,13 +336,13 @@ def test_roll_chain_jit():
     imc = Imc(agent=RandomAgent(), mc=vec_mc)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=jrd.split(key)[1]))
 
-    seqlen = 16
-    roll = Roll(imc=imc, seqlen=seqlen, seq_axis=1)
+    seq_len = 16
+    roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)
     jit_roll = jax.jit(roll.sample)
 
-    trajectory, imc_state = jit_roll(imc_state)
-    assert trajectory.obs.shape == (NUM_ENVS, seqlen, OBS_DIM)
-    assert trajectory.act.shape == (NUM_ENVS, seqlen, ACT_DIM)
+    seq, imc_state = jit_roll(imc_state)
+    assert seq.obs.shape == (NUM_ENVS, seq_len, OBS_DIM)
+    assert seq.act.shape == (NUM_ENVS, seq_len, ACT_DIM)
 
-    trajectory, imc_state = jit_roll(imc_state)
-    assert jnp.all(jnp.isfinite(trajectory.rew))
+    seq, imc_state = jit_roll(imc_state)
+    assert jnp.all(jnp.isfinite(seq.rew))
