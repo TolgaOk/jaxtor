@@ -103,7 +103,7 @@ class LoadedRoll[
         """Time-aligned decision, transition, and successor pytrees.
 
         Attributes:
-            dec: Agent outputs whose actions produced the transitions.
+            dec: Agent decisions whose actions produced the transitions.
             mc: Markov-chain transitions produced by those actions.
             succ: Agent outputs predicted at each true successor observation.
         """
@@ -114,7 +114,7 @@ class LoadedRoll[
 
     @dataclass
     class _Carry[McDataT, AgentDataT, OutputDataT]:
-        """Scan-local state with one loaded decision output.
+        """Scan-local state with one loaded decision.
 
         Attributes:
             mc: Current Markov-chain state.

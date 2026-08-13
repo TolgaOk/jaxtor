@@ -1,5 +1,7 @@
 """Tests for information-loaded sequence collection."""
 
+from dataclasses import replace
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -91,9 +93,7 @@ class RichAgent:
             value=value,
             token=jnp.zeros_like(value) + state.calls,
         )
-        return output, state.replace(  # type: ignore[reportAttributeAccessIssue]
-            calls=state.calls + 1
-        )
+        return output, replace(state, calls=state.calls + 1)
 
 
 def make_loaded_roll(
@@ -156,8 +156,9 @@ def test_loaded_roll_does_not_persist_outputs_between_calls():
     """The next call recomputes its first decision from updated agent state."""
     roll, state = make_loaded_roll(jax.random.key(0), seq_len=2)
     _, state = roll.sample(state)
-    state = state.replace(  # type: ignore[reportAttributeAccessIssue]
-        agent=state.agent.replace(offset=jnp.array(100.0))
+    state = replace(
+        state,
+        agent=replace(state.agent, offset=jnp.array(100.0)),
     )
 
     seq, _ = roll.sample(state)
@@ -186,10 +187,9 @@ def test_loaded_roll_handles_mixed_vector_boundaries():
     mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     mc_state = mc.init(jax.random.split(jax.random.key(0), n_envs), env.init())
     obs = jnp.array([0, 2, 1], dtype=jnp.int32)
-    mc_state = mc_state.replace(  # type: ignore[reportAttributeAccessIssue]
-        env=mc_state.env.replace(  # type: ignore[reportAttributeAccessIssue]
-            count=obs
-        ),
+    mc_state = replace(
+        mc_state,
+        env=replace(mc_state.env, count=obs),
         last_obs=obs,
     )
     roll = LoadedRoll(

@@ -1,5 +1,7 @@
 """Tests for minimal agent-induced Markov-chain sampling."""
 
+from dataclasses import replace
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -76,9 +78,7 @@ class CountingAgent:
     ) -> tuple[jax.Array, State]:
         """Return one raw action and advance the selection count."""
         act = obs.astype(jnp.int32) + state.offset
-        return act, state.replace(  # type: ignore[reportAttributeAccessIssue]
-            actions=state.actions + 1
-        )
+        return act, replace(state, actions=state.actions + 1)
 
 
 def make_imc_state(
@@ -127,9 +127,7 @@ def test_boundary_is_owned_only_by_mc():
 def test_changed_agent_state_affects_the_next_action_immediately():
     """Replacing agent state cannot leave a stale action cache."""
     imc, state = make_imc_state(jax.random.key(0))
-    state = state.replace(  # type: ignore[reportAttributeAccessIssue]
-        agent=state.agent.replace(offset=jnp.array(7))
-    )
+    state = replace(state, agent=replace(state.agent, offset=jnp.array(7)))
 
     transition, _ = imc.sample(state)
 

@@ -1,5 +1,7 @@
 """Tests for fixed-length collection from a minimal IMC."""
 
+from dataclasses import replace
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -75,9 +77,7 @@ class CountingAgent:
     ) -> tuple[jax.Array, State]:
         """Return a zero action matching the observation batch shape."""
         act = jnp.zeros_like(obs, dtype=jnp.int32)
-        return act, state.replace(  # type: ignore[reportAttributeAccessIssue]
-            actions=state.actions + 1
-        )
+        return act, replace(state, actions=state.actions + 1)
 
 
 def make_roll(
@@ -127,7 +127,7 @@ def test_roll_recomputes_from_updated_agent_state_between_calls():
     """Ordinary Roll carries no derived agent output between calls."""
     roll, state = make_roll(jax.random.key(0), seq_len=2)
     _, state = roll.sample(state)
-    state = state.replace(agent=state.agent.replace(actions=jnp.array(100)))
+    state = replace(state, agent=replace(state.agent, actions=jnp.array(100)))
 
     _, state = roll.sample(state)
 

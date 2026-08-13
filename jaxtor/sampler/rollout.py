@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -15,13 +15,16 @@ class Sampler[SampleT, StateT](Protocol):
     def sample(self, state: StateT) -> tuple[SampleT, StateT]: ...
 
 
+ImcT = TypeVar("ImcT", covariant=True)
+
+
 @dataclass
-class Roll[SampleT, StateT]:
+class Roll(Generic[ImcT]):
     """Stack samples from a stateful sampler along one sequence axis.
 
     Attributes:
         imc: Stateful single-step sampler.
-        seq_len: Number of transitions in the sequence.
+        seq_len: Number of samples in the sequence.
         seq_axis: Output axis carrying the temporal sequence.
         _unroll: Loop-unroll factor passed to :func:`jax.lax.scan`.
 
@@ -29,7 +32,7 @@ class Roll[SampleT, StateT]:
         sample: Stack a fixed number of samples and advance child state.
     """
 
-    imc: Sampler[SampleT, StateT]
+    imc: ImcT
     seq_len: int
     seq_axis: int = 0
     _unroll: int = 1
@@ -41,8 +44,8 @@ class Roll[SampleT, StateT]:
         if self._unroll < 1:
             raise ValueError("_unroll must be positive")
 
-    def _advance(
-        self,
+    def _advance[SampleT, StateT](
+        self: Roll[Sampler[SampleT, StateT]],
         state: StateT,
         unused: None,
     ) -> tuple[StateT, SampleT]:
@@ -51,8 +54,8 @@ class Roll[SampleT, StateT]:
         sample, state = self.imc.sample(state)
         return state, sample
 
-    def sample(
-        self,
+    def sample[SampleT, StateT](
+        self: Roll[Sampler[SampleT, StateT]],
         state: StateT,
     ) -> tuple[SampleT, StateT]:
         """Stack ``seq_len`` samples and advance the sampler state."""

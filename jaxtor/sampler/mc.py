@@ -6,6 +6,7 @@ same interface to a batch of independent environment states.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Protocol, cast
 
 import chex
@@ -192,7 +193,8 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         """Reset after a terminal or truncated transition."""
         state = advance.state
         obs, env = self.env.reset(advance.reset_key, advance.env)
-        return state.replace(  # type: ignore[reportAttributeAccessIssue]
+        return replace(
+            state,
             key=advance.key,
             env=env,
             last_obs=jnp.asarray(obs),
@@ -206,7 +208,8 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         """Continue an unfinished episode from its true next observation."""
         state = advance.state
         transition = advance.transition
-        return state.replace(  # type: ignore[reportAttributeAccessIssue]
+        return replace(
+            state,
             key=advance.key,
             env=advance.env,
             last_obs=transition.nobs,

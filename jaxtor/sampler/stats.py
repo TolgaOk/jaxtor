@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Protocol
 
 import chex
@@ -14,7 +15,7 @@ class Sequence(Protocol):
     """Sequence fields consumed by ``EpisodeStats``.
 
     Each field has the same shape and contains at least one sequence axis. A
-    scalar rollout uses ``(T,)``. A vector rollout commonly uses ``(N, T)``
+    scalar sequence uses ``(T,)``. A vector sequence commonly uses ``(N, T)``
     with ``EpisodeStats(seq_axis=1)``.
 
     Attributes:
@@ -114,7 +115,8 @@ class EpisodeStats:
         eps_len = state.eps_len + 1
         completed_rew = jnp.where(step.done, eps_rew, 0)
         completed_len = jnp.where(step.done, eps_len, 0)
-        state = state.replace(  # type: ignore[reportAttributeAccessIssue]
+        state = replace(
+            state,
             eps_rew=jnp.where(step.done, 0, eps_rew),
             eps_len=jnp.where(step.done, 0, eps_len),
             sum_eps_rew=state.sum_eps_rew + jnp.sum(completed_rew),
@@ -163,7 +165,8 @@ class EpisodeStats:
             avg_eps_len=jnp.where(has_episodes, state.sum_eps_len / count, nan),
             n_episodes=state.n_episodes,
         )
-        state = state.replace(  # type: ignore[reportAttributeAccessIssue]
+        state = replace(
+            state,
             sum_eps_rew=jnp.zeros_like(state.sum_eps_rew),
             sum_eps_len=jnp.zeros_like(state.sum_eps_len),
             n_episodes=jnp.zeros_like(state.n_episodes),

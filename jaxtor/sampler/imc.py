@@ -6,7 +6,7 @@ open Markov chain. Rich agent predictions belong to ``LoadedRoll``.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 import jax
 from chex import dataclass
@@ -34,8 +34,12 @@ class Agent[StateT](Protocol):
     ) -> tuple[jax.Array, StateT]: ...
 
 
+AgentT = TypeVar("AgentT", covariant=True)
+MarkovChainT = TypeVar("MarkovChainT", covariant=True)
+
+
 @dataclass
-class Imc[AgentStateT, McT, McStateT]:
+class Imc(Generic[AgentT, MarkovChainT]):
     """Join an action-selecting agent to a Markov chain for one step.
 
     Attributes:
@@ -50,8 +54,8 @@ class Imc[AgentStateT, McT, McStateT]:
         sample: Select one action and advance the Markov chain once.
     """
 
-    agent: Agent[AgentStateT]
-    mc: MarkovChain[McT, McStateT]
+    agent: AgentT
+    mc: MarkovChainT
 
     @dataclass
     class State[McDataT, AgentDataT]:
@@ -65,16 +69,16 @@ class Imc[AgentStateT, McT, McStateT]:
         mc: McDataT
         agent: AgentDataT
 
-    def init(
-        self,
+    def init[AgentStateT, McT, McStateT](
+        self: Imc[Agent[AgentStateT], MarkovChain[McT, McStateT]],
         mc: McStateT,
         agent: AgentStateT,
     ) -> Imc.State[McStateT, AgentStateT]:
         """Combine initialized Markov-chain and agent states."""
         return self.State(mc=mc, agent=agent)
 
-    def sample(
-        self,
+    def sample[AgentStateT, McT, McStateT](
+        self: Imc[Agent[AgentStateT], MarkovChain[McT, McStateT]],
         state: Imc.State[McStateT, AgentStateT],
     ) -> tuple[
         McT,
