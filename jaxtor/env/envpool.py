@@ -2,6 +2,11 @@
 
 ``make`` exposes EnvPool through ``GymEnv``. ``SameStep`` converts EnvPool's
 autoreset behavior to the same-step semantics expected by the sampler stack.
+
+    env = make("Hopper-v5", num_envs=8)
+    mc = VecMc(mc=Mc(max_eps_len=1_000, env=env))
+    state = mc.init(keys, env.init(key))
+    transition, state = mc.sample(act, state)
 """
 
 from __future__ import annotations
@@ -11,12 +16,18 @@ from typing import Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 
-from jaxtor.env.gymnasium import ArraySpace, GymEnv, VectorRuntime, from_factory
+from jaxtor.env.gymnasium import (
+    ArraySpace,
+    GymEnv,
+    ResetResult,
+    StepResult,
+    from_factory,
+)
 
 __all__ = ["make"]
 
 
-class EnvPoolRuntime(Protocol):
+class Runtime(Protocol):
     """Raw EnvPool surface consumed by the SAME_STEP adapter."""
 
     num_envs: int
@@ -25,22 +36,9 @@ class EnvPoolRuntime(Protocol):
     all_env_ids: np.ndarray
 
     def reset(
-        self,
-        *,
-        seed: int | None = None,
-        env_id: npt.ArrayLike | None = None,
-    ) -> tuple[npt.ArrayLike, dict[str, Any]]: ...
-
-    def step(
-        self, actions: npt.ArrayLike, *, env_id: npt.ArrayLike
-    ) -> tuple[
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        dict[str, Any],
-    ]: ...
-
+        self, *, seed: int | None = None, env_id: npt.ArrayLike | None = None
+    ) -> ResetResult: ...
+    def step(self, actions: npt.ArrayLike, *, env_id: npt.ArrayLike) -> StepResult: ...
     def close(self) -> None: ...
 
 
@@ -80,41 +78,33 @@ class SameStep:
         single_action_space: Per-env action space.
     """
 
-    def __init__(self, env: EnvPoolRuntime):
+    def __init__(self, env: Runtime):
         """Wrap one already-seeded EnvPool runtime."""
         self.env = env
         self.num_envs = env.num_envs
         self.single_observation_space = env.single_observation_space
         self.single_action_space = env.single_action_space
 
-    def reset(self, *, seed: int | None = None) -> tuple[npt.ArrayLike, dict[str, Any]]:
+    def reset(self, *, seed: int | None = None) -> ResetResult:
         """Reset all envs; the pool's RNG was fixed by its factory seed."""
         return self.env.reset(seed=seed)
 
-    def step(
-        self, actions: npt.ArrayLike
-    ) -> tuple[
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        dict[str, Any],
-    ]:
+    def step(self, actions: npt.ArrayLike) -> StepResult:
         """Step a pool subset and convert autoreset to SAME_STEP.
 
         Stepping a subset (via ``env_id``) lets a vmap of size ``m <= num_envs``
         use only ``m`` of the pre-allocated environments. Terminal observations
         are moved into ``info["final_obs"]`` and replaced with reset observations.
         """
-        action_array = np.asarray(actions)
-        ids = self.env.all_env_ids[: len(action_array)]
-        obs, rew, term, trun, _ = self.env.step(action_array, env_id=ids)
+        act = np.asarray(actions)
+        ids = self.env.all_env_ids[: len(act)]
+        obs, rew, term, trun, _ = self.env.step(act, env_id=ids)
         obs = np.asarray(obs)
         rew = np.asarray(rew)
         term = np.asarray(term)
         trun = np.asarray(trun)
         done = np.logical_or(term, trun)
-        final = np.empty(len(action_array), dtype=object)
+        final = np.empty(len(act), dtype=object)
         final[:] = None
         if done.any():
             idx = np.nonzero(done)[0]
@@ -159,13 +149,13 @@ def make(name: str, num_envs: int = 1, **kwargs: Any) -> GymEnv:
     except KeyError as error:
         raise ValueError(f"{name!r} is not supported by EnvPool") from error
 
-    def factory(seed: int | None) -> tuple[VectorRuntime, np.ndarray]:
+    def factory(seed: int | None) -> tuple[SameStep, np.ndarray]:
         """Create a pool with an int32 seed and adapt its autoreset behavior."""
         kw = dict(kwargs)
         if seed is not None:
             kw["seed"] = int(seed) & 0x7FFFFFFF
         raw_env = cast(
-            EnvPoolRuntime,
+            Runtime,
             envpool.make(name, env_type="gymnasium", num_envs=num_envs, **kw),
         )
         vec_env = SameStep(raw_env)
