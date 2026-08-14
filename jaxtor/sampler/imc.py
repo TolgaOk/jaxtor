@@ -1,7 +1,13 @@
 """Minimal agent-induced Markov-chain sampling.
 
-``Imc`` asks an agent for one action and returns the transition produced by an
-open Markov chain. Rich agent predictions belong to ``LoadedRoll``.
+``Imc`` joins action selection and one Markov-chain step::
+
+    imc = Imc(agent=agent, mc=mc)
+    state = imc.init(mc_state, agent_state)
+    transition, state = imc.sample(state)
+
+The returned sample is produced by the Markov chain. Use ``LoadedRoll`` when
+collecting richer agent predictions at transition endpoints.
 """
 
 from __future__ import annotations

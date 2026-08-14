@@ -1,7 +1,13 @@
 """Open Markov-chain sampling with episode lifecycle handling.
 
-``Mc`` turns an environment into a transition sampler. ``VecMc`` applies the
-same interface to a batch of independent environment states.
+``Mc`` turns an environment into a transition sampler::
+
+    mc = Mc(max_eps_len=500, env=env)
+    state = mc.init(key, env_state)
+    transition, state = mc.sample(act, state)
+
+``VecMc`` applies the same interface to a batch of independent environment
+states.
 """
 
 from __future__ import annotations
