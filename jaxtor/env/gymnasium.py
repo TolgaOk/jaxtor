@@ -7,6 +7,12 @@ host callbacks.
 
 Copied handles share the same runtime. Close it with ``env.close(state)`` when
 it is no longer needed.
+
+    env = make("CartPole-v1")
+    state = env.init(key)
+    obs, state = env.reset(key, state)
+    step, state = env.step(key, act, state)
+    env.close(state)
 """
 
 from __future__ import annotations
@@ -14,11 +20,12 @@ from __future__ import annotations
 import atexit
 import itertools
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass as py_dataclass, replace
-from typing import Any, Callable, Generic, ParamSpec, Protocol, TypeVar, cast
+from typing import Any, Protocol, cast
 
 import chex
-from chex import dataclass  # pyright: ignore[reportUnknownVariableType]
+from chex import dataclass
 import gymnasium as gym
 import jax
 from jax.experimental import io_callback
@@ -44,9 +51,18 @@ class ArraySpace(Protocol):
 
     @property
     def shape(self) -> tuple[int, ...] | None: ...
-
     @property
     def dtype(self) -> np.dtype | None: ...
+
+
+type ResetResult = tuple[npt.ArrayLike, dict[str, Any]]
+type StepResult = tuple[
+    npt.ArrayLike,
+    npt.ArrayLike,
+    npt.ArrayLike,
+    npt.ArrayLike,
+    dict[str, Any],
+]
 
 
 class ScalarRuntime(Protocol):
@@ -55,20 +71,8 @@ class ScalarRuntime(Protocol):
     observation_space: ArraySpace
     action_space: ArraySpace
 
-    def reset(
-        self, *, seed: int | None = None
-    ) -> tuple[npt.ArrayLike, dict[str, Any]]: ...
-
-    def step(
-        self, action: npt.ArrayLike
-    ) -> tuple[
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        dict[str, Any],
-    ]: ...
-
+    def reset(self, *, seed: int | None = None) -> ResetResult: ...
+    def step(self, action: npt.ArrayLike) -> StepResult: ...
     def close(self) -> None: ...
 
 
@@ -78,20 +82,8 @@ class VectorRuntime(Protocol):
     single_observation_space: ArraySpace
     single_action_space: ArraySpace
 
-    def reset(
-        self, *, seed: int | None = None
-    ) -> tuple[npt.ArrayLike, dict[str, Any]]: ...
-
-    def step(
-        self, actions: npt.ArrayLike
-    ) -> tuple[
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        npt.ArrayLike,
-        dict[str, Any],
-    ]: ...
-
+    def reset(self, *, seed: int | None = None) -> ResetResult: ...
+    def step(self, actions: npt.ArrayLike) -> StepResult: ...
     def close(self) -> None: ...
 
 
@@ -117,7 +109,7 @@ class Runtime:
             self.env.close()
 
 
-RuntimeFactory = Callable[[int | None], tuple[BackendRuntime, np.ndarray]]
+type RuntimeFactory = Callable[[int | None], tuple[BackendRuntime, np.ndarray]]
 runtime_store: dict[int, Runtime] = {}
 runtime_store_lock = threading.Lock()
 next_runtime_id = itertools.count(1)
@@ -127,9 +119,7 @@ def make_scalar_runtime(name: str, **kwargs: Any) -> ScalarRuntime:
     """Create a scalar probe while narrowing Gymnasium's unbound generics."""
     return cast(
         ScalarRuntime,
-        gym.make(  # pyright: ignore[reportUnknownMemberType]
-            name, **kwargs
-        ),
+        gym.make(name, **kwargs),
     )
 
 
@@ -137,9 +127,7 @@ def make_vector_runtime(name: str, **kwargs: Any) -> VectorRuntime:
     """Create a vector runtime while narrowing Gymnasium's unbound generics."""
     return cast(
         VectorRuntime,
-        gym.make_vec(  # pyright: ignore[reportUnknownMemberType]
-            name, **kwargs
-        ),
+        gym.make_vec(name, **kwargs),
     )
 
 
@@ -203,20 +191,17 @@ def close_all_runtimes() -> None:
 atexit.register(close_all_runtimes)
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-Leaf = TypeVar("Leaf")
 type StepBuffers[Buffer] = tuple[Buffer, Buffer, Buffer]
 
 
-def attach_vmap_rule(
-    function: Callable[P, R],
-    rule: Callable[..., tuple[R, Any]],
-) -> Callable[P, R]:
+def attach_vmap_rule[**Args, Out](
+    function: Callable[Args, Out],
+    rule: Callable[..., tuple[Out, Any]],
+) -> Callable[Args, Out]:
     """Attach a batching rule while preserving the callable's public type."""
     operation = jax.custom_batching.custom_vmap(function)
     operation.def_vmap(rule)
-    return cast(Callable[P, R], operation)
+    return cast(Callable[Args, Out], operation)
 
 
 class CallbackIO:
@@ -224,8 +209,8 @@ class CallbackIO:
 
     TOKEN_MAX = int(np.iinfo(np.int32).max)
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
-    class Step(Generic[Leaf]):
+    @dataclass
+    class Step[Leaf]:
         """Semantic step leaves or their matching custom-vmap batch flags.
 
         Attributes:
@@ -244,8 +229,8 @@ class CallbackIO:
         reset_obs: Leaf
         runtime: Leaf
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
-    class Reset(Generic[Leaf]):
+    @dataclass
+    class Reset[Leaf]:
         """Semantic reset leaves or their matching custom-vmap batch flags.
 
         Attributes:
@@ -544,13 +529,24 @@ class CallbackIO:
                 raise ValueError("environment State leaves must share one vmap axis")
 
 
-@dataclass  # pyright: ignore[reportUntypedClassDecorator]
+@dataclass
 class GymEnv:
     """Configured adapter for a mutable Gymnasium-like backend.
 
     The component contains a runtime factory, static array schema, and callback
     rules. Live environments are stored outside it and are addressed solely by
     the opaque fields threaded through :class:`State`.
+
+    Public dataclasses:
+        State: Opaque runtime handle and current observation data.
+        Step: One environment transition.
+
+    Public methods:
+        init: Create a live runtime and its initial state.
+        reset: Select the current episode's initial observation.
+        step: Advance one logical environment.
+        obs: Read the current observation.
+        close: Close the live runtime outside JAX transformations.
     """
 
     factory: RuntimeFactory
@@ -561,7 +557,7 @@ class GymEnv:
     act_shape: tuple[int, ...]
     act_dtype: np.dtype
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class State:
         """Dynamic per-environment state.
 
@@ -585,7 +581,7 @@ class GymEnv:
             """Sequencing value encoded in the opaque runtime handle."""
             return self.runtime[..., 1]
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class Step:
         """Per-environment transition returned by :meth:`step`."""
 
@@ -600,15 +596,7 @@ class GymEnv:
         ``VecMc.init`` vmaps its scalar initializer over this template; the
         custom reset rule binds those states to pool slots ``0..n-1``.
         """
-        seed = int(
-            np.asarray(
-                jax.device_get(
-                    jax.random.bits(  # pyright: ignore[reportUnknownMemberType]
-                        key
-                    )
-                )
-            )
-        )
+        seed = int(np.asarray(jax.device_get(jax.random.bits(key))))
         runtime_env, initial_obs = self.factory(seed)
         initial_obs = np.asarray(initial_obs, dtype=self.obs_dtype)
         expected_shape = (
@@ -625,13 +613,9 @@ class GymEnv:
 
         runtime_id = register_runtime(Runtime(runtime_env, initial_obs))
         template_obs = initial_obs if self.num_envs is None else initial_obs[0]
-        obs = jnp.asarray(  # pyright: ignore[reportUnknownMemberType]
-            template_obs
-        )
+        obs = jnp.asarray(template_obs)
         return self.State(
-            runtime=jnp.asarray(  # pyright: ignore[reportUnknownMemberType]
-                (runtime_id, 0), dtype=jnp.int32
-            ),
+            runtime=jnp.asarray((runtime_id, 0), dtype=jnp.int32),
             obs=obs,
             reset_obs=obs,
         )
