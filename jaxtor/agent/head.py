@@ -1,4 +1,17 @@
-"""Semantic value and policy heads for agent compositions."""
+"""Semantic value and policy heads for agent compositions.
+
+Heads attach RL semantics to generic transforms while threading child state::
+
+    v = VHead(net=value_net)
+    v_state = v.init(value_state)
+    values, v_state = v.apply(features, v_state)
+
+    pi = CategoricalHead(n_actions=4, logits=logit_net)
+    pi_state = pi.init(logit_state)
+    dist, pi_state = pi.apply(features, pi_state)
+
+The final input axis contains features; arbitrary leading axes are preserved.
+"""
 
 from __future__ import annotations
 
@@ -12,17 +25,6 @@ from chex import dataclass
 from jaxtor.agent.dist import Categorical, DiagNormal
 
 
-class Transform[InputT, OutputT, StateT](Protocol):
-    """Stateful transformation capability consumed by semantic heads."""
-
-    def apply(
-        self,
-        x: InputT,
-        state: StateT,
-        /,
-    ) -> tuple[OutputT, StateT]: ...
-
-
 def _assert_feature_array(x: jax.Array) -> None:
     """Require an array with a final feature axis."""
     if x.ndim < 1:
@@ -34,14 +36,14 @@ def _assert_value(value: jax.Array, features: jax.Array) -> None:
     chex.assert_shape(value, features.shape[:-1])
 
 
-def _assert_vector_output(output: jax.Array, features: jax.Array) -> None:
-    """Require an output vector for every leading feature index."""
-    chex.assert_rank(output, features.ndim)
-    chex.assert_equal_shape_prefix([features, output], features.ndim - 1)
+class Transform[In, Out, S](Protocol):
+    """Stateful transformation capability consumed by semantic heads."""
+
+    def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
 
 @dataclass
-class VHead[NetStateT]:
+class VHead[NetS]:
     """Produce one scalar state value from each feature vector.
 
     Attributes:
@@ -55,23 +57,23 @@ class VHead[NetStateT]:
         apply: Produce ``V(s)``.
     """
 
-    net: Transform[jax.Array, jax.Array, NetStateT]
+    net: Transform[jax.Array, jax.Array, NetS]
 
     @dataclass
-    class State[NetDataT]:
+    class State[NetData]:
         """Value-head state mirroring its child transform."""
 
-        net: NetDataT
+        net: NetData
 
-    def init(self, net: NetStateT) -> VHead.State[NetStateT]:
+    def init(self, net: NetS) -> VHead.State[NetS]:
         """Store the initialized child state."""
         return self.State(net=net)
 
     def apply(
         self,
         features: jax.Array,
-        state: VHead.State[NetStateT],
-    ) -> tuple[jax.Array, VHead.State[NetStateT]]:
+        state: VHead.State[NetS],
+    ) -> tuple[jax.Array, VHead.State[NetS]]:
         """Produce one scalar value per feature vector."""
         _assert_feature_array(features)
         value, net = self.net.apply(features, state.net)
@@ -80,7 +82,7 @@ class VHead[NetStateT]:
 
 
 @dataclass
-class QHead[NetStateT]:
+class QHead[NetS]:
     """Produce all finite-action values from each feature vector.
 
     Attributes:
@@ -96,28 +98,28 @@ class QHead[NetStateT]:
     """
 
     n_actions: int
-    net: Transform[jax.Array, jax.Array, NetStateT]
+    net: Transform[jax.Array, jax.Array, NetS]
 
     @dataclass
-    class State[NetDataT]:
+    class State[NetData]:
         """Action-value-head state mirroring its child transform."""
 
-        net: NetDataT
+        net: NetData
 
     def __post_init__(self) -> None:
         """Validate the action count."""
         if self.n_actions < 1:
             raise ValueError("n_actions must be positive")
 
-    def init(self, net: NetStateT) -> QHead.State[NetStateT]:
+    def init(self, net: NetS) -> QHead.State[NetS]:
         """Store the initialized child state."""
         return self.State(net=net)
 
     def apply(
         self,
         features: jax.Array,
-        state: QHead.State[NetStateT],
-    ) -> tuple[jax.Array, QHead.State[NetStateT]]:
+        state: QHead.State[NetS],
+    ) -> tuple[jax.Array, QHead.State[NetS]]:
         """Produce all action values for every feature vector."""
         _assert_feature_array(features)
         q, net = self.net.apply(features, state.net)
@@ -126,7 +128,7 @@ class QHead[NetStateT]:
 
 
 @dataclass
-class QsaHead[ValueStateT]:
+class QsaHead[ValS]:
     """Produce ``Q(s, a)`` from state features and one action.
 
     Attributes:
@@ -140,15 +142,15 @@ class QsaHead[ValueStateT]:
         apply: Produce ``Q(s, a)``.
     """
 
-    value: Transform[jax.Array, jax.Array, ValueStateT]
+    value: Transform[jax.Array, jax.Array, ValS]
 
     @dataclass
-    class State[ValueDataT]:
+    class State[ValData]:
         """State-action-value-head state."""
 
-        value: ValueDataT
+        value: ValData
 
-    def init(self, value: ValueStateT) -> QsaHead.State[ValueStateT]:
+    def init(self, value: ValS) -> QsaHead.State[ValS]:
         """Store the initialized child state."""
         return self.State(value=value)
 
@@ -156,8 +158,8 @@ class QsaHead[ValueStateT]:
         self,
         features: jax.Array,
         act: jax.Array,
-        state: QsaHead.State[ValueStateT],
-    ) -> tuple[jax.Array, QsaHead.State[ValueStateT]]:
+        state: QsaHead.State[ValS],
+    ) -> tuple[jax.Array, QsaHead.State[ValS]]:
         """Concatenate state features and actions, then evaluate them."""
         _assert_feature_array(features)
         _assert_feature_array(act)
@@ -172,7 +174,7 @@ class QsaHead[ValueStateT]:
 
 
 @dataclass
-class CategoricalHead[LogitsStateT]:
+class CategoricalHead[LogitS]:
     """Produce categorical policy distributions from feature vectors.
 
     Attributes:
@@ -188,28 +190,28 @@ class CategoricalHead[LogitsStateT]:
     """
 
     n_actions: int
-    logits: Transform[jax.Array, jax.Array, LogitsStateT]
+    logits: Transform[jax.Array, jax.Array, LogitS]
 
     @dataclass
-    class State[LogitsDataT]:
+    class State[LogitData]:
         """Categorical-head state."""
 
-        logits: LogitsDataT
+        logits: LogitData
 
     def __post_init__(self) -> None:
         """Validate the action count."""
         if self.n_actions < 1:
             raise ValueError("n_actions must be positive")
 
-    def init(self, logits: LogitsStateT) -> CategoricalHead.State[LogitsStateT]:
+    def init(self, logits: LogitS) -> CategoricalHead.State[LogitS]:
         """Store the initialized child state."""
         return self.State(logits=logits)
 
     def apply(
         self,
         features: jax.Array,
-        state: CategoricalHead.State[LogitsStateT],
-    ) -> tuple[Categorical, CategoricalHead.State[LogitsStateT]]:
+        state: CategoricalHead.State[LogitS],
+    ) -> tuple[Categorical, CategoricalHead.State[LogitS]]:
         """Produce one categorical distribution per feature vector."""
         _assert_feature_array(features)
         logits, logits_state = self.logits.apply(features, state.logits)
@@ -218,7 +220,7 @@ class CategoricalHead[LogitsStateT]:
 
 
 @dataclass
-class DiagNormalHead[LocStateT, LogScaleStateT]:
+class DiagNormalHead[LocS, LogScaleS]:
     """Produce diagonal-Normal policy distributions from feature vectors.
 
     Attributes:
@@ -235,15 +237,15 @@ class DiagNormalHead[LocStateT, LogScaleStateT]:
     """
 
     act_size: int
-    loc: Transform[jax.Array, jax.Array, LocStateT]
-    log_scale: Transform[jax.Array, jax.Array, LogScaleStateT]
+    loc: Transform[jax.Array, jax.Array, LocS]
+    log_scale: Transform[jax.Array, jax.Array, LogScaleS]
 
     @dataclass
-    class State[LocDataT, LogScaleDataT]:
+    class State[LocData, LogScaleData]:
         """Diagonal-Normal-head child-state tree."""
 
-        loc: LocDataT
-        log_scale: LogScaleDataT
+        loc: LocData
+        log_scale: LogScaleData
 
     def __post_init__(self) -> None:
         """Validate the action-event size."""
@@ -252,20 +254,17 @@ class DiagNormalHead[LocStateT, LogScaleStateT]:
 
     def init(
         self,
-        loc: LocStateT,
-        log_scale: LogScaleStateT,
-    ) -> DiagNormalHead.State[LocStateT, LogScaleStateT]:
+        loc: LocS,
+        log_scale: LogScaleS,
+    ) -> DiagNormalHead.State[LocS, LogScaleS]:
         """Combine initialized child states."""
         return self.State(loc=loc, log_scale=log_scale)
 
     def apply(
         self,
         features: jax.Array,
-        state: DiagNormalHead.State[LocStateT, LogScaleStateT],
-    ) -> tuple[
-        DiagNormal,
-        DiagNormalHead.State[LocStateT, LogScaleStateT],
-    ]:
+        state: DiagNormalHead.State[LocS, LogScaleS],
+    ) -> tuple[DiagNormal, DiagNormalHead.State[LocS, LogScaleS]]:
         """Produce one diagonal-Normal distribution per feature vector."""
         _assert_feature_array(features)
         loc, loc_state = self.loc.apply(features, state.loc)

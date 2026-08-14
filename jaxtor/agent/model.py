@@ -1,4 +1,16 @@
-"""Generic trainable transforms and state-tree composition."""
+"""Generic trainable transforms and state-tree composition.
+
+A body and head compose through the same explicit state interface::
+
+    model = Model(body=body, head=head)
+    state = model.init(body_state, head_state)
+    pred, state = model.apply(x, state)
+
+Trainable leaves can be separated without changing the state structure::
+
+    parts = partition(state)
+    state = combine(parts.params, parts.frozen)
+"""
 
 from __future__ import annotations
 
