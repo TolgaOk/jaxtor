@@ -1,4 +1,14 @@
-"""Composed value-policy agents."""
+"""Composed value-policy agents.
+
+An agent joins a shared body and semantic heads while state remains explicit::
+
+    agent = VPi(body=body, v=v, pi=pi)
+    state = agent.init(key, body=body_state, v=v_state, pi=pi_state)
+    pred, applied_state = agent.apply(obs, state)
+    act, acted_state = agent.act(obs, state)
+
+``apply`` returns all predictions. ``act`` evaluates only action dependencies.
+"""
 
 from __future__ import annotations
 
@@ -8,18 +18,12 @@ import jax
 from chex import dataclass
 
 
-class Sample(Protocol):
-    """Sampled action capability consumed during acting."""
-
-    act: jax.Array
-
-
-class Distribution(Protocol):
+class Distribution[Act, Eval](Protocol):
     """Action-distribution capability consumed by composed agents."""
 
-    def sample(self, key: jax.Array) -> Sample: ...
-
-    def mode(self) -> jax.Array: ...
+    def sample(self, key: jax.Array) -> Act: ...
+    def evaluate(self, act: Act) -> Eval: ...
+    def mode(self) -> Act: ...
 
 
 class Transform[In, Out, S](Protocol):
@@ -29,7 +33,7 @@ class Transform[In, Out, S](Protocol):
 
 
 @dataclass
-class VPi[Dist: Distribution, BodyS, ValS, PiS]:
+class VPi[Act, Eval, BodyS, ValS, PiS]:
     """Compose a body, value head, and policy head into an acting agent.
 
     Attributes:
@@ -51,7 +55,7 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
 
     body: Transform[jax.Array, jax.Array, BodyS]
     v: Transform[jax.Array, jax.Array, ValS]
-    pi: Transform[jax.Array, Dist, PiS]
+    pi: Transform[jax.Array, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
@@ -71,11 +75,11 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
         key: jax.Array
 
     @dataclass
-    class Pred[DistData]:
+    class Pred[ActData, EvalData]:
         """Value and policy predictions aligned by leading axes."""
 
         v: jax.Array
-        pi: DistData
+        pi: Distribution[ActData, EvalData]
 
     def init(
         self,
@@ -92,7 +96,7 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
         obs: jax.Array,
         state: VPi.State[BodyS, ValS, PiS],
     ) -> tuple[
-        VPi.Pred[Dist],
+        VPi.Pred[Act, Eval],
         VPi.State[BodyS, ValS, PiS],
     ]:
         """Produce value and policy predictions without selecting an action."""
@@ -109,7 +113,7 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
         obs: jax.Array,
         state: VPi.State[BodyS, ValS, PiS],
     ) -> tuple[
-        jax.Array,
+        Act,
         VPi.State[BodyS, ValS, PiS],
     ]:
         """Select only the action required by a minimal sampler."""
@@ -119,7 +123,7 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
             act, key = dist.mode(), state.key
         else:
             key, sample_key = jax.random.split(state.key)
-            act = dist.sample(sample_key).act
+            act = dist.sample(sample_key)
         return act, self.State(
             body=body,
             v=state.v,
@@ -130,7 +134,8 @@ class VPi[Dist: Distribution, BodyS, ValS, PiS]:
 
 @dataclass
 class VQPi[
-    Dist: Distribution,
+    Act,
+    Eval,
     BodyS,
     ValS,
     QS,
@@ -159,7 +164,7 @@ class VQPi[
     body: Transform[jax.Array, jax.Array, BodyS]
     v: Transform[jax.Array, jax.Array, ValS]
     q: Transform[jax.Array, jax.Array, QS]
-    pi: Transform[jax.Array, Dist, PiS]
+    pi: Transform[jax.Array, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
@@ -173,12 +178,12 @@ class VQPi[
         key: jax.Array
 
     @dataclass
-    class Pred[DistData]:
+    class Pred[ActData, EvalData]:
         """Value, action values, and policy predictions."""
 
         v: jax.Array
         q: jax.Array
-        pi: DistData
+        pi: Distribution[ActData, EvalData]
 
     def init(
         self,
@@ -196,7 +201,7 @@ class VQPi[
         obs: jax.Array,
         state: VQPi.State[BodyS, ValS, QS, PiS],
     ) -> tuple[
-        VQPi.Pred[Dist],
+        VQPi.Pred[Act, Eval],
         VQPi.State[BodyS, ValS, QS, PiS],
     ]:
         """Produce value, action-value, and policy predictions."""
@@ -220,7 +225,7 @@ class VQPi[
         obs: jax.Array,
         state: VQPi.State[BodyS, ValS, QS, PiS],
     ) -> tuple[
-        jax.Array,
+        Act,
         VQPi.State[BodyS, ValS, QS, PiS],
     ]:
         """Select only the action required by a minimal sampler."""
@@ -230,7 +235,7 @@ class VQPi[
             act, key = dist.mode(), state.key
         else:
             key, sample_key = jax.random.split(state.key)
-            act = dist.sample(sample_key).act
+            act = dist.sample(sample_key)
         return act, self.State(
             body=body,
             v=state.v,

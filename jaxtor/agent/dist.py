@@ -1,8 +1,12 @@
 """Probability-distribution values for action selection.
 
-Distributions are pytrees of parameter arrays, typically produced by policy
-heads. Their methods are pure: sampling receives an explicit random key, and
-no distribution has persistent state or an initialization lifecycle.
+Distributions are parameter pytrees, typically produced by policy heads. Their
+operations are pure and require no separate state::
+
+    dist = Categorical(logits=logits)
+    act = dist.sample(key)
+    evaluation = dist.evaluate(act)
+    mode = dist.mode()
 """
 
 from __future__ import annotations
@@ -17,17 +21,12 @@ from chex import dataclass
 _LOG_TWO_PI = math.log(2.0 * math.pi)
 
 
-@dataclass
-class Sample:
-    """One sampled action and its log-probability.
+class Distribution[Act, Eval](Protocol):
+    """Pure distribution mapping keys to actions and actions to evaluations."""
 
-    Attributes:
-        act: Sampled action following the distribution's batch/event shape.
-        logp: Log-probability of ``act``, with shape equal to the batch shape.
-    """
-
-    act: jax.Array
-    logp: jax.Array
+    def sample(self, key: jax.Array) -> Act: ...
+    def evaluate(self, act: Act) -> Eval: ...
+    def mode(self) -> Act: ...
 
 
 @dataclass
@@ -43,16 +42,6 @@ class Evaluation:
     entropy: jax.Array
 
 
-class Distribution(Protocol):
-    """Pure action-distribution capability over stored parameter arrays."""
-
-    def sample(self, key: jax.Array) -> Sample: ...
-
-    def evaluate(self, act: jax.Array) -> Evaluation: ...
-
-    def mode(self) -> jax.Array: ...
-
-
 @dataclass
 class DiagNormal:
     """Diagonal Normal distribution over one vector-valued event axis.
@@ -62,7 +51,7 @@ class DiagNormal:
         log_scale: Log standard deviation, broadcastable to ``loc``.
 
     Public methods:
-        sample: Draw an action and return its joint log-probability.
+        sample: Draw an action.
         evaluate: Compute joint log-probability and entropy.
         mode: Return the distribution location.
     """
@@ -92,11 +81,10 @@ class DiagNormal:
         entropy = log_scale + 0.5 * (1.0 + _LOG_TWO_PI)
         return jnp.sum(entropy, axis=-1)
 
-    def sample(self, key: jax.Array) -> Sample:
-        """Draw an action and return its joint log-probability."""
+    def sample(self, key: jax.Array) -> jax.Array:
+        """Draw an action."""
         loc, log_scale = self._broadcast()
-        act = loc + jnp.exp(log_scale) * jax.random.normal(key, loc.shape)
-        return Sample(act=act, logp=self._logp(loc, log_scale, act))
+        return loc + jnp.exp(log_scale) * jax.random.normal(key, loc.shape)
 
     def evaluate(self, act: jax.Array) -> Evaluation:
         """Compute joint log-probability and entropy for ``act``."""
@@ -120,7 +108,7 @@ class Categorical:
         logits: Unnormalized logits, shaped ``(..., n_categories)``.
 
     Public methods:
-        sample: Draw a category and return its log-probability.
+        sample: Draw a category.
         evaluate: Compute log-probability and entropy.
         mode: Return the highest-logit category.
     """
@@ -137,10 +125,9 @@ class Categorical:
         indices = jnp.expand_dims(act.astype(jnp.int32), axis=-1)
         return jnp.take_along_axis(log_probs, indices, axis=-1).squeeze(-1)
 
-    def sample(self, key: jax.Array) -> Sample:
-        """Draw a category and return its log-probability."""
-        act = jax.random.categorical(key, self.logits, axis=-1)
-        return Sample(act=act, logp=self._select(self._log_probs(), act))
+    def sample(self, key: jax.Array) -> jax.Array:
+        """Draw a category."""
+        return jax.random.categorical(key, self.logits, axis=-1)
 
     def evaluate(self, act: jax.Array) -> Evaluation:
         """Compute log-probability and entropy for ``act``."""

@@ -40,7 +40,6 @@ from jaxtor.agent.dist import Categorical as Categorical
 from jaxtor.agent.dist import DiagNormal as DiagNormal
 from jaxtor.agent.dist import Distribution as Distribution
 from jaxtor.agent.dist import Evaluation as Evaluation
-from jaxtor.agent.dist import Sample as Sample
 from jaxtor.agent.head import CategoricalHead as CategoricalHead
 from jaxtor.agent.head import DiagNormalHead as DiagNormalHead
 from jaxtor.agent.head import QHead as QHead
