@@ -11,8 +11,6 @@ from jaxtor.agent import (
     Categorical,
     CategoricalHead,
     DiagNormalHead,
-    Draw,
-    Mode,
     Model,
     Module,
     NormModel,
@@ -205,7 +203,7 @@ def test_vpi_composes_modules_and_preserves_leading_axes():
     logits_net = Module(static=Dense(weight=None, bias=None))
     value = VHead(net=value_net)
     policy = CategoricalHead(n_actions=4, logits=logits_net)
-    agent = VPi(body=body, v=value, pi=policy, select=Draw())
+    agent = VPi(body=body, v=value, pi=policy)
     state = agent.init(
         jax.random.key(0),
         body=body.init(
@@ -230,8 +228,8 @@ def test_vpi_composes_modules_and_preserves_leading_axes():
     assert pred.v.shape == (2, 5)
     assert pred.pi.logits.shape == (2, 5, 4)
     assert act.shape == (2, 5)
-    assert jnp.array_equal(applied_state.select, state.select)
-    assert not jnp.array_equal(acted_state.select, state.select)
+    assert jnp.array_equal(applied_state.key, state.key)
+    assert not jnp.array_equal(acted_state.key, state.key)
 
 
 def test_q_heads_preserve_action_semantics_over_leading_axes():
@@ -290,7 +288,7 @@ def test_diag_normal_head_and_model_thread_their_child_states():
 def test_vpi_act_evaluates_only_action_dependencies():
     """Acting advances the shared body and policy, but not the value head."""
     zero = Calls(count=jnp.array(0, dtype=jnp.int32))
-    agent = VPi(body=Body(), v=Value(), pi=Policy(), select=Mode())
+    agent = VPi(body=Body(), v=Value(), pi=Policy(), deterministic=True)
     state = agent.init(jax.random.key(0), body=zero, v=zero, pi=zero)
 
     _, applied = jax.jit(agent.apply)(jnp.ones((3, 2)), state)
@@ -303,7 +301,7 @@ def test_vpi_act_evaluates_only_action_dependencies():
     assert acted.body.count == 1
     assert acted.v.count == 0
     assert acted.pi.count == 1
-    assert jnp.array_equal(acted.select, state.select)
+    assert jnp.array_equal(acted.key, state.key)
 
 
 def test_vqpi_act_skips_both_unused_value_heads():
@@ -314,7 +312,7 @@ def test_vqpi_act_skips_both_unused_value_heads():
         v=Value(),
         q=ActionValues(),
         pi=Policy(),
-        select=Mode(),
+        deterministic=True,
     )
     state = agent.init(
         jax.random.key(0),

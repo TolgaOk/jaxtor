@@ -27,9 +27,7 @@ from chex import dataclass
 
 from jaxtor.agent import (
     CategoricalHead,
-    Draw,
     Function,
-    Mode,
     Module,
     NormModel,
     VHead,
@@ -162,7 +160,7 @@ norm = ObsNorm(stats=RunningStats(clip=10.0))
 body = NormModel(norm=norm, model=body_net)
 pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
 v = VHead(net=v_net)
-agent = VPi(body=body, v=v, pi=pi, select=Draw())
+agent = VPi(body=body, v=v, pi=pi)
 agent_init = agent.init(
     select_key,
     body=body.init(norm.init(obs_shape), body_net_state),
@@ -186,7 +184,7 @@ tx: Any = optax.chain(
     optax.clip_by_global_norm(cfg.max_grad_norm),
     optax.adam(cfg.lr, eps=1e-5),
 )
-eval_imc = Imc(agent=replace(agent, select=Mode()), mc=mc)
+eval_imc = Imc(agent=replace(agent, deterministic=True), mc=mc)
 evaluate = jax.jit(Eval(imc=eval_imc, episode_len=cfg.max_eps_len).evaluate)
 
 

@@ -1,90 +1,46 @@
-"""Composed value-policy agents and their action selectors."""
+"""Composed value-policy agents."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
 import jax
-import jax.random as jrd
 from chex import dataclass
 
-from jaxtor.agent.dist import Distribution, Sample
-from jaxtor.agent.head import (
-    _assert_feature_array,
-    _assert_value,
-    _assert_vector_output,
-)
+
+class Sample(Protocol):
+    """Sampled action capability consumed during acting."""
+
+    act: jax.Array
 
 
-class Selector[PiT: Distribution](Protocol):
-    """Action-selection capability consumed by agent compositions."""
+class Distribution(Protocol):
+    """Action-distribution capability consumed by composed agents."""
 
-    def select(
-        self,
-        pi: PiT,
-        key: jax.Array,
-    ) -> tuple[Sample, jax.Array]: ...
+    def sample(self, key: jax.Array) -> Sample: ...
+
+    def mode(self) -> jax.Array: ...
 
 
-@dataclass
-class Draw:
-    """Draw stochastic actions and advance the supplied random key.
-
-    Public methods:
-        select: Sample an action and return the next random key.
-    """
-
-    def select(
-        self,
-        pi: Distribution,
-        key: jax.Array,
-    ) -> tuple[Sample, jax.Array]:
-        """Sample an action and return the next random key."""
-        key, sample_key = jrd.split(key)
-        return pi.sample(sample_key), key
-
-
-@dataclass
-class Mode:
-    """Select modal actions without advancing the supplied random key.
-
-    Public methods:
-        select: Select the mode and evaluate its log-probability.
-    """
-
-    def select(
-        self,
-        pi: Distribution,
-        key: jax.Array,
-    ) -> tuple[Sample, jax.Array]:
-        """Select the mode and evaluate its log-probability."""
-        act = pi.mode()
-        return Sample(act=act, logp=pi.evaluate(act).logp), key
-
-
-class Transform[InputT, OutputT, StateT](Protocol):
+class Transform[In, Out, S](Protocol):
     """Stateful transformation capability consumed by composed agents."""
 
-    def apply(
-        self,
-        x: InputT,
-        state: StateT,
-        /,
-    ) -> tuple[OutputT, StateT]: ...
+    def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
 
 @dataclass
-class VPi[PiT: Distribution, BodyStateT, ValueStateT, PiStateT]:
-    """Compose a body, value head, policy head, and action selector.
+class VPi[Dist: Distribution, BodyS, ValS, PiS]:
+    """Compose a body, value head, and policy head into an acting agent.
 
     Attributes:
         body: Transform mapping observations to common features.
         v: Transform producing ``V(s)``.
         pi: Transform producing a policy distribution.
-        select: Strategy converting the policy into an action.
+        deterministic: Whether acting uses the distribution mode instead of a
+            stochastic sample.
 
     Public dataclasses:
-        State: Complete child-state tree and selector key.
+        State: Complete child-state tree and sampling key.
         Pred: Value and policy prediction.
 
     Public methods:
@@ -93,103 +49,105 @@ class VPi[PiT: Distribution, BodyStateT, ValueStateT, PiStateT]:
         act: Select only the action required by a minimal sampler.
     """
 
-    body: Transform[jax.Array, jax.Array, BodyStateT]
-    v: Transform[jax.Array, jax.Array, ValueStateT]
-    pi: Transform[jax.Array, PiT, PiStateT]
-    select: Selector[PiT]
+    body: Transform[jax.Array, jax.Array, BodyS]
+    v: Transform[jax.Array, jax.Array, ValS]
+    pi: Transform[jax.Array, Dist, PiS]
+    deterministic: bool = False
 
     @dataclass
-    class State[BodyDataT, ValueDataT, PiDataT]:
+    class State[BodyData, ValData, PiData]:
         """Value-policy child-state tree.
 
         Attributes:
             body: Body-transform state.
             v: Value-head state.
             pi: Policy-head state.
-            select: Action-selection key.
+            key: Action-sampling key.
         """
 
-        body: BodyDataT
-        v: ValueDataT
-        pi: PiDataT
-        select: jax.Array
+        body: BodyData
+        v: ValData
+        pi: PiData
+        key: jax.Array
 
     @dataclass
-    class Pred[PiDataT: Distribution]:
+    class Pred[DistData]:
         """Value and policy predictions aligned by leading axes."""
 
         v: jax.Array
-        pi: PiDataT
+        pi: DistData
 
     def init(
         self,
         key: jax.Array,
-        body: BodyStateT,
-        v: ValueStateT,
-        pi: PiStateT,
-    ) -> VPi.State[BodyStateT, ValueStateT, PiStateT]:
-        """Combine initialized children and the selection key."""
-        return self.State(body=body, v=v, pi=pi, select=key)
+        body: BodyS,
+        v: ValS,
+        pi: PiS,
+    ) -> VPi.State[BodyS, ValS, PiS]:
+        """Combine initialized children and the sampling key."""
+        return self.State(body=body, v=v, pi=pi, key=key)
 
     def apply(
         self,
         obs: jax.Array,
-        state: VPi.State[BodyStateT, ValueStateT, PiStateT],
+        state: VPi.State[BodyS, ValS, PiS],
     ) -> tuple[
-        VPi.Pred[PiT],
-        VPi.State[BodyStateT, ValueStateT, PiStateT],
+        VPi.Pred[Dist],
+        VPi.State[BodyS, ValS, PiS],
     ]:
         """Produce value and policy predictions without selecting an action."""
         features, body = self.body.apply(obs, state.body)
-        _assert_feature_array(features)
         value, v = self.v.apply(features, state.v)
-        pi, pi_state = self.pi.apply(features, state.pi)
-        _assert_value(value, features)
+        dist, pi = self.pi.apply(features, state.pi)
         return (
-            self.Pred(v=value, pi=pi),
-            self.State(body=body, v=v, pi=pi_state, select=state.select),
+            self.Pred(v=value, pi=dist),
+            self.State(body=body, v=v, pi=pi, key=state.key),
         )
 
     def act(
         self,
         obs: jax.Array,
-        state: VPi.State[BodyStateT, ValueStateT, PiStateT],
+        state: VPi.State[BodyS, ValS, PiS],
     ) -> tuple[
         jax.Array,
-        VPi.State[BodyStateT, ValueStateT, PiStateT],
+        VPi.State[BodyS, ValS, PiS],
     ]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
-        _assert_feature_array(features)
-        pi, pi_state = self.pi.apply(features, state.pi)
-        sample, key = self.select.select(pi, state.select)
-        return sample.act, self.State(
+        dist, pi = self.pi.apply(features, state.pi)
+        if self.deterministic:
+            act, key = dist.mode(), state.key
+        else:
+            key, sample_key = jax.random.split(state.key)
+            act = dist.sample(sample_key).act
+        return act, self.State(
             body=body,
             v=state.v,
-            pi=pi_state,
-            select=key,
+            pi=pi,
+            key=key,
         )
 
 
 @dataclass
 class VQPi[
-    PiT: Distribution,
-    BodyStateT,
-    ValueStateT,
-    QStateT,
-    PiStateT,
+    Dist: Distribution,
+    BodyS,
+    ValS,
+    QS,
+    PiS,
 ]:
-    """Compose value, action-value, policy, and selection components.
+    """Compose value, action-value, and policy components into an agent.
 
     Attributes:
         body: Transform mapping observations to common features.
         v: Transform producing ``V(s)``.
         q: Transform producing ``Q(s, .)``.
         pi: Transform producing a policy distribution.
-        select: Strategy converting the policy into an action.
+        deterministic: Whether acting uses the distribution mode instead of a
+            stochastic sample.
 
     Public dataclasses:
-        State: Complete child-state tree and selector key.
+        State: Complete child-state tree and sampling key.
         Pred: Value, action values, and policy prediction.
 
     Public methods:
@@ -198,85 +156,85 @@ class VQPi[
         act: Select only the action required by a minimal sampler.
     """
 
-    body: Transform[jax.Array, jax.Array, BodyStateT]
-    v: Transform[jax.Array, jax.Array, ValueStateT]
-    q: Transform[jax.Array, jax.Array, QStateT]
-    pi: Transform[jax.Array, PiT, PiStateT]
-    select: Selector[PiT]
+    body: Transform[jax.Array, jax.Array, BodyS]
+    v: Transform[jax.Array, jax.Array, ValS]
+    q: Transform[jax.Array, jax.Array, QS]
+    pi: Transform[jax.Array, Dist, PiS]
+    deterministic: bool = False
 
     @dataclass
-    class State[BodyDataT, ValueDataT, QDataT, PiDataT]:
+    class State[BodyData, ValData, QData, PiData]:
         """Value-action-values-policy child-state tree."""
 
-        body: BodyDataT
-        v: ValueDataT
-        q: QDataT
-        pi: PiDataT
-        select: jax.Array
+        body: BodyData
+        v: ValData
+        q: QData
+        pi: PiData
+        key: jax.Array
 
     @dataclass
-    class Pred[PiDataT: Distribution]:
+    class Pred[DistData]:
         """Value, action values, and policy predictions."""
 
         v: jax.Array
         q: jax.Array
-        pi: PiDataT
+        pi: DistData
 
     def init(
         self,
         key: jax.Array,
-        body: BodyStateT,
-        v: ValueStateT,
-        q: QStateT,
-        pi: PiStateT,
-    ) -> VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT]:
-        """Combine initialized children and the selection key."""
-        return self.State(body=body, v=v, q=q, pi=pi, select=key)
+        body: BodyS,
+        v: ValS,
+        q: QS,
+        pi: PiS,
+    ) -> VQPi.State[BodyS, ValS, QS, PiS]:
+        """Combine initialized children and the sampling key."""
+        return self.State(body=body, v=v, q=q, pi=pi, key=key)
 
     def apply(
         self,
         obs: jax.Array,
-        state: VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT],
+        state: VQPi.State[BodyS, ValS, QS, PiS],
     ) -> tuple[
-        VQPi.Pred[PiT],
-        VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT],
+        VQPi.Pred[Dist],
+        VQPi.State[BodyS, ValS, QS, PiS],
     ]:
         """Produce value, action-value, and policy predictions."""
         features, body = self.body.apply(obs, state.body)
-        _assert_feature_array(features)
         value, v = self.v.apply(features, state.v)
         q, q_state = self.q.apply(features, state.q)
-        pi, pi_state = self.pi.apply(features, state.pi)
-        _assert_value(value, features)
-        _assert_vector_output(q, features)
+        dist, pi = self.pi.apply(features, state.pi)
         return (
-            self.Pred(v=value, q=q, pi=pi),
+            self.Pred(v=value, q=q, pi=dist),
             self.State(
                 body=body,
                 v=v,
                 q=q_state,
-                pi=pi_state,
-                select=state.select,
+                pi=pi,
+                key=state.key,
             ),
         )
 
     def act(
         self,
         obs: jax.Array,
-        state: VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT],
+        state: VQPi.State[BodyS, ValS, QS, PiS],
     ) -> tuple[
         jax.Array,
-        VQPi.State[BodyStateT, ValueStateT, QStateT, PiStateT],
+        VQPi.State[BodyS, ValS, QS, PiS],
     ]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
-        _assert_feature_array(features)
-        pi, pi_state = self.pi.apply(features, state.pi)
-        sample, key = self.select.select(pi, state.select)
-        return sample.act, self.State(
+        dist, pi = self.pi.apply(features, state.pi)
+        if self.deterministic:
+            act, key = dist.mode(), state.key
+        else:
+            key, sample_key = jax.random.split(state.key)
+            act = dist.sample(sample_key).act
+        return act, self.State(
             body=body,
             v=state.v,
             q=state.q,
-            pi=pi_state,
-            select=key,
+            pi=pi,
+            key=key,
         )

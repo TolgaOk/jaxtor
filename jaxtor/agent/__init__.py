@@ -25,7 +25,6 @@ partitioned before entering the component tree::
         body=body,
         v=value_head,
         pi=policy_head,
-        select=Draw(),
     )
 
 ``Module`` keeps the callable's static structure on the configured component
@@ -35,9 +34,6 @@ and mirror the same nesting in ``NormModel.State``, head states, and finally
 updated state with the same structure.
 """
 
-from jaxtor.agent.agent import Draw as Draw
-from jaxtor.agent.agent import Mode as Mode
-from jaxtor.agent.agent import Selector as Selector
 from jaxtor.agent.agent import VPi as VPi
 from jaxtor.agent.agent import VQPi as VQPi
 from jaxtor.agent.dist import Categorical as Categorical
