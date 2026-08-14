@@ -453,9 +453,10 @@ def train(cfg: Config) -> State:
             env=eval_env,
         )
     )
+    eval_imc = Imc(agent=eval_agent, mc=eval_mc)
     evaluator = Evaluator(
         episode_len=cfg.max_eps_len,
-        imc=Imc(agent=eval_agent, mc=eval_mc),
+        imc=eval_imc,
     )
 
     v_net = MLP(
@@ -538,7 +539,7 @@ def train(cfg: Config) -> State:
                 jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
             )
             m, eval_state = evaluate(
-                evaluator.imc.init(
+                eval_imc.init(
                     eval_mc_state,
                     replace(state.agent, key=eval_key),
                 )

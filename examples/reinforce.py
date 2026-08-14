@@ -167,8 +167,9 @@ roll = Roll(
 )
 
 # Eval component
+eval_imc = Imc(agent=target_agent, mc=vec_mc)
 evaluator = Evaluator(
-    imc=Imc(agent=target_agent, mc=vec_mc),
+    imc=eval_imc,
     episode_len=cfg.max_eps_len,
 )
 
@@ -214,7 +215,7 @@ for i in track(range(cfg.n_iters), description="Training"):
     if (i + 1) % cfg.eval_freq == 0:
         eval_key, env_key, k = jrd.split(eval_key, 3)
         m, eval_state = jit_eval(
-            evaluator.imc.init(
+            eval_imc.init(
                 vec_mc.init(jrd.split(k, cfg.eval_envs), env.init(env_key)),
                 replace(imc_state.agent, key=eval_key),
             )

@@ -1,18 +1,21 @@
 """Sampling-based evaluation over an induced Markov chain.
 
-``Eval`` rolls out any compatible sampler, derives episode metrics only from
-its public transitions, and returns the advanced sampler state. It does not
-inspect or depend on the sampler's internal state structure.
+``Eval`` derives episode metrics from public transition fields::
+
+    evaluator = Eval(imc=imc, episode_len=500)
+    metrics, state = evaluator.evaluate(state)
+
+The sampler state is advanced without exposing its internal structure.
 """
 
 from __future__ import annotations
 
-from typing import Generic, Protocol, TypeVar
+from typing import Protocol
 
 import chex
 import jax
 import jax.numpy as jnp
-from chex import dataclass  # pyright: ignore[reportUnknownVariableType]
+from chex import dataclass
 
 
 class Transition(Protocol):
@@ -23,20 +26,14 @@ class Transition(Protocol):
     trun: jax.Array
 
 
-class Imc[TransitionT: Transition, StateT](Protocol):
+class Imc[Sample: Transition, S](Protocol):
     """Single-step sampler surface consumed by ``Eval``."""
 
-    def sample(
-        self,
-        state: StateT,
-    ) -> tuple[TransitionT, StateT]: ...
+    def sample(self, state: S) -> tuple[Sample, S]: ...
 
 
-ImcT = TypeVar("ImcT", covariant=True)
-
-
-@dataclass  # pyright: ignore[reportUntypedClassDecorator]
-class Eval(Generic[ImcT]):
+@dataclass
+class Eval[Sample: Transition, S]:
     """Evaluate completed episodes from a fixed-length rollout.
 
     Attributes:
@@ -45,11 +42,11 @@ class Eval(Generic[ImcT]):
         unroll: Loop unroll factor for ``jax.lax.scan``.
     """
 
-    imc: ImcT
+    imc: Imc[Sample, S]
     episode_len: int
     unroll: int = 1
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class _Accumulator:
         """Scan-local episode and aggregate statistics.
 
@@ -75,8 +72,8 @@ class Eval(Generic[ImcT]):
         n_episodes: jax.Array
         n_truncated: jax.Array
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
-    class _Carry[CarryState]:
+    @dataclass
+    class _Carry[ImcData]:
         """Evaluation scan state.
 
         Attributes:
@@ -84,10 +81,10 @@ class Eval(Generic[ImcT]):
             accumulator: Episode statistics owned by the evaluator.
         """
 
-        imc: CarryState
+        imc: ImcData
         accumulator: Eval._Accumulator
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class Metrics:
         """Aggregate statistics for episodes completed during evaluation.
 
@@ -194,21 +191,14 @@ class Eval(Generic[ImcT]):
             trun_rate=accumulator.n_truncated.astype(dtype) / count,
         )
 
-    def _step[TransitionT: Transition, StateT](
-        self: Eval[Imc[TransitionT, StateT]],
-        carry: Eval._Carry[StateT],
-        unused: None,
-    ) -> tuple[Eval._Carry[StateT], None]:
+    def _step(self, carry: Eval._Carry[S], unused: None) -> tuple[Eval._Carry[S], None]:
         """Sample and accumulate one evaluation step."""
         del unused
         transition, imc = self.imc.sample(carry.imc)
         accumulator, _ = self._accumulate(carry.accumulator, transition)
         return self._Carry(imc=imc, accumulator=accumulator), None
 
-    def evaluate[TransitionT: Transition, StateT](
-        self: Eval[Imc[TransitionT, StateT]],
-        state: StateT,
-    ) -> tuple[Eval.Metrics, StateT]:
+    def evaluate(self, state: S) -> tuple[Eval.Metrics, S]:
         """Evaluate completed episodes and return the advanced sampler state.
 
         The input state is expected to begin at an episode boundary. Metrics
