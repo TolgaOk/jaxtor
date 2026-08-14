@@ -245,6 +245,7 @@ def train_step(
     state: State,
     *,
     agent: Agent,
+    imc: Imc,
     roll: Roll,
     stats: EpisodeStats,
     rew_norm: RewardNorm,
@@ -253,7 +254,7 @@ def train_step(
 ) -> tuple[State, dict]:
     """One NAF iteration: collect rollout, compute Q(λ) targets, train Q."""
     # 1. Collect rollout
-    imc_state = roll.imc.init(state.mc, state.agent)
+    imc_state = imc.init(state.mc, state.agent)
     seq, imc_state = roll.sample(imc_state)
     stats_state = stats.update(seq, state.stats)
     sam_metrics, stats_state = stats.drain(stats_state)
@@ -438,10 +439,11 @@ def train(cfg: Config) -> State:
             env=env,
         )
     )
+    train_imc = Imc(agent=agent, mc=train_mc)
     roll = Roll(
         seq_len=cfg.seq_len,
         seq_axis=1,
-        imc=Imc(agent=agent, mc=train_mc),
+        imc=train_imc,
     )
     stats = EpisodeStats(seq_axis=1)
 
@@ -512,6 +514,7 @@ def train(cfg: Config) -> State:
         return train_step(
             state,
             agent=agent,
+            imc=train_imc,
             roll=roll,
             stats=stats,
             rew_norm=rew_norm,

@@ -159,8 +159,9 @@ behavior_agent = Agent(tau=cfg.tau_mu)
 target_agent = Agent(tau=cfg.tau_pi)
 
 # Training rollout sampler
+behavior_imc = Imc(agent=behavior_agent, mc=vec_mc)
 roll = Roll(
-    imc=Imc(agent=behavior_agent, mc=vec_mc),
+    imc=behavior_imc,
     seq_len=cfg.seq_len,
     seq_axis=1,
 )
@@ -201,7 +202,7 @@ key, params_key, env_key, agent_key, eval_key = jrd.split(key, 5)
 params = MLP(4, cfg.hidden, 2, key=params_key)
 if not isinstance(params, MLP):
     raise TypeError("Equinox returned an unexpected module type")
-imc_state = roll.imc.init(
+imc_state = behavior_imc.init(
     vec_mc.init(jrd.split(key, cfg.n_envs), env=env.init(env_key)),
     Agent.State(key=agent_key, params=params),
 )
