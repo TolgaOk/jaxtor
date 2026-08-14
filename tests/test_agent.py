@@ -115,6 +115,42 @@ class Policy:
         )
 
 
+class StructuredBody:
+    """Map a dictionary observation to tuple-valued shared features."""
+
+    def apply(
+        self,
+        obs: dict[str, jax.Array],
+        state: None,
+    ) -> tuple[tuple[jax.Array, jax.Array], None]:
+        """Produce two feature leaves without assuming one input array."""
+        return (obs["left"] + obs["right"], obs["left"] - obs["right"]), state
+
+
+class StructuredValue:
+    """Produce values from tuple-valued features."""
+
+    def apply(
+        self,
+        features: tuple[jax.Array, jax.Array],
+        state: None,
+    ) -> tuple[jax.Array, None]:
+        """Use the first feature leaf as the value prediction."""
+        return features[0], state
+
+
+class StructuredPolicy:
+    """Produce categorical policies from tuple-valued features."""
+
+    def apply(
+        self,
+        features: tuple[jax.Array, jax.Array],
+        state: None,
+    ) -> tuple[Categorical, None]:
+        """Use both feature leaves as categorical logits."""
+        return Categorical(logits=jnp.stack(features, axis=-1)), state
+
+
 def test_partition_selects_only_marked_parameters():
     """Partitioning preserves names while excluding statistics and keys."""
     module = Module(static=Scale(value=None), in_ndim=0)
@@ -302,6 +338,27 @@ def test_vpi_act_evaluates_only_action_dependencies():
     assert acted.v.count == 0
     assert acted.pi.count == 1
     assert jnp.array_equal(acted.key, state.key)
+
+
+def test_vpi_forwards_structured_observations_and_features():
+    """Agent composition preserves pytree inputs and intermediate features."""
+    agent = VPi(
+        body=StructuredBody(),
+        v=StructuredValue(),
+        pi=StructuredPolicy(),
+        deterministic=True,
+    )
+    state = agent.init(jax.random.key(0), body=None, v=None, pi=None)
+    obs = {
+        "left": jnp.array([2.0, 1.0]),
+        "right": jnp.array([1.0, 3.0]),
+    }
+
+    pred, _ = jax.jit(agent.apply)(obs, state)
+    act, _ = jax.jit(agent.act)(obs, state)
+
+    assert jnp.array_equal(pred.v, jnp.array([3.0, 4.0]))
+    assert jnp.array_equal(act, jnp.array([0, 0]))
 
 
 def test_vqpi_act_skips_both_unused_value_heads():

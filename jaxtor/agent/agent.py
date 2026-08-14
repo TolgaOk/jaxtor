@@ -33,7 +33,7 @@ class Transform[In, Out, S](Protocol):
 
 
 @dataclass
-class VPi[Act, Eval, BodyS, ValS, PiS]:
+class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
     """Compose a body, value head, and policy head into an acting agent.
 
     Attributes:
@@ -53,9 +53,9 @@ class VPi[Act, Eval, BodyS, ValS, PiS]:
         act: Select only the action required by a minimal sampler.
     """
 
-    body: Transform[jax.Array, jax.Array, BodyS]
-    v: Transform[jax.Array, jax.Array, ValS]
-    pi: Transform[jax.Array, Distribution[Act, Eval], PiS]
+    body: Transform[Obs, Feat, BodyS]
+    v: Transform[Feat, jax.Array, ValS]
+    pi: Transform[Feat, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
@@ -93,12 +93,9 @@ class VPi[Act, Eval, BodyS, ValS, PiS]:
 
     def apply(
         self,
-        obs: jax.Array,
+        obs: Obs,
         state: VPi.State[BodyS, ValS, PiS],
-    ) -> tuple[
-        VPi.Pred[Act, Eval],
-        VPi.State[BodyS, ValS, PiS],
-    ]:
+    ) -> tuple[VPi.Pred[Act, Eval], VPi.State[BodyS, ValS, PiS]]:
         """Produce value and policy predictions without selecting an action."""
         features, body = self.body.apply(obs, state.body)
         value, v = self.v.apply(features, state.v)
@@ -110,12 +107,9 @@ class VPi[Act, Eval, BodyS, ValS, PiS]:
 
     def act(
         self,
-        obs: jax.Array,
+        obs: Obs,
         state: VPi.State[BodyS, ValS, PiS],
-    ) -> tuple[
-        Act,
-        VPi.State[BodyS, ValS, PiS],
-    ]:
+    ) -> tuple[Act, VPi.State[BodyS, ValS, PiS]]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
         dist, pi = self.pi.apply(features, state.pi)
@@ -133,14 +127,7 @@ class VPi[Act, Eval, BodyS, ValS, PiS]:
 
 
 @dataclass
-class VQPi[
-    Act,
-    Eval,
-    BodyS,
-    ValS,
-    QS,
-    PiS,
-]:
+class VQPi[Obs, Feat, Act, Eval, BodyS, ValS, QS, PiS]:
     """Compose value, action-value, and policy components into an agent.
 
     Attributes:
@@ -161,10 +148,10 @@ class VQPi[
         act: Select only the action required by a minimal sampler.
     """
 
-    body: Transform[jax.Array, jax.Array, BodyS]
-    v: Transform[jax.Array, jax.Array, ValS]
-    q: Transform[jax.Array, jax.Array, QS]
-    pi: Transform[jax.Array, Distribution[Act, Eval], PiS]
+    body: Transform[Obs, Feat, BodyS]
+    v: Transform[Feat, jax.Array, ValS]
+    q: Transform[Feat, jax.Array, QS]
+    pi: Transform[Feat, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
@@ -198,12 +185,9 @@ class VQPi[
 
     def apply(
         self,
-        obs: jax.Array,
+        obs: Obs,
         state: VQPi.State[BodyS, ValS, QS, PiS],
-    ) -> tuple[
-        VQPi.Pred[Act, Eval],
-        VQPi.State[BodyS, ValS, QS, PiS],
-    ]:
+    ) -> tuple[VQPi.Pred[Act, Eval], VQPi.State[BodyS, ValS, QS, PiS]]:
         """Produce value, action-value, and policy predictions."""
         features, body = self.body.apply(obs, state.body)
         value, v = self.v.apply(features, state.v)
@@ -222,12 +206,9 @@ class VQPi[
 
     def act(
         self,
-        obs: jax.Array,
+        obs: Obs,
         state: VQPi.State[BodyS, ValS, QS, PiS],
-    ) -> tuple[
-        Act,
-        VQPi.State[BodyS, ValS, QS, PiS],
-    ]:
+    ) -> tuple[Act, VQPi.State[BodyS, ValS, QS, PiS]]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
         dist, pi = self.pi.apply(features, state.pi)
