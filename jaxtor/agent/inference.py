@@ -1,4 +1,15 @@
-"""Agent inference aligned with sampled transition sequences."""
+"""Agent inference aligned with sampled transition sequences.
+
+Inference replays an agent and aligns values with true successors::
+
+    inference = VPiNextVInference(agent=agent, seq_axis=1)
+    infer = inference.apply(seq, agent_state)
+    values, next_values = infer.v_tm1, infer.v_t
+    policies = infer.pi_tm1
+
+Ordinary continuations reuse the next value. Sequence tails and truncations
+evaluate their true successor observations.
+"""
 
 from __future__ import annotations
 
@@ -17,21 +28,17 @@ class VPred(Protocol):
     v: jax.Array
 
 
-class VPiPred[PiT](Protocol):
+class VPiPred[Pi](Protocol):
     """Agent prediction containing a value and policy per observation."""
 
     v: jax.Array
-    pi: PiT
+    pi: Pi
 
 
-class Agent[PredT, StateT](Protocol):
+class Agent[Pred, S](Protocol):
     """Read-only application capability consumed during sequence replay."""
 
-    def apply(
-        self,
-        obs: jax.Array,
-        state: StateT,
-    ) -> tuple[PredT, StateT]: ...
+    def apply(self, obs: jax.Array, state: S) -> tuple[Pred, S]: ...
 
 
 class Sequence(Protocol):
@@ -53,18 +60,18 @@ class _BootstrapInput:
 
 
 @dataclass
-class _Endpoint[StateT]:
+class _Endpoint[S]:
     """Inputs shared by the two conditional bootstrap branches."""
 
     obs: jax.Array
     fallback: jax.Array
-    state: StateT
+    state: S
 
 
-def _apply_endpoint[PredT: VPred, StateT](
-    endpoint: _Endpoint[StateT],
+def _apply_endpoint[Pred: VPred, S](
+    endpoint: _Endpoint[S],
     *,
-    agent: Agent[PredT, StateT],
+    agent: Agent[Pred, S],
 ) -> jax.Array:
     """Evaluate one true successor observation."""
     pred, _ = agent.apply(endpoint.obs, endpoint.state)
@@ -72,16 +79,16 @@ def _apply_endpoint[PredT: VPred, StateT](
     return pred.v
 
 
-def _reuse_endpoint[StateT](endpoint: _Endpoint[StateT]) -> jax.Array:
+def _reuse_endpoint[S](endpoint: _Endpoint[S]) -> jax.Array:
     """Reuse the next current value for an ordinary continuation."""
     return endpoint.fallback
 
 
-def _bootstrap[PredT: VPred, StateT](
+def _bootstrap[Pred: VPred, S](
     item: _BootstrapInput,
     *,
-    agent: Agent[PredT, StateT],
-    state: StateT,
+    agent: Agent[Pred, S],
+    state: S,
 ) -> jax.Array:
     """Infer or reuse one successor value under a scalar condition."""
     return jax.lax.cond(
@@ -92,11 +99,11 @@ def _bootstrap[PredT: VPred, StateT](
     )
 
 
-def _next_v[PredT: VPred, StateT](
-    agent: Agent[PredT, StateT],
+def _next_v[Pred: VPred, S](
+    agent: Agent[Pred, S],
     seq: Sequence,
     v_tm1: jax.Array,
-    state: StateT,
+    state: S,
     seq_axis: int,
 ) -> jax.Array:
     """Align true-successor values without evaluating terminal observations."""
@@ -136,7 +143,7 @@ def _next_v[PredT: VPred, StateT](
 
 
 @dataclass
-class VNextVInference[AgentStateT]:
+class VNextVInference[AgentS]:
     """Replay values and align them with true transition successors.
 
     Ordinary continuations reuse the next current value. Truncations and an
@@ -157,7 +164,7 @@ class VNextVInference[AgentStateT]:
         apply: Replay the agent and align values for every transition.
     """
 
-    agent: Agent[VPred, AgentStateT]
+    agent: Agent[VPred, AgentS]
     seq_axis: int = 0
 
     @dataclass
@@ -175,7 +182,7 @@ class VNextVInference[AgentStateT]:
     def apply(
         self,
         seq: Sequence,
-        state: AgentStateT,
+        state: AgentS,
     ) -> VNextVInference.Inference:
         """Return current and true-successor values for one sequence."""
         pred, _ = self.agent.apply(seq.obs, state)
@@ -186,7 +193,7 @@ class VNextVInference[AgentStateT]:
 
 
 @dataclass
-class VPiNextVInference[PiT, AgentStateT]:
+class VPiNextVInference[Pi, AgentS]:
     """Replay current values and policies, then align successor values.
 
     Ordinary continuations reuse the next current value. Truncations and an
@@ -207,11 +214,11 @@ class VPiNextVInference[PiT, AgentStateT]:
         apply: Replay the agent and align inference for every transition.
     """
 
-    agent: Agent[VPiPred[PiT], AgentStateT]
+    agent: Agent[VPiPred[Pi], AgentS]
     seq_axis: int = 0
 
     @dataclass
-    class Inference[PolicyT]:
+    class Inference[PiData]:
         """Policy and values aligned with ``T`` sampled transitions.
 
         Attributes:
@@ -221,14 +228,14 @@ class VPiNextVInference[PiT, AgentStateT]:
         """
 
         v_tm1: jax.Array
-        pi_tm1: PolicyT
+        pi_tm1: PiData
         v_t: jax.Array
 
     def apply(
         self,
         seq: Sequence,
-        state: AgentStateT,
-    ) -> VPiNextVInference.Inference[PiT]:
+        state: AgentS,
+    ) -> VPiNextVInference.Inference[Pi]:
         """Return current policy and current and successor values."""
         pred, _ = self.agent.apply(seq.obs, state)
         return self.Inference(
