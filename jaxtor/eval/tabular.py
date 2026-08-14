@@ -1,17 +1,21 @@
 """Convergence evaluation for tabular value-learning agents.
 
 ``Eval`` compares an agent's Q-values with their previous values, the Bellman
-optimality target, and known optimal Q-values.
+optimality target, and known optimal Q-values::
+
+    evaluator = Eval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    state = evaluator.init(agent_state)
+    metrics, state = evaluator.evaluate(agent_state, state)
 """
 
 from __future__ import annotations
 
-from typing import Generic, Protocol, TypeVar
+from typing import Protocol
 
 import chex
 import jax
 import jax.numpy as jnp
-from chex import dataclass  # pyright: ignore[reportUnknownVariableType]
+from chex import dataclass
 
 from jaxtor.env.tabular import Mdp
 
@@ -63,17 +67,14 @@ def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
     return q
 
 
-AgentState = TypeVar("AgentState", contravariant=True)
-
-
-class Agent(Protocol[AgentState]):
+class Agent[S](Protocol):
     """Q-value surface consumed by ``Eval``."""
 
-    def q_vals(self, state: AgentState, obs: jax.Array) -> jax.Array: ...
+    def q_vals(self, obs: jax.Array, state: S) -> jax.Array: ...
 
 
-@dataclass  # pyright: ignore[reportUntypedClassDecorator]
-class Eval(Generic[AgentState]):
+@dataclass
+class Eval[AgentS]:
     """Evaluate convergence of a tabular value-learning agent.
 
     Attributes:
@@ -85,10 +86,10 @@ class Eval(Generic[AgentState]):
 
     mdp: Mdp
     gamma: float
-    agent: Agent[AgentState]
+    agent: Agent[AgentS]
     opt_q: jax.Array
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class State:
         """Dynamic convergence history.
 
@@ -100,7 +101,7 @@ class Eval(Generic[AgentState]):
         prev_q: jax.Array
         step: jax.Array
 
-    @dataclass  # pyright: ignore[reportUntypedClassDecorator]
+    @dataclass
     class Metrics:
         """Convergence diagnostics for one evaluation.
 
@@ -132,17 +133,17 @@ class Eval(Generic[AgentState]):
         pi_diff_linf: jax.Array
         iteration: jax.Array
 
-    def _q_values(self, agent_state: AgentState) -> jax.Array:
+    def _q_values(self, agent_state: AgentS) -> jax.Array:
         """Read the complete Q-table through the agent protocol."""
         all_states = jnp.arange(self.mdp.state_size)
-        q_values = self.agent.q_vals(agent_state, all_states)
+        q_values = self.agent.q_vals(all_states, agent_state)
         chex.assert_shape(
             q_values,
             (self.mdp.action_size, self.mdp.state_size),
         )
         return q_values
 
-    def init(self, agent_state: AgentState) -> Eval.State:
+    def init(self, agent_state: AgentS) -> Eval.State:
         """Initialize convergence history from an agent state.
 
         Args:
@@ -158,14 +159,14 @@ class Eval(Generic[AgentState]):
 
     def evaluate(
         self,
+        agent_state: AgentS,
         state: Eval.State,
-        agent_state: AgentState,
     ) -> tuple[Eval.Metrics, Eval.State]:
         """Evaluate the current agent and advance convergence history.
 
         Args:
-            state: Current evaluator state.
             agent_state: Agent state to evaluate.
+            state: Current evaluator state.
 
         Returns:
             Convergence metrics and the advanced evaluator state.

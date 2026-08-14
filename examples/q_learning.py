@@ -79,7 +79,7 @@ class Agent:
         action = jnp.where(jrd.uniform(explore_key) < self.epsilon, random, greedy)
         return action, replace(state, key=key)
 
-    def q_vals(self, state: Agent.State, obs: jax.Array) -> jax.Array:
+    def q_vals(self, obs: jax.Array, state: Agent.State) -> jax.Array:
         """Q-values for given state indices."""
         return state.q[:, obs]
 
@@ -147,7 +147,7 @@ for k in track(range(cfg.n_steps), description="Training"):
     imc_state = train_step(imc_state, k)
 
     if (k + 1) % cfg.eval_freq == 0:
-        m, eval_state = jit_eval(eval_state, imc_state.agent)
+        m, eval_state = jit_eval(imc_state.agent, eval_state)
         print(
             f"  step {k + 1:6d}"
             f"  bellman={float(m.bellman_linf):.4f}"
