@@ -113,13 +113,8 @@ cfg = tyro.cli(Config)
 env = tabular.make(cfg.env_name)
 
 agent = Agent(epsilon=cfg.epsilon)
-imc = Imc(
-    agent=agent,
-    mc=Mc(
-        max_eps_len=env.config.max_eps_len,
-        env=env,
-    ),
-)
+mc = Mc(max_eps_len=env.config.max_eps_len, env=env)
+imc = Imc(agent=agent, mc=mc)
 
 key = jrd.PRNGKey(cfg.seed)
 key, env_key, agent_key = jrd.split(key, 3)
@@ -137,7 +132,7 @@ evaluator = Evaluator(
 )
 jit_eval = jax.jit(evaluator.evaluate)
 agent_state = Agent.State(key=agent_key, q=jnp.zeros((A, S)))
-imc_state = imc.init(mc=imc.mc.init(agent_key, env_state), agent=agent_state)
+imc_state = imc.init(mc=mc.init(agent_key, env_state), agent=agent_state)
 eval_state = evaluator.init(agent_state)
 
 

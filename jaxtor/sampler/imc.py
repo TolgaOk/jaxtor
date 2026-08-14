@@ -6,40 +6,26 @@ open Markov chain. Rich agent predictions belong to ``LoadedRoll``.
 
 from __future__ import annotations
 
-from typing import Generic, Protocol, TypeVar
+from typing import Protocol
 
-import jax
 from chex import dataclass
 
 
-class MarkovChain[McT, StateT](Protocol):
+class MarkovChain[Obs, Act, Sample, S](Protocol):
     """Open Markov-chain capability required by ``Imc``."""
 
-    def observe(self, state: StateT) -> jax.Array: ...
-
-    def sample(
-        self,
-        act: jax.Array,
-        state: StateT,
-    ) -> tuple[McT, StateT]: ...
+    def observe(self, state: S) -> Obs: ...
+    def sample(self, act: Act, state: S) -> tuple[Sample, S]: ...
 
 
-class Agent[StateT](Protocol):
+class Agent[Obs, Act, S](Protocol):
     """Action-selection capability required by ``Imc``."""
 
-    def act(
-        self,
-        obs: jax.Array,
-        state: StateT,
-    ) -> tuple[jax.Array, StateT]: ...
-
-
-AgentT = TypeVar("AgentT", covariant=True)
-MarkovChainT = TypeVar("MarkovChainT", covariant=True)
+    def act(self, obs: Obs, state: S) -> tuple[Act, S]: ...
 
 
 @dataclass
-class Imc(Generic[AgentT, MarkovChainT]):
+class Imc[Obs, Act, Sample, AgentS, McS]:
     """Join an action-selecting agent to a Markov chain for one step.
 
     Attributes:
@@ -54,11 +40,11 @@ class Imc(Generic[AgentT, MarkovChainT]):
         sample: Select one action and advance the Markov chain once.
     """
 
-    agent: AgentT
-    mc: MarkovChainT
+    agent: Agent[Obs, Act, AgentS]
+    mc: MarkovChain[Obs, Act, Sample, McS]
 
     @dataclass
-    class State[McDataT, AgentDataT]:
+    class State[McData, AgentData]:
         """Dynamic state threaded through ``Imc``.
 
         Attributes:
@@ -66,24 +52,17 @@ class Imc(Generic[AgentT, MarkovChainT]):
             agent: State of the action-selecting agent.
         """
 
-        mc: McDataT
-        agent: AgentDataT
+        mc: McData
+        agent: AgentData
 
-    def init[AgentStateT, McT, McStateT](
-        self: Imc[Agent[AgentStateT], MarkovChain[McT, McStateT]],
-        mc: McStateT,
-        agent: AgentStateT,
-    ) -> Imc.State[McStateT, AgentStateT]:
+    def init(self, mc: McS, agent: AgentS) -> Imc.State[McS, AgentS]:
         """Combine initialized Markov-chain and agent states."""
         return self.State(mc=mc, agent=agent)
 
-    def sample[AgentStateT, McT, McStateT](
-        self: Imc[Agent[AgentStateT], MarkovChain[McT, McStateT]],
-        state: Imc.State[McStateT, AgentStateT],
-    ) -> tuple[
-        McT,
-        Imc.State[McStateT, AgentStateT],
-    ]:
+    def sample(
+        self,
+        state: Imc.State[McS, AgentS],
+    ) -> tuple[Sample, Imc.State[McS, AgentS]]:
         """Select one action and advance the Markov chain once."""
         act, agent = self.agent.act(self.mc.observe(state.mc), state.agent)
         transition, mc = self.mc.sample(act, state.mc)
