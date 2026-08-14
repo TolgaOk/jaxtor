@@ -25,25 +25,15 @@ class EnvStep(Protocol):
     trun: chex.Array
 
 
-class Env[StateT, StepT: EnvStep](Protocol):
+class Env[S, Step: EnvStep](Protocol):
     """Environment capability required by ``Mc``."""
 
-    def reset(
-        self,
-        key: jax.Array,
-        state: StateT,
-    ) -> tuple[chex.Numeric, StateT]: ...
-
-    def step(
-        self,
-        key: jax.Array,
-        act: jax.Array,
-        state: StateT,
-    ) -> tuple[StepT, StateT]: ...
+    def reset(self, key: jax.Array, state: S) -> tuple[chex.Numeric, S]: ...
+    def step(self, key: jax.Array, act: jax.Array, state: S) -> tuple[Step, S]: ...
 
 
 @dataclass
-class Mc[EnvStateT, EnvStepT: EnvStep]:
+class Mc[EnvS, Step: EnvStep]:
     """Sample an open Markov chain with reset and truncation handling.
 
     Its state keeps the current observation and episode index so
@@ -64,10 +54,10 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
     """
 
     max_eps_len: int
-    env: Env[EnvStateT, EnvStepT]
+    env: Env[EnvS, Step]
 
     @dataclass
-    class State[EnvDataT]:
+    class State[EnvData]:
         """Dynamic state threaded through ``Mc``.
 
         Attributes:
@@ -78,7 +68,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         """
 
         key: jax.Array
-        env: EnvDataT
+        env: EnvData
         last_obs: jax.Array
         eps_idx: jax.Array
 
@@ -103,11 +93,11 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         nobs: jax.Array
 
     @dataclass
-    class _Advance[EnvDataT]:
+    class _Advance[EnvData]:
         """Data required to finish one environment advance."""
 
-        state: Mc.State[EnvDataT]
-        env: EnvDataT
+        state: Mc.State[EnvData]
+        env: EnvData
         transition: Mc.Transition
         key: jax.Array
         reset_key: jax.Array
@@ -117,11 +107,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         if self.max_eps_len < 1:
             raise ValueError("max_eps_len must be positive")
 
-    def init(
-        self,
-        key: jax.Array,
-        env: EnvStateT,
-    ) -> Mc.State[EnvStateT]:
+    def init(self, key: jax.Array, env: EnvS) -> Mc.State[EnvS]:
         """Initialize the Markov chain from an environment state."""
         key, reset_key = jrd.split(key)
         obs, env = self.env.reset(reset_key, env)
@@ -132,15 +118,15 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             eps_idx=jnp.array(0, dtype=jnp.int32),
         )
 
-    def observe(self, state: Mc.State[EnvStateT]) -> jax.Array:
+    def observe(self, state: Mc.State[EnvS]) -> jax.Array:
         """Read the current observation without advancing state."""
         return state.last_obs
 
     def sample(
         self,
         act: chex.Array,
-        state: Mc.State[EnvStateT],
-    ) -> tuple[Mc.Transition, Mc.State[EnvStateT]]:
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc.State[EnvS]]:
         """Advance once and reset only when the episode reaches a boundary."""
         transition, advance = self._advance(act, state)
         done = jnp.logical_or(transition.term, transition.trun)
@@ -155,8 +141,8 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
     def _advance(
         self,
         act: chex.Array,
-        state: Mc.State[EnvStateT],
-    ) -> tuple[Mc.Transition, Mc._Advance[EnvStateT]]:
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc._Advance[EnvS]]:
         """Step the environment and retain data needed for boundary handling."""
         key, step_key, reset_key = jrd.split(state.key, 3)
         act = jnp.asarray(act)
@@ -186,10 +172,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
             reset_key=reset_key,
         )
 
-    def _reset_episode(
-        self,
-        advance: Mc._Advance[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
+    def _reset_episode(self, advance: Mc._Advance[EnvS]) -> Mc.State[EnvS]:
         """Reset after a terminal or truncated transition."""
         state = advance.state
         obs, env = self.env.reset(advance.reset_key, advance.env)
@@ -202,9 +185,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
         )
 
     @staticmethod
-    def _continue_episode(
-        advance: Mc._Advance[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
+    def _continue_episode(advance: Mc._Advance[EnvS]) -> Mc.State[EnvS]:
         """Continue an unfinished episode from its true next observation."""
         state = advance.state
         transition = advance.transition
@@ -218,7 +199,7 @@ class Mc[EnvStateT, EnvStepT: EnvStep]:
 
 
 @dataclass
-class VecMc[EnvStateT, EnvStepT: EnvStep]:
+class VecMc[EnvS, Step: EnvStep]:
     """Vectorize one ``Mc`` over independent environment states.
 
     A normal batch step does not compute reset states. If any lane reaches a
@@ -234,33 +215,29 @@ class VecMc[EnvStateT, EnvStepT: EnvStep]:
         sample: Advance all lanes and handle mixed boundaries.
     """
 
-    mc: Mc[EnvStateT, EnvStepT]
+    mc: Mc[EnvS, Step]
 
     @dataclass
-    class _Boundary[EnvDataT]:
+    class _Boundary[EnvData]:
         """Batched data required for conditional reset selection."""
 
         done: jax.Array
-        advance: Mc._Advance[EnvDataT]
-        continued: Mc.State[EnvDataT]
+        advance: Mc._Advance[EnvData]
+        continued: Mc.State[EnvData]
 
-    def init(
-        self,
-        keys: jax.Array,
-        env: EnvStateT,
-    ) -> Mc.State[EnvStateT]:
+    def init(self, keys: jax.Array, env: EnvS) -> Mc.State[EnvS]:
         """Initialize one Markov-chain state per random key."""
         return jax.vmap(self.mc.init, in_axes=(0, None))(keys, env)
 
-    def observe(self, state: Mc.State[EnvStateT]) -> jax.Array:
+    def observe(self, state: Mc.State[EnvS]) -> jax.Array:
         """Read the batched current observations."""
         return jax.vmap(self.mc.observe)(state)
 
     def sample(
         self,
         act: chex.Array,
-        state: Mc.State[EnvStateT],
-    ) -> tuple[Mc.Transition, Mc.State[EnvStateT]]:
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc.State[EnvS]]:
         """Advance every lane and reset only boundary-containing batches."""
         chex.assert_equal_shape_prefix([act, state.key], 1)
         transition, advance = jax.vmap(self.mc._advance)(act, state)
@@ -278,27 +255,22 @@ class VecMc[EnvStateT, EnvStepT: EnvStep]:
         )
         return transition, state
 
-    def _reset_boundaries(
-        self,
-        boundary: VecMc._Boundary[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
+    def _reset_boundaries(self, boundary: VecMc._Boundary[EnvS]) -> Mc.State[EnvS]:
         """Prepare reset states and select them only for completed lanes."""
         reset = jax.vmap(self.mc._reset_episode)(boundary.advance)
         return self._select_boundary(boundary.done, reset, boundary.continued)
 
     @staticmethod
-    def _continue_boundaries(
-        boundary: VecMc._Boundary[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
+    def _continue_boundaries(boundary: VecMc._Boundary[EnvS]) -> Mc.State[EnvS]:
         """Return already-computed continuation states for a normal batch."""
         return boundary.continued
 
     @staticmethod
     def _select_boundary(
         boundary: jax.Array,
-        reset: Mc.State[EnvStateT],
-        continued: Mc.State[EnvStateT],
-    ) -> Mc.State[EnvStateT]:
+        reset: Mc.State[EnvS],
+        continued: Mc.State[EnvS],
+    ) -> Mc.State[EnvS]:
         """Select reset-state leaves for boundary lanes."""
 
         def select(reset_leaf: jax.Array, continued_leaf: jax.Array) -> jax.Array:
@@ -309,6 +281,6 @@ class VecMc[EnvStateT, EnvStepT: EnvStep]:
             return jnp.where(mask, reset_leaf, continued_leaf)
 
         return cast(
-            Mc.State[EnvStateT],
+            Mc.State[EnvS],
             jax.tree.map(select, reset, continued),
         )
