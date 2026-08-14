@@ -1,39 +1,3 @@
-"""Composable models, heads, acting agents, distributions, and inference.
-
-Configured components are static, while their nested ``State`` dataclasses
-mirror the dynamic child-state tree. Trainable leaves are marked by
-:class:`Param`; :func:`partition` selects them only at the optimizer boundary.
-
-Neural-library callables are adapted at the leaves. For example, given an
-observation normalizer and semantic value and policy heads, an Equinox body is
-partitioned before entering the component tree::
-
-    body_eqx = eqx.nn.Sequential(
-        [
-            eqx.nn.Linear(obs_size, hidden_size, key=body_key),
-            eqx.nn.Lambda(jax.nn.tanh),
-        ]
-    )
-    body_params, body_static = eqx.partition(body_eqx, eqx.is_array)
-
-    body_net = Module(static=body_static)
-    body_net_state = body_net.init(body_params)
-    body = NormModel(norm=obs_norm, model=body_net)
-    body_state = body.init(obs_norm_state, body_net_state)
-
-    agent = VPi(
-        body=body,
-        v=value_head,
-        pi=policy_head,
-    )
-
-``Module`` keeps the callable's static structure on the configured component
-and its array parameters in ``Module.State``. Outer components add semantics
-and mirror the same nesting in ``NormModel.State``, head states, and finally
-``VPi.State``. Calling ``agent.apply`` follows that tree inward and returns the
-updated state with the same structure.
-"""
-
 from jaxtor.agent.agent import VPi as VPi
 from jaxtor.agent.agent import VQPi as VQPi
 from jaxtor.agent.dist import Categorical as Categorical
