@@ -13,6 +13,7 @@ from jaxtor.agent import (
     DiagNormalHead,
     Model,
     Module,
+    Naf,
     NormModel,
     Param,
     Pi,
@@ -320,6 +321,62 @@ def test_q_heads_preserve_action_semantics_over_leading_axes():
     chex.assert_shape(selected, (2, 5))
     expected = jnp.concatenate((features, actions), axis=-1) @ jnp.arange(5.0) + 1
     assert jnp.allclose(selected, expected)
+
+
+def test_naf_agent_exposes_complete_predictions_and_selective_paths():
+    """NAF exposes a Q-function while acting skips its unused value head."""
+    zero = Calls(count=jnp.array(0, dtype=jnp.int32))
+    agent = Naf(
+        act_size=2,
+        body=Body(),
+        v=Value(),
+        loc=ActionValues(),
+        p=ActionValues(),
+        eps=0.25,
+        scale=0.1,
+    )
+    state = agent.init(
+        jax.random.key(0),
+        body=zero,
+        v=zero,
+        loc=zero,
+        p=zero,
+    )
+    obs = jnp.arange(12, dtype=jnp.float32).reshape((2, 3, 2)) / 10
+    query_act = jnp.zeros_like(obs)
+
+    pred, applied = jax.jit(agent.apply)(obs, state)
+    act, acted = jax.jit(agent.act)(obs, state)
+    q = jax.jit(lambda qfn, act: qfn.evaluate(act))(pred.qfn, query_act)
+    sample = jax.jit(lambda pi, key: pi.sample(key))(pred.pi, jax.random.key(1))
+
+    chex.assert_shape(pred.v, (2, 3))
+    chex.assert_shape(q, (2, 3))
+    chex.assert_shape(pred.pi.loc, (2, 3, 2))
+    chex.assert_shape(pred.pi.cov, (2, 3, 2, 2))
+    chex.assert_shape(pred.qfn.p, (2, 3, 2, 2))
+    chex.assert_shape(pred.pi.evaluate(sample).logp, (2, 3))
+    chex.assert_shape(act, (2, 3, 2))
+    delta = query_act - pred.pi.loc
+    assert jnp.allclose(
+        q,
+        pred.v - 0.5 * jnp.einsum("...i,...ij,...j->...", delta, pred.qfn.p, delta),
+    )
+    assert jnp.all(jnp.linalg.eigvalsh(pred.qfn.p) > 0)
+    assert jnp.allclose(
+        pred.pi.cov @ pred.qfn.p,
+        0.1**2 * jnp.broadcast_to(jnp.eye(2), pred.qfn.p.shape),
+    )
+    assert jnp.all(jnp.isfinite(pred.pi.evaluate(sample).logp))
+    assert applied.body.count == 1
+    assert applied.v.count == 1
+    assert applied.loc.count == 1
+    assert applied.p.count == 1
+    assert acted.body.count == 1
+    assert acted.v.count == 0
+    assert acted.loc.count == 1
+    assert acted.p.count == 1
+    assert not jnp.array_equal(acted.key, state.key)
 
 
 def test_diag_normal_head_and_model_thread_their_child_states():

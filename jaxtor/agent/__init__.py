@@ -1,3 +1,4 @@
+from jaxtor.agent.agent import Naf as Naf
 from jaxtor.agent.agent import Pi as Pi
 from jaxtor.agent.agent import VPi as VPi
 from jaxtor.agent.agent import VQPi as VQPi
@@ -5,11 +6,13 @@ from jaxtor.agent.dist import Categorical as Categorical
 from jaxtor.agent.dist import DiagNormal as DiagNormal
 from jaxtor.agent.dist import Distribution as Distribution
 from jaxtor.agent.dist import Evaluation as Evaluation
+from jaxtor.agent.dist import Normal as Normal
 from jaxtor.agent.head import CategoricalHead as CategoricalHead
 from jaxtor.agent.head import DiagNormalHead as DiagNormalHead
 from jaxtor.agent.head import QHead as QHead
 from jaxtor.agent.head import QsaHead as QsaHead
 from jaxtor.agent.head import VHead as VHead
+from jaxtor.agent.inference import QfnVnextInference as QfnVnextInference
 from jaxtor.agent.inference import VNextVInference as VNextVInference
 from jaxtor.agent.inference import VPiNextVInference as VPiNextVInference
 from jaxtor.agent.model import Function as Function

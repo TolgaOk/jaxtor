@@ -3,49 +3,94 @@
 Agent components assemble models, reinforcement-learning heads, and action
 distributions while keeping dynamic data in explicit `State` pytrees.
 
+Composition is structural. A parent accepts only the child capability it uses,
+then nests the child states under its own `State`:
+
+```text
+Module:              array       -> features
+VHead:               features    -> V(s)
+CategoricalHead:     features    -> categorical distribution
+VPi:                 observation -> {V(s), distribution}
+VPiNextVInference:   sequence    -> {V(s_t), pi(s_t), V(s_{t+1})}
+```
+
+## Action-value names
+
+The names distinguish how an action-value is represented and evaluated.
+
+| Name | Meaning |
+| --- | --- |
+| `Qfn` | A state-bound function `a -> Q(s, a)`, exposed through `evaluate(act)`. |
+| `Qvec` | The finite-action vector `[Q(s, a_1), ..., Q(s, a_A)]`. |
+| `Q` / `q` | An evaluated scalar `Q(s, a)`. Lowercase `q` is used for values. |
+| `Qsa` | A model that takes `(s, a)` directly and returns `q`. |
+
+`Qsa` describes the input signature. Continuous-action critics commonly use
+this signature, but it does not require a continuous action space.
+
 ## Components
 
 ### Models
 
-| Component | Role |
-| --- | --- |
-| `Module` | Adapts a partitioned callable pytree to the stateful transform interface. |
-| `Model` | Applies a feature transform followed by a prediction head. |
-| `NormModel` | Normalizes inputs before applying another model. |
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `Module` | A partitioned array callable and an array input. | The callable output and parameter state. |
+| `Model` | `body: In -> Feat`, `head: Feat -> Pred`, and `In`. | `Pred` and nested body/head state. |
+| `NormModel` | A normalizer, `model: In -> Pred`, and `In`. | `Pred` and nested normalization/model state. |
 
 ### Agents
 
-| Component | Role |
-| --- | --- |
-| `Pi` | Composes a shared body with a policy head. |
-| `VPi` | Composes a shared body with state-value and policy heads. |
-| `VQPi` | Composes a shared body with state-value, action-value, and policy heads. |
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `Pi` | An observation body and policy head. | `Pred(pi)` or a selected action. |
+| `VPi` | An observation body, value head, and policy head. | `Pred(v, pi)` or a selected action. |
+| `VQPi` | An observation body, value head, finite-action Q head, and policy head. | `Pred(v, q, pi)` or a selected action. |
+| `Naf` | An observation body plus value, location, and precision heads. | `Pred(v, qfn, pi)` or a selected action. |
 
 ### Heads
 
-| Component | Output |
-| --- | --- |
-| `VHead` | One state value, `V(s)`. |
-| `QHead` | Values for every finite action, `Q(s, ·)`. |
-| `QsaHead` | One state-action value, `Q(s, a)`. |
-| `CategoricalHead` | A categorical policy distribution. |
-| `DiagNormalHead` | A diagonal-Normal policy distribution. |
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `VHead` | Features and a transform ending in one value. | `V(s)` with the feature axis removed. |
+| `QHead` | Features and a transform ending in `n_actions` values. | `Q(s, .)` over the final action axis. |
+| `QsaHead` | Features, actions with matching leading axes, and a scalar-value transform. | One `Q(s, a)` per input pair. |
+| `CategoricalHead` | Features and a logits transform. | A `Categorical` distribution. |
+| `DiagNormalHead` | Features and location and log-scale transforms. | A `DiagNormal` distribution. |
 
-### Distributions and inference
+### Distributions
 
-| Component | Role |
-| --- | --- |
-| `Categorical` | Samples and evaluates finite actions. |
-| `DiagNormal` | Samples and evaluates continuous vector actions. |
-| `Evaluation` | Holds an action's log-probability and distribution entropy. |
-| `VNextVInference` | Aligns current and successor values with a sampled sequence. |
-| `VPiNextVInference` | Aligns current policies, current values, and successor values. |
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `Categorical` | Logits; a key for `sample` or action for `evaluate`. | A finite action, mode, or `Evaluation`. |
+| `DiagNormal` | Location and log scale; a key or continuous action. | A vector action, mode, or `Evaluation`. |
+| `Normal` | Location and positive-definite covariance; a key or action. | A vector action, mode, or `Evaluation`. |
+| `Evaluation` | Log-probability and entropy arrays. | A methodless result containing `logp` and `entropy`. |
 
-### State helpers and interfaces
+### Sequence inference
 
-`Param`, `Partition`, `partition`, and `combine` separate trainable leaves from
-the rest of a component state. `Function`, `Transform`, `Normalizer`, and
-`Distribution` are the exported interfaces for compatible custom components.
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `VNextVInference` | A sequence with `obs`, `nobs`, `term`, and `trun`; an agent whose prediction has `v`. | `Inference(v_tm1, v_t)` aligned to the sequence. |
+| `VPiNextVInference` | The same sequence; an agent whose prediction has `v` and `pi`. | `Inference(v_tm1, pi_tm1, v_t)` aligned to the sequence. |
+| `QfnVnextInference` | A sequence with actions; an agent whose prediction has `v` and `qfn`. | `Inference(q_t, v_t)` aligned for RLax off-policy returns. |
+
+### State helpers
+
+| Component | Requires | Produces |
+| --- | --- | --- |
+| `Param` | A trainable array pytree. | A trainable-leaf marker. |
+| `Partition` | Parameter and frozen state-shaped trees. | A methodless pair named `params` and `frozen`. |
+| `partition` | A component state containing `Param` leaves. | Complementary `params` and `frozen` state-shaped trees. |
+| `combine` | Complementary parameter and frozen trees. | The reconstructed component state. |
+
+### Capability interfaces
+
+| Interface | Requires | Produces |
+| --- | --- | --- |
+| `Function` | `In`. | `Out`. |
+| `Transform` | `In` and `State`. | `Out` and updated `State`. |
+| `Normalizer` | A value and normalization state. | A normalized value and state; `update` produces updated state. |
+| `Distribution` | A key for `sample` or action for `evaluate`. | An action, evaluation, or deterministic mode. |
 
 ## Quickstart
 
@@ -75,6 +120,15 @@ agent = VPi(
 
 prediction, state = agent.apply(obs, state)
 action, state = agent.act(obs, state)
+```
+
+Use `Naf` for a diagonal normalized advantage function:
+
+```python
+action, state = naf.act(obs, state)
+pred, state = naf.apply(obs, state)
+q = pred.qfn.evaluate(action)
+logp = pred.pi.evaluate(action).logp
 ```
 
 ## Details

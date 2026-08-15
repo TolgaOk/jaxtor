@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from jaxtor.agent import Categorical, DiagNormal
+from jaxtor.agent import Categorical, DiagNormal, Normal
 
 
 def test_diag_normal_sample_can_be_evaluated():
@@ -50,6 +50,38 @@ def test_diag_normal_supports_vmap_and_distribution_pytrees():
     assert jax.tree.structure(dist) == jax.tree.structure(
         jax.tree.map(lambda x: x, dist)
     )
+
+
+def test_normal_matches_known_multivariate_density_and_entropy():
+    """A full-covariance Normal matches its analytic statistics at the mean."""
+    cov = jnp.array([[4.0, 1.0], [1.0, 9.0]])
+    dist = Normal(loc=jnp.array([1.0, -2.0]), cov=cov)
+
+    evaluation = jax.jit(lambda value: value.evaluate(value.loc))(dist)
+    _, log_det = jnp.linalg.slogdet(cov)
+
+    assert jnp.array_equal(dist.mode(), dist.loc)
+    assert jnp.allclose(evaluation.logp, -0.5 * (2.0 * jnp.log(2.0 * jnp.pi) + log_det))
+    assert jnp.allclose(
+        evaluation.entropy,
+        0.5 * (2.0 * (1.0 + jnp.log(2.0 * jnp.pi)) + log_det),
+    )
+
+
+def test_normal_preserves_batched_mean_and_covariance_axes():
+    """Sampling and evaluation broadcast full covariance over leading axes."""
+    dist = Normal(
+        loc=jnp.zeros((2, 3, 2)),
+        cov=jnp.broadcast_to(jnp.eye(2), (3, 2, 2)),
+    )
+
+    sample = jax.jit(lambda value, key: value.sample(key))(dist, jax.random.key(4))
+    evaluation = jax.jit(lambda value, act: value.evaluate(act))(dist, sample)
+
+    assert sample.shape == (2, 3, 2)
+    assert evaluation.logp.shape == (2, 3)
+    assert evaluation.entropy.shape == (2, 3)
+    assert jnp.all(jnp.isfinite(evaluation.logp))
 
 
 def test_categorical_sample_can_be_evaluated():

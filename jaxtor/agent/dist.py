@@ -16,6 +16,7 @@ from typing import Protocol
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 from chex import dataclass
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
@@ -92,6 +93,72 @@ class DiagNormal:
         return Evaluation(
             logp=self._logp(loc, log_scale, act),
             entropy=self._entropy(log_scale),
+        )
+
+    def mode(self) -> jax.Array:
+        """Return the distribution location."""
+        loc, _ = self._broadcast()
+        return loc
+
+
+@dataclass
+class Normal:
+    """Multivariate Normal distribution over one vector-valued event axis.
+
+    Attributes:
+        loc: Distribution location, shaped ``[..., D]``.
+        cov: Positive-definite covariance matrix, shaped ``[..., D, D]``.
+
+    Public methods:
+        sample: Draw an event.
+        evaluate: Compute log-probability and entropy.
+        mode: Return the distribution mean.
+    """
+
+    loc: jax.Array
+    cov: jax.Array
+
+    def _broadcast(self) -> tuple[jax.Array, jax.Array]:
+        """Broadcast locations and covariance matrices over common leading axes."""
+        if self.loc.ndim < 1:
+            raise ValueError("loc must have a final event axis")
+        if self.cov.ndim < 2:
+            raise ValueError("cov must have two final event axes")
+        event_size = self.loc.shape[-1]
+        if self.cov.shape[-2:] != (event_size, event_size):
+            raise ValueError("cov event axes must match the loc event axis")
+        shape = jnp.broadcast_shapes(self.loc.shape[:-1], self.cov.shape[:-2])
+        return (
+            jnp.broadcast_to(self.loc, (*shape, event_size)),
+            jnp.broadcast_to(self.cov, (*shape, event_size, event_size)),
+        )
+
+    def sample(self, key: jax.Array) -> jax.Array:
+        """Draw an event using a Cholesky covariance factor."""
+        loc, cov = self._broadcast()
+        noise = jax.random.normal(key, loc.shape)
+        return loc + jnp.einsum("...ij,...j->...i", jnp.linalg.cholesky(cov), noise)
+
+    def evaluate(self, act: jax.Array) -> Evaluation:
+        """Compute joint log-probability and entropy for ``act``."""
+        loc, cov = self._broadcast()
+        act, loc = jnp.broadcast_arrays(act, loc)
+        event_size = loc.shape[-1]
+        cov = jnp.broadcast_to(cov, (*loc.shape[:-1], event_size, event_size))
+        chol = jnp.linalg.cholesky(cov)
+        standardized = jsp.linalg.solve_triangular(
+            chol,
+            (act - loc)[..., None],
+            lower=True,
+        )[..., 0]
+        log_det = 2.0 * jnp.sum(
+            jnp.log(jnp.diagonal(chol, axis1=-2, axis2=-1)),
+            axis=-1,
+        )
+        return Evaluation(
+            logp=-0.5
+            * (event_size * _LOG_TWO_PI + log_det + jnp.sum(standardized**2, -1)),
+            entropy=0.5 * (event_size * (1.0 + _LOG_TWO_PI) + log_det),
         )
 
     def mode(self) -> jax.Array:

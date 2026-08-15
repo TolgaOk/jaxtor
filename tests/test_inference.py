@@ -7,7 +7,12 @@ import pytest
 from chex import dataclass
 from jax.experimental import checkify
 
-from jaxtor.agent import Categorical, VNextVInference, VPiNextVInference
+from jaxtor.agent import (
+    Categorical,
+    QfnVnextInference,
+    VNextVInference,
+    VPiNextVInference,
+)
 
 
 @dataclass
@@ -23,6 +28,25 @@ class VPiPred:
 
     v: jax.Array
     pi: Categorical
+
+
+@dataclass
+class Qfn:
+    """State-bound action-value function used by inference tests."""
+
+    v: jax.Array
+
+    def evaluate(self, act: jax.Array) -> jax.Array:
+        """Add one scalar action to the state value."""
+        return self.v + act[..., 0]
+
+
+@dataclass
+class VQfnPred:
+    """Value and state-bound Q-function prediction."""
+
+    v: jax.Array
+    qfn: Qfn
 
 
 @dataclass
@@ -69,10 +93,32 @@ class PureVPiAgent:
 
 
 @dataclass
+class VQfnAgent:
+    """Value and Q-function agent rejecting invalid successor observations."""
+
+    def apply(self, obs: jax.Array, state: State) -> tuple[VQfnPred, State]:
+        """Return values and state-bound Q-functions."""
+        checkify.check(jnp.all(obs >= 0), "invalid successor was evaluated")
+        value = obs[..., 0] * state.scale
+        return VQfnPred(v=value, qfn=Qfn(v=value)), state
+
+
+@dataclass
 class Sequence:
     """Minimal transition sequence consumed by inference components."""
 
     obs: jax.Array
+    nobs: jax.Array
+    term: jax.Array
+    trun: jax.Array
+
+
+@dataclass
+class ActionSequence:
+    """Transition sequence including actions consumed by Q-function inference."""
+
+    obs: jax.Array
+    act: jax.Array
     nobs: jax.Array
     term: jax.Array
     trun: jax.Array
@@ -116,6 +162,58 @@ def test_vpi_next_v_reuses_continuations_and_applies_only_the_open_tail():
     error.throw()
 
     assert jnp.array_equal(infer.v_t, jnp.array([2.0, 3.0, 4.0, 5.0]))
+
+
+def test_qfn_vnext_evaluates_actions_and_aligns_every_boundary():
+    """Q and Vnext alignment excludes s0 and handles every boundary."""
+    component = QfnVnextInference(agent=VQfnAgent(), seq_axis=1)
+    seq = ActionSequence(
+        obs=jnp.array(
+            [
+                [[-999.0], [2.0], [3.0], [4.0]],
+                [[-999.0], [6.0], [7.0], [8.0]],
+            ]
+        ),
+        act=jnp.array(
+            [
+                [[10.0], [20.0], [30.0], [40.0]],
+                [[50.0], [60.0], [70.0], [80.0]],
+            ]
+        ),
+        nobs=jnp.array(
+            [
+                [[2.0], [-999.0], [30.0], [-999.0]],
+                [[6.0], [60.0], [-999.0], [9.0]],
+            ]
+        ),
+        term=jnp.array(
+            [
+                [False, True, False, True],
+                [False, False, True, False],
+            ]
+        ),
+        trun=jnp.array(
+            [
+                [False, False, True, True],
+                [False, True, False, False],
+            ]
+        ),
+    )
+
+    error, infer = checkify.checkify(jax.jit(component.apply))(
+        seq,
+        State(scale=jnp.array(1.0)),
+    )
+    error.throw()
+
+    assert jnp.array_equal(
+        infer.q_t,
+        jnp.array([[22.0, 33.0, 44.0], [66.0, 77.0, 88.0]]),
+    )
+    assert jnp.array_equal(
+        infer.v_t,
+        jnp.array([[2.0, 0.0, 30.0, 0.0], [6.0, 60.0, 0.0, 9.0]]),
+    )
 
 
 def test_v_next_v_needs_no_policy_and_supports_a_nonleading_sequence_axis():
