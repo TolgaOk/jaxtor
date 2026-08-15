@@ -1,12 +1,69 @@
-"""PPO on CartPole-v1 with Equinox and explicit Jaxtor components.
+"""PPO for discrete-action Gymnax environments with explicit Jaxtor components.
 
-``Roll`` collects raw transitions, ``VPiNextVInference`` aligns policy and
-value predictions, and RLax forms TD(lambda) targets. The two PPO optimization
-loops remain visible, while normalization, statistics, and evaluation retain
-their own states.
+CartPole-v1 is the default. ``--env-id`` may select any Gymnax environment
+with one-dimensional observations and a discrete action space. Other tasks may
+need different hyperparameters or agent components.
 
-Inference replays the fixed sequence agent after collection, trading one
-batched forward pass for an action-only sampling interface.
+Components::
+
+    Composition
+    │
+    ├── agent: VPi actor–critic
+    │   ├── body: NormModel
+    │   │   ├── norm: ObsNorm
+    │   │   │   └── RunningStats
+    │   │   └── model: Module(Linear → tanh)
+    │   ├── v: VHead
+    │   │   └── Module(Linear value)
+    │   └── pi: CategoricalHead
+    │       └── Module(Linear logits)
+    ├── mc: VecMc
+    │   └── Mc
+    │       └── GymnaxEnv
+    ├── roll: Roll
+    │   └── Imc
+    │       ├── agent
+    │       └── mc
+    ├── inference: VPiNextVInference
+    │   └── agent
+    ├── rew_norm: RewardNorm
+    │   └── RunningStats
+    ├── stats: EpisodeStats
+    ├── batches: Minibatches
+    └── Eval
+        └── Imc
+            ├── deterministic agent
+            └── mc
+
+State::
+
+    TrainState
+    ├── roll: imc state (agent + mc)
+    ├── opt: optimizer state
+    ├── stats: episode statistics
+    └── rew_norm: reward-normalization state
+
+Flow::
+
+    Main loop ↻
+    ├→ collect sequence
+    │   ├→ update stats
+    │   ├→ normalize rewards
+    │   └→ infer policy + values
+    ├→ TD(λ) advantages + returns
+    ├→ form batch
+    ├→ epochs ↻
+    │   ├→ shuffle minibatches
+    │   └→ minibatches ↻
+    │       └→ loss → gradients → update
+    ├→ update obs stats
+    └→ periodically
+        ├→ report training metrics
+        └→ evaluate deterministic agent
+
+The optimization loops and RLax target remain visible because they define PPO.
+Replaying the fixed agent trades one batched forward pass for an action-only
+sampling interface.
 """
 
 from __future__ import annotations
@@ -136,6 +193,7 @@ cfg = tyro.cli(Config) if __name__ == "__main__" else Config()
     eval_mc_key,
 ) = jrd.split(jrd.key(cfg.seed), 6)
 
+
 env = gymnax.make(cfg.env_id)
 obs_shape = tuple(env.env.observation_space(env.params).shape)
 if len(obs_shape) != 1:
@@ -144,7 +202,8 @@ act_size = getattr(env.env.action_space(env.params), "n", None)
 if act_size is None:
     raise ValueError("the lean agent requires a discrete action space")
 
-select_key, body_key, pi_key, v_key = jrd.split(agent_key, 4)
+
+act_key, body_key, v_key, pi_key = jrd.split(agent_key, 4)
 body_net, body_net_state = module(
     eqx.nn.Sequential(
         [
@@ -153,49 +212,59 @@ body_net, body_net_state = module(
         ]
     )
 )
-pi_net, pi_net_state = module(eqx.nn.Linear(cfg.hidden_size, int(act_size), key=pi_key))
 v_net, v_net_state = module(eqx.nn.Linear(cfg.hidden_size, 1, key=v_key))
+pi_net, pi_net_state = module(eqx.nn.Linear(cfg.hidden_size, int(act_size), key=pi_key))
+
 
 norm = ObsNorm(stats=RunningStats(clip=10.0))
 body = NormModel(norm=norm, model=body_net)
-pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
 v = VHead(net=v_net)
+pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
 agent = VPi(body=body, v=v, pi=pi)
-agent_init = agent.init(
-    select_key,
+
+
+agent_state = agent.init(
+    act_key,
     body=body.init(norm.init(obs_shape), body_net_state),
     v=v.init(v_net_state),
     pi=pi.init(pi_net_state),
 )
 
+
 mc = VecMc(mc=Mc(max_eps_len=cfg.max_eps_len, env=env))
 imc = Imc(agent=agent, mc=mc)
 roll = Roll(imc=imc, seq_len=cfg.seq_len, seq_axis=1)
 inference = VPiNextVInference(agent=agent, seq_axis=1)
-stats = EpisodeStats(seq_axis=1)
+
+
 rew_norm = RewardNorm(
     gamma=cfg.gamma,
     rms=RunningStats(),
     seq_axis=1,
     clip=10.0,
 )
+stats = EpisodeStats(seq_axis=1)
 batches = Minibatches(count=cfg.n_batches, sample_ndim=2)
-tx: Any = optax.chain(
+optim: Any = optax.chain(
     optax.clip_by_global_norm(cfg.max_grad_norm),
     optax.adam(cfg.lr, eps=1e-5),
 )
+
+
 eval_imc = Imc(agent=replace(agent, deterministic=True), mc=mc)
-evaluate = jax.jit(Eval(imc=eval_imc, episode_len=cfg.max_eps_len).evaluate)
+evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluate = jax.jit(evaluator.evaluate)
 
 
 @jax.jit
 def update(state: TrainState) -> tuple[Metrics, TrainState]:
     """Collect one sequence, form targets, and optimize the agent."""
     seq, roll_state = roll.sample(state.roll)
-    state = replace(state, stats=stats.update(seq, state.stats))
+    stats_state = stats.update(seq, state.stats)
+    done = seq.term | seq.trun
     rew, rew_norm_state = rew_norm.update(
         seq.rew,
-        seq.term | seq.trun,
+        done,
         state.rew_norm,
     )
     seq = replace(seq, rew=rew)
@@ -206,7 +275,7 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
         seq.rew,
         cfg.gamma * (~seq.term).astype(seq.rew.dtype),
         infer.v_t,
-        cfg.gae_lambda * (~(seq.term | seq.trun)).astype(seq.rew.dtype),
+        cfg.gae_lambda * (~done).astype(seq.rew.dtype),
     )
     batch = Batch(
         obs=seq.obs,
@@ -243,7 +312,7 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
             carry.params,
             batch,
         )
-        updates, opt = tx.update(grads, carry.opt, carry.params)
+        updates, opt = optim.update(grads, carry.opt, carry.params)
         return LearnState(
             params=eqx.apply_updates(carry.params, updates),
             opt=opt,
@@ -272,6 +341,7 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
         key=key,
         roll=replace(roll_state, agent=agent_state),
         opt=carry.opt,
+        stats=stats_state,
         rew_norm=rew_norm_state,
     )
     return jax.tree.map(jnp.mean, metrics), state
@@ -279,27 +349,25 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
 
 def train() -> TrainState:
     """Initialize dynamic state and train the configured PPO recipe."""
-    env_keys = jrd.split(env_key, cfg.n_envs)
-    eval_env_keys = jrd.split(eval_env_key, cfg.n_eval_envs)
     state = TrainState(
         key=update_key,
         roll=imc.init(
             mc.init(
                 jrd.split(mc_key, cfg.n_envs),
-                jax.vmap(env.init)(env_keys),
+                jax.vmap(env.init)(jrd.split(env_key, cfg.n_envs)),
             ),
-            agent_init,
+            agent_state,
         ),
-        opt=tx.init(partition(agent_init).params),
+        opt=optim.init(partition(agent_state).params),
         stats=stats.init((cfg.n_envs,)),
         rew_norm=rew_norm.init((cfg.n_envs,)),
     )
     eval_state = eval_imc.init(
         mc.init(
             jrd.split(eval_mc_key, cfg.n_eval_envs),
-            jax.vmap(env.init)(eval_env_keys),
+            jax.vmap(env.init)(jrd.split(eval_env_key, cfg.n_eval_envs)),
         ),
-        agent_init,
+        agent_state,
     )
 
     for iteration in range(1, cfg.n_iters + 1):
