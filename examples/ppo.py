@@ -279,10 +279,15 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
 
 def train() -> TrainState:
     """Initialize dynamic state and train the configured PPO recipe."""
+    env_keys = jrd.split(env_key, cfg.n_envs)
+    eval_env_keys = jrd.split(eval_env_key, cfg.n_eval_envs)
     state = TrainState(
         key=update_key,
         roll=imc.init(
-            mc.init(jrd.split(mc_key, cfg.n_envs), env.init(env_key)),
+            mc.init(
+                jrd.split(mc_key, cfg.n_envs),
+                jax.vmap(env.init)(env_keys),
+            ),
             agent_init,
         ),
         opt=tx.init(partition(agent_init).params),
@@ -292,7 +297,7 @@ def train() -> TrainState:
     eval_state = eval_imc.init(
         mc.init(
             jrd.split(eval_mc_key, cfg.n_eval_envs),
-            env.init(eval_env_key),
+            jax.vmap(env.init)(eval_env_keys),
         ),
         agent_init,
     )

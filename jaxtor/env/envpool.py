@@ -3,9 +3,9 @@
 ``make`` exposes EnvPool through ``GymEnv``. ``SameStep`` converts EnvPool's
 autoreset behavior to the same-step semantics expected by the sampler stack.
 
-    env = make("Hopper-v5", num_envs=8)
+    env = make("Hopper-v5")
     mc = VecMc(mc=Mc(max_eps_len=1_000, env=env))
-    state = mc.init(keys, env.init(key))
+    state = mc.init(keys, jax.vmap(env.init)(keys))
     transition, state = mc.sample(act, state)
 """
 
@@ -20,7 +20,9 @@ from jaxtor.env.gymnasium import (
     ArraySpace,
     GymEnv,
     ResetResult,
+    RuntimeRequest,
     StepResult,
+    config_key,
     from_factory,
 )
 
@@ -36,7 +38,10 @@ class Runtime(Protocol):
     all_env_ids: np.ndarray
 
     def reset(
-        self, *, seed: int | None = None, env_id: npt.ArrayLike | None = None
+        self,
+        *,
+        seed: int | list[int] | None = None,
+        env_id: npt.ArrayLike | None = None,
     ) -> ResetResult: ...
     def step(self, actions: npt.ArrayLike, *, env_id: npt.ArrayLike) -> StepResult: ...
     def close(self) -> None: ...
@@ -85,19 +90,21 @@ class SameStep:
         self.single_observation_space = env.single_observation_space
         self.single_action_space = env.single_action_space
 
-    def reset(self, *, seed: int | None = None) -> ResetResult:
+    def reset(self, *, seed: int | list[int] | None = None) -> ResetResult:
         """Reset all envs; the pool's RNG was fixed by its factory seed."""
         return self.env.reset(seed=seed)
 
-    def step(self, actions: npt.ArrayLike) -> StepResult:
-        """Step a pool subset and convert autoreset to SAME_STEP.
+    def step(
+        self,
+        actions: npt.ArrayLike,
+    ) -> StepResult:
+        """Step the complete pool and convert autoreset to SAME_STEP.
 
-        Stepping a subset (via ``env_id``) lets a vmap of size ``m <= num_envs``
-        use only ``m`` of the pre-allocated environments. Terminal observations
-        are moved into ``info["final_obs"]`` and replaced with reset observations.
+        Terminal observations are moved into ``info["final_obs"]`` and replaced
+        with reset observations.
         """
         act = np.asarray(actions)
-        ids = self.env.all_env_ids[: len(act)]
+        ids = self.env.all_env_ids
         obs, rew, term, trun, _ = self.env.step(act, env_id=ids)
         obs = np.asarray(obs)
         rew = np.asarray(rew)
@@ -121,18 +128,15 @@ class SameStep:
         self.env.close()
 
 
-def make(name: str, num_envs: int = 1, **kwargs: Any) -> GymEnv:
+def make(name: str, **kwargs: Any) -> GymEnv:
     """Create a jaxtor ``GymEnv`` backed by EnvPool (fast CPU MuJoCo).
 
-    EnvPool fixes its RNG at construction. The returned component therefore
-    creates a fresh pool from the key-derived seed in ``env.init(key)``.
-    EnvPool is always vectorized, including when ``num_envs=1``.
-    EnvPool can step a prefix selected by ``env_id``, so the resulting adapter
-    permits a mapped axis smaller than the allocated pool.
+    EnvPool fixes its RNG at construction. Each executed initializer therefore
+    creates one exact-capacity pool with a seed for every mapped key. EnvPool is
+    always vectorized, including for an unmapped initializer of capacity one.
 
     Args:
         name: EnvPool/Gymnasium env id (e.g. ``"Hopper-v5"``).
-        num_envs: Number of parallel environments.
         **kwargs: EnvPool config — ``seed``, ``num_threads``,
             ``reset_noise_scale``, ``max_episode_steps``, ``frame_skip``, reward
             weights, ``xml_file``, etc.
@@ -140,23 +144,28 @@ def make(name: str, num_envs: int = 1, **kwargs: Any) -> GymEnv:
     Returns:
         GymEnv instance (same interface as :func:`jaxtor.env.gymnasium.make`).
     """
-    if num_envs < 1:
-        raise ValueError(f"num_envs must be positive, got {num_envs}")
+    if "num_envs" in kwargs:
+        raise TypeError("num_envs is defined by mapping env.init")
 
     envpool = import_envpool()
     try:
-        spec = envpool.make_spec(name, num_envs=num_envs, **kwargs)
+        spec = envpool.make_spec(name, num_envs=1, **kwargs)
     except KeyError as error:
         raise ValueError(f"{name!r} is not supported by EnvPool") from error
 
-    def factory(seed: int | None) -> tuple[SameStep, np.ndarray]:
-        """Create a pool with an int32 seed and adapt its autoreset behavior."""
+    def factory(request: RuntimeRequest) -> tuple[SameStep, np.ndarray]:
+        """Create one exact-capacity pool with a seed for every lane."""
         kw = dict(kwargs)
-        if seed is not None:
-            kw["seed"] = int(seed) & 0x7FFFFFFF
+        if request.seeds is not None:
+            kw["env_seed"] = [seed & 0x7FFFFFFF for seed in request.seeds]
         raw_env = cast(
             Runtime,
-            envpool.make(name, env_type="gymnasium", num_envs=num_envs, **kw),
+            envpool.make(
+                name,
+                env_type="gymnasium",
+                num_envs=request.capacity,
+                **kw,
+            ),
         )
         vec_env = SameStep(raw_env)
         try:
@@ -168,8 +177,8 @@ def make(name: str, num_envs: int = 1, **kwargs: Any) -> GymEnv:
 
     return from_factory(
         factory,
-        num_envs,
-        allow_subset=True,
+        compatibility_key=("envpool", name, config_key(kwargs)),
+        always_vectorized=True,
         observation_space=spec.gymnasium_observation_space,
         action_space=spec.gymnasium_action_space,
     )

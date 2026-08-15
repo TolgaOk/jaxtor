@@ -151,8 +151,9 @@ def test_roll_moves_one_sequence_axis_consistently():
     env = CounterEnv()
     mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     imc = Imc(agent=CountingAgent(), mc=mc)
+    keys = jax.random.split(jax.random.key(0), n_envs)
     state = imc.init(
-        mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
+        mc.init(keys, jax.vmap(lambda _: env.init())(keys)),
         CountingAgent.State(actions=jnp.array(0, dtype=jnp.int32)),
     )
     roll = Roll(imc=imc, seq_len=seq_len, seq_axis=1)

@@ -75,7 +75,8 @@ def test_vecmc_resets_every_boundary_lane_under_jit():
     env = gymnax.make("CartPole-v1", max_steps_in_episode=1)
     mc = VecMc(mc=Mc(max_eps_len=1, env=env))
     key = jax.random.key(2)
-    state = mc.init(jax.random.split(key, n_envs), env.init(key))
+    keys = jax.random.split(key, n_envs)
+    state = mc.init(keys, jax.vmap(env.init)(keys))
 
     transition, state = jax.jit(mc.sample)(
         jnp.zeros(n_envs, dtype=jnp.int32),

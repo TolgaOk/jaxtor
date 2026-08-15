@@ -185,7 +185,8 @@ def test_loaded_roll_handles_mixed_vector_boundaries():
     n_envs = 3
     env = CounterEnv()
     mc = VecMc(mc=Mc(max_eps_len=10, env=env))
-    mc_state = mc.init(jax.random.split(jax.random.key(0), n_envs), env.init())
+    keys = jax.random.split(jax.random.key(0), n_envs)
+    mc_state = mc.init(keys, jax.vmap(lambda _: env.init())(keys))
     obs = jnp.array([0, 2, 1], dtype=jnp.int32)
     mc_state = replace(
         mc_state,

@@ -50,23 +50,23 @@ ENV_CASES = [
 def _close_backend_runtimes():
     """Keep the process-local runtime registry isolated across tests."""
     yield
-    gymnasium.close_all_runtimes()
+    gymnasium._close_all_runtimes()
 
 
-def _make_env(num_envs=NUM_ENVS):
-    return gymnasium.make("CartPole-v1", num_envs=num_envs)
+def _make_env(**kwargs):
+    return gymnasium.make("CartPole-v1", **kwargs)
 
 
 def _make_mc(env):
     return Mc(max_eps_len=MAX_EPS_LEN, env=env)
 
 
-def _init_vec(key, env):
-    """Init env + mc + vec_mc, return (vec_mc, mc_state)."""
+def _init_vec(key, env, n_envs=NUM_ENVS):
+    """Initialize one environment state and ``Mc`` state per mapped key."""
     mc = _make_mc(env)
     vec_mc = VecMc(mc=mc)
-    env_state = env.init(key)
-    keys = jrd.split(key, env.num_envs)
+    keys = jrd.split(key, n_envs)
+    env_state = jax.vmap(env.init)(keys)
     mc_state = vec_mc.init(keys, env_state)
     return vec_mc, mc_state
 
@@ -122,8 +122,8 @@ class ZeroAgent:
 # =============================================================================
 
 
-def test_init_returns_template_state():
-    """Init returns a single-env template state."""
+def test_init_returns_scalar_state():
+    """An ordinary initializer creates one scalar environment state."""
     env = _make_env()
     key = jrd.PRNGKey(0)
     state = env.init(key)
@@ -131,8 +131,7 @@ def test_init_returns_template_state():
     assert state.obs.shape == (OBS_DIM,)
     assert state.reset_obs.shape == (OBS_DIM,)
     assert jnp.array_equal(state.obs, state.reset_obs)
-    assert state.runtime.shape == (2,)
-    assert state.runtime_id.shape == ()
+    assert state.runtime.shape == ()
     assert state.token.shape == ()
 
 
@@ -144,7 +143,7 @@ def test_state_pytree_round_trip():
     leaves, structure = jax.tree_util.tree_flatten(state)
     restored = jax.tree_util.tree_unflatten(structure, leaves)
 
-    assert len(leaves) == 3
+    assert len(leaves) == 4
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
     assert isinstance(restored, gymnasium.GymEnv.State)
     chex.assert_trees_all_equal(restored, state)
@@ -156,13 +155,55 @@ def test_live_runtime_is_addressed_by_state():
 
     assert not hasattr(env, "_vec_env")
     state = env.init(jrd.PRNGKey(0))
-    runtime_id = int(state.runtime_id)
-    runtime = gymnasium.lookup_runtime(runtime_id)
+    runtime_id = int(state.runtime)
+    runtime = gymnasium._lookup_runtime(runtime_id)
     assert not runtime.closed
 
     env.close(state)
     with pytest.raises(RuntimeError, match="closed or unknown"):
-        gymnasium.lookup_runtime(runtime_id)
+        gymnasium._lookup_runtime(runtime_id)
+
+
+def test_compatible_env_can_use_runtime_state():
+    """Equivalent configurations may operate on the same runtime state."""
+    owner = gymnasium.make("CartPole-v1")
+    compatible = gymnasium.make("CartPole-v1")
+    key = jrd.PRNGKey(29)
+    state = owner.init(key)
+
+    transition, state = compatible.step(key, jnp.int32(0), state)
+
+    assert transition.nobs.shape == (OBS_DIM,)
+    assert state.token == 1
+    compatible.close(state)
+
+
+def test_incompatible_env_rejects_runtime_state():
+    """A different complete configuration cannot operate on the runtime."""
+    owner = gymnasium.make("CartPole-v1")
+    incompatible = gymnasium.make("CartPole-v1", max_episode_steps=1)
+    key = jrd.PRNGKey(30)
+    state = owner.init(key)
+
+    with pytest.raises(jax.errors.JaxRuntimeError, match="incompatible environment"):
+        incompatible.step(key, jnp.int32(0), state)
+
+    owner.close(state)
+
+
+def test_stale_state_can_close_runtime():
+    """Cleanup accepts an old token even though stepping does not."""
+    env = gymnasium.make("CartPole-v1")
+    key = jrd.PRNGKey(31)
+    stale = env.init(key)
+    _, current = env.step(key, jnp.int32(0), stale)
+
+    with pytest.raises(jax.errors.JaxRuntimeError, match="out-of-order or forked"):
+        env.step(key, jnp.int32(0), stale)
+
+    env.close(stale)
+    with pytest.raises(jax.errors.JaxRuntimeError, match="closed or unknown"):
+        env.step(key, jnp.int32(0), current)
 
 
 def test_vecmc_init_shapes():
@@ -188,30 +229,29 @@ def test_vecmc_init_per_env_obs():
 
 
 def test_default_uses_scalar_runtime():
-    """Omitting num_envs creates a scalar Gymnasium runtime."""
+    """An ordinary initializer creates a scalar Gymnasium runtime."""
     env = gymnasium.make("CartPole-v1")
-    assert env.num_envs is None
 
     key = jrd.PRNGKey(0)
     state = env.init(key)
-    runtime = gymnasium.lookup_runtime(state.runtime_id)
+    runtime = gymnasium._lookup_runtime(state.runtime)
 
     assert state.obs.shape == (OBS_DIM,)
     assert not hasattr(runtime.env, "num_envs")
 
 
-def test_num_envs_one_uses_vector_runtime():
-    """An explicit num_envs=1 creates a one-lane vector runtime."""
-    env = gymnasium.make("CartPole-v1", num_envs=1)
+def test_vmap_size_one_uses_vector_runtime():
+    """A mapped initializer creates a vector runtime even for one lane."""
+    env = gymnasium.make("CartPole-v1")
     key = jrd.PRNGKey(1)
-    state = env.init(key)
-    runtime = gymnasium.lookup_runtime(state.runtime_id)
+    keys = jrd.split(key, 1)
+    state = jax.vmap(env.init)(keys)
+    runtime = gymnasium._lookup_runtime(state.runtime)
     vec_mc = VecMc(mc=_make_mc(env))
-    mc_state = vec_mc.init(jrd.split(key, 1), state)
+    mc_state = vec_mc.init(keys, state)
 
     transition, _ = vec_mc.sample(jnp.zeros(1, dtype=jnp.int32), mc_state)
 
-    assert env.num_envs == 1
     assert getattr(runtime.env, "num_envs") == 1
     assert transition.obs.shape == (1, OBS_DIM)
 
@@ -272,8 +312,7 @@ def test_raw_vmap_step_without_mc():
     env = _make_env()
     key = jrd.PRNGKey(22)
     keys = jrd.split(key, NUM_ENVS)
-    template = env.init(key)
-    _, batched_state = jax.vmap(env.reset, in_axes=(0, None))(keys, template)
+    batched_state = jax.vmap(env.init)(keys)
     acts = jnp.zeros(NUM_ENVS, dtype=jnp.int32)
     step_fn = jax.vmap(env.step)
     step_results, new_states = step_fn(keys, acts, batched_state)
@@ -283,30 +322,102 @@ def test_raw_vmap_step_without_mc():
     assert new_states.obs.shape == (NUM_ENVS, OBS_DIM)
 
 
-def test_scalar_runtime_rejects_vmap():
-    """A scalar runtime rejects batching and points to num_envs."""
+def test_vmap_init_creates_one_vector_runtime():
+    """Executing mapped init creates one runtime for the full key axis."""
     env = gymnasium.make("CartPole-v1")
-    key = jrd.PRNGKey(23)
-    state = env.init(key)
+    keys = jrd.split(jrd.PRNGKey(26), 3)
 
-    with pytest.raises(ValueError, match="cannot vmap a scalar Gymnasium runtime"):
-        jax.vmap(env.reset, in_axes=(0, None))(jrd.split(key, 1), state)
+    state = jax.vmap(env.init)(keys)
+    runtime = gymnasium._lookup_runtime(state.runtime)
+
+    assert state.obs.shape == (3, OBS_DIM)
+    assert len(jnp.unique(state.runtime)) == 1
+    assert runtime.batch_shape == (3,)
+    assert runtime.capacity == 3
 
 
-def test_async_runtime_requires_num_envs():
-    """Async vectorization requires an explicit vector-pool size."""
-    with pytest.raises(ValueError, match="async_envs requires an integer num_envs"):
-        gymnasium.make("CartPole-v1", async_envs=True)
+def test_vmap_init_preserves_each_key_seed():
+    """Each mapped key seeds the corresponding logical environment."""
+    keys = jrd.split(jrd.PRNGKey(33), 3)
+    mapped_env = gymnasium.make("CartPole-v1")
+    mapped = jax.vmap(mapped_env.init)(keys)
+    expected = []
+    for key in keys:
+        env = gymnasium.make("CartPole-v1")
+        state = env.init(key)
+        expected.append(state.obs)
+        env.close(state)
+
+    assert jnp.array_equal(mapped.obs, jnp.stack(expected))
+    mapped_env.close(mapped)
+
+
+def test_nested_vmap_init_preserves_shape_in_one_runtime():
+    """Nested mapped axes become one exact runtime shape."""
+    env = gymnasium.make("CartPole-v1")
+    keys = jrd.split(jrd.PRNGKey(27), 6).reshape(2, 3, 2)
+
+    state = jax.vmap(jax.vmap(env.init))(keys)
+    runtime = gymnasium._lookup_runtime(state.runtime)
+
+    assert state.obs.shape == (2, 3, OBS_DIM)
+    assert len(jnp.unique(state.runtime)) == 1
+    assert runtime.batch_shape == (2, 3)
+    assert runtime.capacity == 6
+
+
+def test_nested_runtime_rejects_partial_mapped_shape():
+    """A state slice cannot silently reinterpret a runtime's mapped shape."""
+    env = gymnasium.make("CartPole-v1")
+    keys = jrd.split(jrd.PRNGKey(32), 6).reshape(2, 3, 2)
+    state = jax.vmap(jax.vmap(env.init))(keys)
+    partial = jax.tree.map(lambda leaf: leaf[0], state)
+
+    with pytest.raises(jax.errors.JaxRuntimeError, match="runtime shape"):
+        jax.vmap(env.step)(
+            keys[0],
+            jnp.zeros(3, dtype=jnp.int32),
+            partial,
+        )
+
+    env.close(state)
+
+
+def test_compiling_mapped_init_does_not_create_runtime():
+    """Tracing and compilation remain configuration-only operations."""
+    env = gymnasium.make("CartPole-v1")
+    keys = jrd.split(jrd.PRNGKey(28), 3)
+
+    init = jax.jit(jax.vmap(env.init)).lower(keys).compile()
+
+    assert not gymnasium._runtime_store
+    state = init(keys)
+    state.obs.block_until_ready()
+    assert len(gymnasium._runtime_store) == 1
+
+
+def test_async_unmapped_init_uses_one_lane_vector_runtime():
+    """Async mode uses a one-lane vector runtime for an ordinary initializer."""
+    env = gymnasium.make("CartPole-v1", async_envs=True)
+    state = env.init(jrd.PRNGKey(34))
+    runtime = gymnasium._lookup_runtime(state.runtime)
+
+    assert runtime.vectorized
+    assert runtime.capacity == 1
+    assert state.obs.shape == (OBS_DIM,)
+    env.close(state)
 
 
 def test_key_seeding_different_keys():
     """Different keys produce different initial observations."""
-    env1 = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
-    state1 = env1.init(jrd.PRNGKey(0))
+    keys1 = jrd.split(jrd.PRNGKey(0), NUM_ENVS)
+    env1 = gymnasium.make("CartPole-v1")
+    state1 = jax.vmap(env1.init)(keys1)
     obs1 = state1.obs.copy()
 
-    env2 = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
-    state2 = env2.init(jrd.PRNGKey(999))
+    keys2 = jrd.split(jrd.PRNGKey(999), NUM_ENVS)
+    env2 = gymnasium.make("CartPole-v1")
+    state2 = jax.vmap(env2.init)(keys2)
     obs2 = state2.obs.copy()
 
     assert not jnp.array_equal(obs1, obs2)
@@ -316,11 +427,12 @@ def test_key_seeding_reproducible():
     """Same key produces identical initial observations."""
     seed = jrd.PRNGKey(42)
 
-    env1 = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
-    obs1 = env1.init(seed).obs.copy()
+    keys = jrd.split(seed, NUM_ENVS)
+    env1 = gymnasium.make("CartPole-v1")
+    obs1 = jax.vmap(env1.init)(keys).obs.copy()
 
-    env2 = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
-    obs2 = env2.init(seed).obs.copy()
+    env2 = gymnasium.make("CartPole-v1")
+    obs2 = jax.vmap(env2.init)(keys).obs.copy()
 
     assert jnp.array_equal(obs1, obs2)
 
@@ -457,10 +569,11 @@ def test_jit_vecmc_sample():
 def test_async_vector_runtime():
     """The state-routed bridge also owns an AsyncVectorEnv runtime."""
     num_envs = 2
-    env = gymnasium.make("CartPole-v1", num_envs=num_envs, async_envs=True)
+    env = gymnasium.make("CartPole-v1", async_envs=True)
     vec_mc = VecMc(mc=_make_mc(env))
     key = jrd.PRNGKey(72)
-    state = vec_mc.init(jrd.split(key, num_envs), env.init(key))
+    keys = jrd.split(key, num_envs)
+    state = vec_mc.init(keys, jax.vmap(env.init)(keys))
 
     transition, state = jax.jit(vec_mc.sample)(
         jnp.zeros(num_envs, dtype=jnp.int32), state
@@ -504,19 +617,21 @@ def test_scan_threads_runtime_token():
     mc_state = sample_n(mc_state)
 
     assert jnp.all(mc_state.env.token == seq_len)
-    runtime = gymnasium.lookup_runtime(mc_state.env.runtime_id)
+    runtime = gymnasium._lookup_runtime(mc_state.env.runtime)
     assert runtime.token == seq_len
 
 
 def test_one_compiled_sampler_routes_multiple_runtimes():
-    """runtime_id remains dynamic data rather than a captured Python object."""
+    """Runtime identity remains dynamic rather than captured Python data."""
     env = _make_env()
     vec_mc = VecMc(mc=_make_mc(env))
     key_a, key_b = jrd.split(jrd.PRNGKey(71))
-    state_a = vec_mc.init(jrd.split(key_a, NUM_ENVS), env.init(key_a))
-    state_b = vec_mc.init(jrd.split(key_b, NUM_ENVS), env.init(key_b))
-    runtime_a = state_a.env.runtime_id[0]
-    runtime_b = state_b.env.runtime_id[0]
+    keys_a = jrd.split(key_a, NUM_ENVS)
+    keys_b = jrd.split(key_b, NUM_ENVS)
+    state_a = vec_mc.init(keys_a, jax.vmap(env.init)(keys_a))
+    state_b = vec_mc.init(keys_b, jax.vmap(env.init)(keys_b))
+    runtime_a = state_a.env.runtime[0]
+    runtime_b = state_b.env.runtime[0]
     assert runtime_a != runtime_b
 
     sample = jax.jit(vec_mc.sample)
@@ -528,19 +643,19 @@ def test_one_compiled_sampler_routes_multiple_runtimes():
     assert jnp.all(state_b.env.token == 1)
 
 
-def test_nested_vmaps_route_independent_vector_runtimes():
-    """Outer vmaps may batch sessions that each own one vector pool."""
+def test_nested_vmaps_share_one_exact_capacity_runtime():
+    """Mapped training sessions execute through one combined vector runtime."""
     env = _make_env()
     vec_mc = VecMc(mc=_make_mc(env))
     session_shape = (2, 2)
-    keys = jrd.split(jrd.PRNGKey(73), 4)
-    flat_states = tuple(
-        vec_mc.init(jrd.split(key, NUM_ENVS), env.init(key)) for key in keys
-    )
-    states = jax.tree.map(
-        lambda *values: jnp.stack(values).reshape(*session_shape, *values[0].shape),
-        *flat_states,
-    )
+    keys = jrd.split(jrd.PRNGKey(73), 4).reshape(*session_shape, 2)
+
+    def init_session(key):
+        env_keys = jrd.split(key, NUM_ENVS)
+        return vec_mc.init(env_keys, jax.vmap(env.init)(env_keys))
+
+    states = jax.vmap(jax.vmap(init_session))(keys)
+    runtime = gymnasium._lookup_runtime(states.env.runtime)
 
     sample_sessions = jax.jit(jax.vmap(jax.vmap(vec_mc.sample)))
     transitions, states = sample_sessions(
@@ -549,6 +664,9 @@ def test_nested_vmaps_route_independent_vector_runtimes():
 
     assert transitions.obs.shape == (*session_shape, NUM_ENVS, OBS_DIM)
     assert jnp.all(states.env.token == 1)
+    assert len(jnp.unique(states.env.runtime)) == 1
+    assert runtime.batch_shape == (*session_shape, NUM_ENVS)
+    assert runtime.capacity == session_shape[0] * session_shape[1] * NUM_ENVS
 
 
 # =============================================================================
@@ -640,18 +758,18 @@ def test_eval_returns_live_runtime_state():
     _, state = jax.jit(imc.sample)(state)
 
     assert jnp.all(state.mc.env.token == 5)
-    runtime = gymnasium.lookup_runtime(state.mc.env.runtime_id)
+    runtime = gymnasium._lookup_runtime(state.mc.env.runtime)
     assert runtime.token == 5
     env.close(state.mc.env)
 
 
 # =============================================================================
-# Scalar Path Tests (num_envs=None, plain Mc)
+# Scalar Path Tests
 # =============================================================================
 
 
 def test_scalar_path_single_env():
-    """Default num_envs with plain Mc works under jit without vmap."""
+    """An ordinary initializer works with plain Mc under jit."""
     env = gymnasium.make("CartPole-v1")
     mc = Mc(max_eps_len=500, env=env)
     key = jrd.PRNGKey(11)
@@ -759,7 +877,7 @@ def test_vector_component_rollout_across_envs(
     continuous,
 ):
     """VecMc, Imc, and Roll compose under jit across vector Gymnasium envs."""
-    env = gymnasium.make(name, num_envs=COMPONENT_NUM_ENVS)
+    env = gymnasium.make(name)
     mc = Mc(max_eps_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     imc = Imc(
@@ -777,9 +895,10 @@ def test_vector_component_rollout_across_envs(
     )
 
     env_key, mc_key, agent_key = jrd.split(jrd.PRNGKey(0), 3)
+    env_keys = jrd.split(env_key, COMPONENT_NUM_ENVS)
     mc_state = vec_mc.init(
         jrd.split(mc_key, COMPONENT_NUM_ENVS),
-        env.init(env_key),
+        jax.vmap(env.init)(env_keys),
     )
     state = imc.init(mc=mc_state, agent=AgentState(key=agent_key))
 
@@ -808,14 +927,14 @@ def test_sequence_reproducible_with_same_key():
     seq_len = 16
 
     def _collect(seed):
-        env = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
+        env = gymnasium.make("CartPole-v1")
         mc = _make_mc(env)
         vec_mc = VecMc(mc=mc)
         agent = RandomAgent()
         imc = Imc(agent=agent, mc=vec_mc)
 
         k1, k2, k3 = jrd.split(seed, 3)
-        env_state = env.init(k1)
+        env_state = jax.vmap(env.init)(jrd.split(k1, NUM_ENVS))
         keys = jrd.split(k2, NUM_ENVS)
         mc_state = vec_mc.init(keys, env_state)
         imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
@@ -841,14 +960,14 @@ def test_sequence_differs_with_different_key():
     seq_len = 16
 
     def _collect(seed):
-        env = gymnasium.make("CartPole-v1", num_envs=NUM_ENVS)
+        env = gymnasium.make("CartPole-v1")
         mc = _make_mc(env)
         vec_mc = VecMc(mc=mc)
         agent = RandomAgent()
         imc = Imc(agent=agent, mc=vec_mc)
 
         k1, k2, k3 = jrd.split(seed, 3)
-        env_state = env.init(k1)
+        env_state = jax.vmap(env.init)(jrd.split(k1, NUM_ENVS))
         keys = jrd.split(k2, NUM_ENVS)
         mc_state = vec_mc.init(keys, env_state)
         imc_state = imc.init(mc=mc_state, agent=AgentState(key=k3))
@@ -862,34 +981,3 @@ def test_sequence_differs_with_different_key():
     t2 = _collect(jrd.PRNGKey(999))
 
     assert not jnp.array_equal(t1.obs, t2.obs)
-
-
-# =============================================================================
-# vmap Axis Guard Tests
-# =============================================================================
-
-
-def test_vmap_axis_larger_than_pool_raises():
-    """A vmap wider than the pool is rejected."""
-    env = _make_env(num_envs=4)
-    env_state = env.init(jrd.PRNGKey(0))
-    vec_mc = VecMc(mc=_make_mc(env))
-
-    with pytest.raises(ValueError, match=r"axis_size \(8\) > num_envs \(4\)"):
-        vec_mc.init(jrd.split(jrd.PRNGKey(0), 8), env_state)
-
-
-def test_vmap_axis_smaller_than_pool_raises():
-    """A vmap narrower than the pool is rejected for this backend.
-
-    gymnasium's ``make_vec`` steps every env it owns, so it cannot serve a
-    subset the way EnvPool can (see ``from_factory(allow_subset=...)``).
-    Without this guard the mismatch surfaces as an opaque ``zip()`` error from
-    inside ``SyncVectorEnv.step``.
-    """
-    env = _make_env(num_envs=8)
-    env_state = env.init(jrd.PRNGKey(0))
-    vec_mc = VecMc(mc=_make_mc(env))
-
-    with pytest.raises(ValueError, match=r"axis_size \(4\) != num_envs \(8\)"):
-        vec_mc.init(jrd.split(jrd.PRNGKey(0), 4), env_state)

@@ -387,8 +387,8 @@ def test_vecmc_sample_shapes():
     mc = Mc(max_eps_len=1000, env=env)
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(7)
-    env_state = env.init(key)
     keys = jrd.split(key, NUM_ENVS)
+    env_state = jax.vmap(env.init)(keys)
     mc_state = vec_mc.init(keys, env_state)
 
     actions = jrd.uniform(key, (NUM_ENVS, HOPPER_NU), minval=-1.0, maxval=1.0)
@@ -416,9 +416,9 @@ def test_roll_chain_jit():
     vec_mc = VecMc(mc=mc)
     key = jrd.PRNGKey(9)
 
-    env_state = env.init(key)
     k1, k2, k3 = jrd.split(key, 3)
-    mc_state = vec_mc.init(jrd.split(k1, NUM_ENVS), env_state)
+    keys = jrd.split(k1, NUM_ENVS)
+    mc_state = vec_mc.init(keys, jax.vmap(env.init)(keys))
 
     imc = Imc(agent=RandomAgent(), mc=vec_mc)
     imc_state = imc.init(mc=mc_state, agent=AgentState(key=k2))

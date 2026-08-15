@@ -215,36 +215,40 @@ flowchart LR
 
 ## Host-backed Gymnasium boundary
 
-`GymEnv` preserves the component and `State` split even though a mutable
-Gymnasium environment cannot be a JAX pytree. The configured component contains
-the runtime factory, array schema, and batching rules. `init(key)` creates a
-scalar environment when `num_envs` is omitted, or a vector pool when it is an
-integer, and returns the state that identifies the process-local runtime.
+`GymEnv` preserves the component and `State` split even though a mutable host
+environment cannot be a JAX pytree. `vmap` changes the expected key shape only.
+Executing the transformed initializer creates one runtime whose capacity covers
+every mapped key. The array state then routes the complete batch to that runtime.
+A separately configured adapter may use the state only when its complete
+configuration is compatible.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui, sans-serif","fontSize":"15px","lineColor":"#718096","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis","nodeSpacing":30,"rankSpacing":44,"padding":12}}}%%
 flowchart LR
-    component["GymEnv<br/>factory · schema · batching rules"]
-    init["init(key)<br/>create · seed · reset"]
-    state[["GymEnv.State<br/>runtime [id · token]<br/>obs · reset_obs"]]
+    component["make(...) → GymEnv<br/>configuration · schema · batching rules"]
+    transform["jit / nested vmap<br/>transform key shape only"]
+    init["execute init(keys)<br/>capacity = product of mapped axes"]
+    state[["GymEnv.State<br/>runtime · token<br/>obs · reset_obs"]]
     mc["Mc.sample<br/>scalar environment logic"]
-    batch["VecMc + custom_vmap<br/>one vector operation"]
+    batch["VecMc + custom_vmap<br/>accumulate mapped axes"]
     callback["io_callback<br/>host boundary"]
-    store[("runtime store<br/>runtime_id → environment")]
-    runtime["Gymnasium runtime<br/>Env when None · VectorEnv when N"]
+    store[("private runtime store<br/>identity → live backend")]
+    runtime["one exact-capacity runtime<br/>Gymnasium · EnvPool"]
+    close["close(state)<br/>validate configuration · release"]
 
-    component --> init
+    component --> transform --> init
     init -->|returns| state
-    init -. allocates .-> store
-    state -->|scalar fields| mc
+    init -->|creates once| store
+    state -->|complete mapped state| mc
     component -->|step / reset| mc
     mc -->|scalar| callback
     mc -->|vectorized| batch
-    batch -->|one pool step| callback
-    callback -->|runtime handle · action| store
+    batch -->|one runtime transaction| callback
+    callback -->|identity · token · action| store
     store --> runtime
     runtime -->|transition| callback
     callback -->|arrays · next token| state
+    state --> close --> store
 
     classDef adapter fill:#E8F0FE,stroke:#4E73A8,color:#172A46,stroke-width:1.4px;
     classDef stateNode fill:#F2F4F7,stroke:#7C8798,color:#273444,stroke-width:1.4px;
@@ -252,7 +256,7 @@ flowchart LR
     classDef boundary fill:#F0EAF8,stroke:#76559A,color:#35254C,stroke-width:1.4px;
     classDef external fill:#FFF2DE,stroke:#B7791F,color:#51330B,stroke-width:1.4px;
 
-    class component,init adapter;
+    class component,transform,init,close adapter;
     class state stateNode;
     class mc,batch sampler;
     class callback boundary;
@@ -261,10 +265,9 @@ flowchart LR
     linkStyle default stroke:#718096,stroke-width:1.35px;
 ```
 
-The two-word runtime handle contains the process-local pool identity and the
-sequencing token. The position along the `vmap` axis identifies a pool slot, so
-no duplicate slot value is carried through every step. The callback returns the
-next token, which becomes an input to the following callback. This data
-dependency orders external steps inside `jit` and `scan`. State copies refer to
-the same runtime, so each state should be consumed once. The runtime is released
-with `env.close(state)`.
+The runtime identity and sequencing token are explicit array fields. The token
+orders external steps inside `jit` and `scan` and rejects stale state before
+mutation. The runtime also rejects states whose full mapped shape differs from
+the shape used at initialization. `close(state)` accepts stale state for cleanup,
+validates the adapter configuration, and releases the referenced runtime. A
+private `atexit` fallback closes runtimes that remain at process shutdown.

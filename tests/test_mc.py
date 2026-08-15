@@ -225,8 +225,8 @@ def test_chex_vecmc_wrong_batch_action():
     sampler = Mc(max_eps_len=50, env=env)
     vec_mc = mc.VecMc(mc=sampler)
 
-    env_state = env.init(key)
     keys = jax.random.split(key, n_env)
+    env_state = jax.vmap(env.init)(keys)
     state = vec_mc.init(keys, env_state)
 
     wrong_action = jnp.zeros(3)

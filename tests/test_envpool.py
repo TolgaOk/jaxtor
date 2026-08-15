@@ -2,8 +2,8 @@
 
 EnvPool is an optional dependency, so the whole module skips when it is absent.
 Coverage focuses on what EnvPool adds over ``jaxtor.env.gymnasium``: the
-NEXT_STEP -> SAME_STEP autoreset conversion, subset vmap (a vmap narrower than
-the pool), and key-driven seeding of a pool whose RNG is fixed at construction.
+NEXT_STEP -> SAME_STEP autoreset conversion and key-driven seeding of a pool
+whose RNG is fixed at construction.
 """
 
 import warnings
@@ -44,20 +44,20 @@ MAX_EPS_LEN = 1000
 def _close_backend_runtimes():
     """Keep the shared process-local runtime registry isolated across tests."""
     yield
-    gymnasium.close_all_runtimes()
+    gymnasium._close_all_runtimes()
 
 
-def _make_env(num_envs=NUM_ENVS, **kwargs):
+def _make_env(**kwargs):
     kwargs.setdefault("max_episode_steps", MAX_EPS_LEN)
-    return envpool.make(ENV_ID, num_envs=num_envs, **kwargs)
+    return envpool.make(ENV_ID, **kwargs)
 
 
-def _init_vec(key, env, axis_size=None, max_len=MAX_EPS_LEN):
-    """Init env + mc + vec_mc over ``axis_size`` envs; return (vec_mc, mc_state)."""
-    axis_size = env.num_envs if axis_size is None else axis_size
+def _init_vec(key, env, n_envs=NUM_ENVS, max_len=MAX_EPS_LEN):
+    """Initialize one EnvPool lane and ``Mc`` state per mapped key."""
     vec_mc = VecMc(mc=Mc(max_eps_len=max_len, env=env))
-    env_state = env.init(key)
-    return vec_mc, vec_mc.init(jrd.split(key, axis_size), env_state)
+    keys = jrd.split(key, n_envs)
+    env_state = jax.vmap(env.init)(keys)
+    return vec_mc, vec_mc.init(keys, env_state)
 
 
 @dataclass
@@ -85,34 +85,26 @@ def test_make_returns_env_with_shapes():
     """make() reports the per-env obs/action shapes of the MuJoCo env."""
     env = _make_env()
 
-    assert env.num_envs == NUM_ENVS
     assert env.obs_shape == (OBS_DIM,)
     assert env.act_shape == (ACT_DIM,)
 
 
-def test_init_returns_template_state():
-    """Init returns a single-env template state."""
+def test_init_returns_scalar_state():
+    """An ordinary initializer returns one logical environment state."""
     env = _make_env()
     state = env.init(jrd.PRNGKey(0))
 
     assert state.obs.shape == (OBS_DIM,)
     assert state.reset_obs.shape == (OBS_DIM,)
     assert jnp.array_equal(state.obs, state.reset_obs)
-    assert state.runtime.shape == (2,)
-    assert state.runtime_id.shape == ()
+    assert state.runtime.shape == ()
     assert state.token.shape == ()
 
 
 def test_unknown_env_id_raises():
     """An id EnvPool does not ship raises rather than silently falling back."""
     with pytest.raises(Exception, match="not supported"):
-        envpool.make("NotAnEnv-v0", num_envs=1)
-
-
-def test_num_envs_must_be_positive():
-    """EnvPool requires a positive vector-pool size."""
-    with pytest.raises(ValueError, match="num_envs must be positive"):
-        envpool.make(ENV_ID, num_envs=0)
+        envpool.make("NotAnEnv-v0")
 
 
 def test_vecmc_init_shapes():
@@ -126,6 +118,33 @@ def test_vecmc_init_shapes():
     assert mc_state.eps_idx.shape == (NUM_ENVS,)
 
 
+def test_nested_vmap_uses_one_exact_capacity_pool():
+    """Mapped training sessions share one pool containing every logical lane."""
+    pool_size = 2
+    session_shape = (2, 2)
+    env = _make_env()
+    vec_mc = VecMc(mc=Mc(max_eps_len=MAX_EPS_LEN, env=env))
+    keys = jrd.split(jrd.PRNGKey(8), 4).reshape(*session_shape, 2)
+
+    def init_session(key):
+        env_keys = jrd.split(key, pool_size)
+        return vec_mc.init(env_keys, jax.vmap(env.init)(env_keys))
+
+    state = jax.vmap(jax.vmap(init_session))(keys)
+    runtime = gymnasium._lookup_runtime(state.env.runtime)
+
+    transition, state = jax.jit(jax.vmap(jax.vmap(vec_mc.sample)))(
+        jnp.zeros((*session_shape, pool_size, ACT_DIM)),
+        state,
+    )
+
+    assert transition.obs.shape == (*session_shape, pool_size, OBS_DIM)
+    assert len(jnp.unique(state.env.runtime)) == 1
+    assert runtime.batch_shape == (*session_shape, pool_size)
+    assert runtime.capacity == session_shape[0] * session_shape[1] * pool_size
+    assert runtime.token == 1
+
+
 # =============================================================================
 # Seeding Tests
 # =============================================================================
@@ -134,8 +153,8 @@ def test_vecmc_init_shapes():
 def test_same_key_gives_same_initial_obs():
     """Same key produces identical initial observations."""
     key = jrd.PRNGKey(42)
-    obs1 = _make_env(2).init(key).obs
-    obs2 = _make_env(2).init(key).obs
+    obs1 = _make_env().init(key).obs
+    obs2 = _make_env().init(key).obs
 
     assert jnp.array_equal(obs1, obs2)
 
@@ -147,22 +166,38 @@ def test_different_keys_give_different_initial_obs():
     runtime factory builds each pool from the key-derived seed. Without that,
     every key yields EnvPool's default stream and seeds are silently ignored.
     """
-    obs1 = _make_env(2).init(jrd.PRNGKey(0)).obs
-    obs2 = _make_env(2).init(jrd.PRNGKey(999)).obs
+    obs1 = _make_env().init(jrd.PRNGKey(0)).obs
+    obs2 = _make_env().init(jrd.PRNGKey(999)).obs
 
     assert not jnp.array_equal(obs1, obs2)
 
 
 def test_reinit_same_env_is_stable():
     """Re-initializing one env with the same key reproduces the observation."""
-    env = _make_env(2)
+    env = _make_env()
 
     assert jnp.array_equal(env.init(jrd.PRNGKey(7)).obs, env.init(jrd.PRNGKey(7)).obs)
 
 
+def test_vmap_init_preserves_each_key_seed():
+    """EnvPool assigns every mapped key to the corresponding pool lane."""
+    keys = jrd.split(jrd.PRNGKey(9), 3)
+    mapped_env = _make_env()
+    mapped = jax.vmap(mapped_env.init)(keys)
+    expected = []
+    for key in keys:
+        env = _make_env()
+        state = env.init(key)
+        expected.append(state.obs)
+        env.close(state)
+
+    assert jnp.array_equal(mapped.obs, jnp.stack(expected))
+    mapped_env.close(mapped)
+
+
 def test_init_does_not_warn():
     """init() must not trip EnvPool's ignored-seed / abandoned-seed warnings."""
-    env = _make_env(2)
+    env = _make_env()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -208,8 +243,8 @@ def test_vecmc_consecutive_observations_match():
 
 
 def test_scalar_path_single_env():
-    """num_envs=1 works through plain Mc without vmap."""
-    env = _make_env(1)
+    """An ordinary initializer works through plain Mc without vmap."""
+    env = _make_env()
     mc = Mc(max_eps_len=MAX_EPS_LEN, env=env)
     key = jrd.PRNGKey(11)
 
@@ -229,47 +264,6 @@ def test_jit_vecmc_sample():
 
     assert transition.obs.shape == (NUM_ENVS, OBS_DIM)
     assert jnp.all(jnp.isfinite(transition.rew))
-
-
-# =============================================================================
-# Subset vmap Tests (the reason from_factory takes allow_subset)
-# =============================================================================
-
-
-def test_subset_vmap_uses_prefix_of_pool():
-    """A vmap narrower than the pool steps only the first m envs."""
-    env = _make_env(8)
-    vec_mc, mc_state = _init_vec(jrd.PRNGKey(0), env, axis_size=4)
-
-    assert mc_state.last_obs.shape == (4, OBS_DIM)
-
-    transition, _ = vec_mc.sample(jnp.zeros((4, ACT_DIM)), mc_state)
-    assert transition.nobs.shape == (4, OBS_DIM)
-    assert transition.rew.shape == (4,)
-
-
-def test_subset_vmap_matches_full_pool_prefix():
-    """The first m envs behave identically whether or not the rest are stepped."""
-    key = jrd.PRNGKey(5)
-    acts_full = jnp.zeros((8, ACT_DIM))
-
-    env_full = _make_env(8)
-    vec_full, st_full = _init_vec(key, env_full, axis_size=8)
-    t_full, _ = vec_full.sample(acts_full, st_full)
-
-    env_sub = _make_env(8)
-    vec_sub, st_sub = _init_vec(key, env_sub, axis_size=4)
-    t_sub, _ = vec_sub.sample(acts_full[:4], st_sub)
-
-    assert jnp.allclose(t_full.nobs[:4], t_sub.nobs)
-    assert jnp.allclose(t_full.rew[:4], t_sub.rew)
-
-
-def test_vmap_axis_larger_than_pool_raises():
-    """A vmap wider than the pool is rejected."""
-    env = _make_env(4)
-    with pytest.raises(ValueError, match=r"axis_size \(8\) > num_envs \(4\)"):
-        _init_vec(jrd.PRNGKey(0), env, axis_size=8)
 
 
 # =============================================================================
@@ -327,11 +321,11 @@ def test_terminated_env_restarts_near_init_state():
 def test_truncated_pool_carries_reset_observation_into_next_step():
     """Every backend truncation retains nobs and advances from its reset obs."""
     n_envs = 2
-    env = _make_env(num_envs=n_envs, max_episode_steps=1)
+    env = _make_env(max_episode_steps=1)
     vec_mc, state = _init_vec(
         jrd.PRNGKey(12),
         env,
-        axis_size=n_envs,
+        n_envs=n_envs,
         max_len=1,
     )
     acts = jnp.zeros((n_envs, ACT_DIM))

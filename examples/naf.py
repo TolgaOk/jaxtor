@@ -382,7 +382,7 @@ def train_step(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _make_env(cfg: Config, num_envs: int):
+def _make_env(cfg: Config):
     """Build the rollout env from the configured backend.
 
     ``gymnasium`` works for any env; ``envpool`` is fast CPU MuJoCo (its
@@ -392,10 +392,8 @@ def _make_env(cfg: Config, num_envs: int):
     if cfg.env_backend == "envpool":
         from jaxtor.env import envpool
 
-        return envpool.make(
-            cfg.env_id, num_envs=num_envs, max_episode_steps=cfg.max_eps_len
-        )
-    return gymnasium.make(cfg.env_id, num_envs=num_envs, async_envs=cfg.async_envs)
+        return envpool.make(cfg.env_id, max_episode_steps=cfg.max_eps_len)
+    return gymnasium.make(cfg.env_id, async_envs=cfg.async_envs)
 
 
 def train(cfg: Config) -> State:
@@ -403,8 +401,8 @@ def train(cfg: Config) -> State:
     key = jrd.PRNGKey(cfg.seed)
     key, v_key, mu_key, a_key, env_key, agent_key, eval_key = jrd.split(key, 7)
 
-    env = _make_env(cfg, cfg.n_envs)
-    eval_env = _make_env(cfg, cfg.eval_envs)
+    env = _make_env(cfg)
+    eval_env = _make_env(cfg)
     (obs_dim,) = env.obs_shape
     (act_dim,) = env.act_shape
 
@@ -502,8 +500,12 @@ def train(cfg: Config) -> State:
         ),
     )
 
+    env_keys = jrd.split(env_key, cfg.n_envs)
     state = State(
-        mc=train_mc.init(jrd.split(key, cfg.n_envs), env.init(env_key)),
+        mc=train_mc.init(
+            jrd.split(key, cfg.n_envs),
+            jax.vmap(env.init)(env_keys),
+        ),
         agent=agent_state,
         stats=stats.init(batch_shape=(cfg.n_envs,)),
         rew_norm=rew_norm.init(batch_shape=(cfg.n_envs,)),
@@ -535,8 +537,10 @@ def train(cfg: Config) -> State:
 
         if (i + 1) % cfg.eval_freq == 0:
             eval_key, e_env_key, k = jrd.split(eval_key, 3)
+            eval_env_keys = jrd.split(e_env_key, cfg.eval_envs)
             eval_mc_state = eval_mc.init(
-                jrd.split(k, cfg.eval_envs), eval_env.init(e_env_key)
+                jrd.split(k, cfg.eval_envs),
+                jax.vmap(eval_env.init)(eval_env_keys),
             )
             m, eval_state = evaluate(
                 eval_imc.init(

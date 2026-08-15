@@ -152,8 +152,9 @@ def test_vec_mc_preserves_action_batch_axes():
     env = CounterEnv()
     mc = VecMc(mc=Mc(max_eps_len=10, env=env))
     imc = Imc(agent=CountingAgent(), mc=mc)
+    keys = jax.random.split(jax.random.key(0), n_envs)
     state = imc.init(
-        mc.init(jax.random.split(jax.random.key(0), n_envs), env.init()),
+        mc.init(keys, jax.vmap(lambda _: env.init())(keys)),
         CountingAgent.State(offset=jnp.array(1), actions=jnp.array(0)),
     )
 

@@ -232,8 +232,8 @@ class VecMc[EnvS, Step: EnvStep]:
         continued: Mc.State[EnvData]
 
     def init(self, keys: jax.Array, env: EnvS) -> Mc.State[EnvS]:
-        """Initialize one Markov-chain state per random key."""
-        return jax.vmap(self.mc.init, in_axes=(0, None))(keys, env)
+        """Initialize from matching batches of keys and environment states."""
+        return jax.vmap(self.mc.init)(keys, env)
 
     def observe(self, state: Mc.State[EnvS]) -> jax.Array:
         """Read the batched current observations."""

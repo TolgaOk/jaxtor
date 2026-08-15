@@ -203,8 +203,9 @@ key, params_key, env_key, agent_key, eval_key = jrd.split(key, 5)
 params = MLP(4, cfg.hidden, 2, key=params_key)
 if not isinstance(params, MLP):
     raise TypeError("Equinox returned an unexpected module type")
+env_keys = jrd.split(env_key, cfg.n_envs)
 imc_state = behavior_imc.init(
-    vec_mc.init(jrd.split(key, cfg.n_envs), env=env.init(env_key)),
+    vec_mc.init(jrd.split(key, cfg.n_envs), jax.vmap(env.init)(env_keys)),
     Agent.State(key=agent_key, params=params),
 )
 
@@ -214,9 +215,13 @@ for i in track(range(cfg.n_iters), description="Training"):
 
     if (i + 1) % cfg.eval_freq == 0:
         eval_key, env_key, k = jrd.split(eval_key, 3)
+        env_keys = jrd.split(env_key, cfg.eval_envs)
         m, eval_state = jit_eval(
             eval_imc.init(
-                vec_mc.init(jrd.split(k, cfg.eval_envs), env.init(env_key)),
+                vec_mc.init(
+                    jrd.split(k, cfg.eval_envs),
+                    jax.vmap(env.init)(env_keys),
+                ),
                 replace(imc_state.agent, key=eval_key),
             )
         )
