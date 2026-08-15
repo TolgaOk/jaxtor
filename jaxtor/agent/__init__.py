@@ -1,3 +1,4 @@
+from jaxtor.agent.agent import Pi as Pi
 from jaxtor.agent.agent import VPi as VPi
 from jaxtor.agent.agent import VQPi as VQPi
 from jaxtor.agent.dist import Categorical as Categorical

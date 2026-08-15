@@ -15,6 +15,7 @@ from jaxtor.agent import (
     Module,
     NormModel,
     Param,
+    Pi,
     QHead,
     QsaHead,
     VHead,
@@ -266,6 +267,31 @@ def test_vpi_composes_modules_and_preserves_leading_axes():
     assert act.shape == (2, 5)
     assert jnp.array_equal(applied_state.key, state.key)
     assert not jnp.array_equal(acted_state.key, state.key)
+
+
+def test_pi_exposes_only_policy_dependencies():
+    """A policy-only agent applies and selects stochastic or modal actions."""
+    zero = Calls(count=jnp.array(0, dtype=jnp.int32))
+    agent = Pi(body=Body(), pi=Policy())
+    state = agent.init(jax.random.key(0), body=zero, pi=zero)
+    obs = jnp.ones((2, 5, 3))
+
+    pred, applied = jax.jit(agent.apply)(obs, state)
+    act, acted = jax.jit(agent.act)(obs, state)
+    mode, modal = jax.jit(Pi(body=Body(), pi=Policy(), deterministic=True).act)(
+        obs,
+        state,
+    )
+
+    chex.assert_shape(pred.pi.logits, (2, 5, 2))
+    chex.assert_shape(act, (2, 5))
+    assert jnp.array_equal(mode, jnp.zeros((2, 5), dtype=jnp.int32))
+    assert applied.body.count == 1
+    assert applied.pi.count == 1
+    assert acted.body.count == 1
+    assert acted.pi.count == 1
+    assert not jnp.array_equal(acted.key, state.key)
+    assert jnp.array_equal(modal.key, state.key)
 
 
 def test_q_heads_preserve_action_semantics_over_leading_axes():

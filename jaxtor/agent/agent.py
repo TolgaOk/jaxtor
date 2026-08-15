@@ -1,9 +1,9 @@
-"""Composed value-policy agents.
+"""Composed policy and value-policy agents.
 
 An agent joins a shared body and semantic heads while state remains explicit::
 
-    agent = VPi(body=body, v=v, pi=pi)
-    state = agent.init(key, body=body_state, v=v_state, pi=pi_state)
+    agent = Pi(body=body, pi=pi)
+    state = agent.init(key, body=body_state, pi=pi_state)
     pred, applied_state = agent.apply(obs, state)
     act, acted_state = agent.act(obs, state)
 
@@ -30,6 +30,79 @@ class Transform[In, Out, S](Protocol):
     """Stateful transformation capability consumed by composed agents."""
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
+
+
+@dataclass
+class Pi[Obs, Feat, Act, Eval, BodyS, PiS]:
+    """Compose a body and policy head into an acting agent.
+
+    Attributes:
+        body: Transform mapping observations to common features.
+        pi: Transform producing a policy distribution.
+        deterministic: Whether acting uses the distribution mode instead of a
+            stochastic sample.
+
+    Public dataclasses:
+        State: Complete child-state tree and sampling key.
+        Pred: Policy prediction.
+
+    Public methods:
+        init: Combine initialized children and the sampling key.
+        apply: Produce a policy prediction.
+        act: Select an action from the policy.
+    """
+
+    body: Transform[Obs, Feat, BodyS]
+    pi: Transform[Feat, Distribution[Act, Eval], PiS]
+    deterministic: bool = False
+
+    @dataclass
+    class State[BodyData, PiData]:
+        """Policy child-state tree and sampling key."""
+
+        body: BodyData
+        pi: PiData
+        key: jax.Array
+
+    @dataclass
+    class Pred[ActData, EvalData]:
+        """Policy prediction aligned with the observation leading axes."""
+
+        pi: Distribution[ActData, EvalData]
+
+    def init(
+        self,
+        key: jax.Array,
+        body: BodyS,
+        pi: PiS,
+    ) -> Pi.State[BodyS, PiS]:
+        """Combine initialized children and the sampling key."""
+        return self.State(body=body, pi=pi, key=key)
+
+    def apply(
+        self,
+        obs: Obs,
+        state: Pi.State[BodyS, PiS],
+    ) -> tuple[Pi.Pred[Act, Eval], Pi.State[BodyS, PiS]]:
+        """Produce a policy prediction without selecting an action."""
+        features, body = self.body.apply(obs, state.body)
+        dist, pi = self.pi.apply(features, state.pi)
+        return self.Pred(pi=dist), self.State(body=body, pi=pi, key=state.key)
+
+    def act(
+        self,
+        obs: Obs,
+        state: Pi.State[BodyS, PiS],
+    ) -> tuple[Act, Pi.State[BodyS, PiS]]:
+        """Select an action from the policy distribution."""
+        features, body = self.body.apply(obs, state.body)
+        dist, pi = self.pi.apply(features, state.pi)
+        if self.deterministic:
+            act, key = dist.mode(), state.key
+        else:
+            key, sample_key = jax.random.split(state.key)
+            act = dist.sample(sample_key)
+        return act, self.State(body=body, pi=pi, key=key)
 
 
 @dataclass
