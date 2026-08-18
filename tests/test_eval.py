@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 from chex import dataclass
 from jaxtor.env import tabular
+from jaxtor.eval import TabularEval
 from jaxtor.eval import tabular as tabular_eval
-from jaxtor.eval.tabular import Eval as TabularEval
 
 
 # =============================================================================
@@ -22,7 +22,7 @@ class TableAgent:
     class State:
         q: jax.Array
 
-    def q_vals(self, obs: jax.Array, state: TableAgent.State) -> jax.Array:
+    def qvec(self, obs: jax.Array, state: TableAgent.State) -> jax.Array:
         """Return the stored Q-table for the requested state indices."""
         del obs
         return state.q
@@ -433,8 +433,8 @@ def test_tabular_non_term_mask_shape_and_values():
     assert jnp.sum(non_term) == 2.0
 
 
-def test_tabular_q_vals_returns_full_table():
-    """agent.q_vals is called with all state indices and returns (A, S) table."""
+def test_tabular_qvec_returns_full_table():
+    """agent.qvec returns every finite-action value for all state indices."""
     key = jax.random.PRNGKey(21)
 
     config = tabular.garnet.Config(state_size=5, action_size=3)
@@ -447,7 +447,7 @@ def test_tabular_q_vals_returns_full_table():
     agent_state = TableAgent.State(q=q)
 
     all_states = jnp.arange(mdp.state_size)
-    result = agent.q_vals(all_states, agent_state)
+    result = agent.qvec(all_states, agent_state)
 
     assert result.shape == (mdp.action_size, mdp.state_size)
     assert jnp.array_equal(result, q)

@@ -68,9 +68,9 @@ def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
 
 
 class Agent[S](Protocol):
-    """Q-value surface consumed by ``Eval``."""
+    """Finite-action value interface consumed by ``Eval``."""
 
-    def q_vals(self, obs: jax.Array, state: S) -> jax.Array: ...
+    def qvec(self, obs: jax.Array, state: S) -> jax.Array: ...
 
 
 @dataclass
@@ -136,7 +136,7 @@ class Eval[AgentS]:
     def _q_values(self, agent_state: AgentS) -> jax.Array:
         """Read the complete Q-table through the agent protocol."""
         all_states = jnp.arange(self.mdp.state_size)
-        q_values = self.agent.q_vals(all_states, agent_state)
+        q_values = self.agent.qvec(all_states, agent_state)
         chex.assert_shape(
             q_values,
             (self.mdp.action_size, self.mdp.state_size),

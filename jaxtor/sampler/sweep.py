@@ -1,97 +1,92 @@
-"""Stochastic sweep sampler for tabular MDPs.
+"""Stochastic exhaustive sampling for finite Markov decision processes.
 
-Sweep over all (s,a) pairs using stochastic transitions.
+``Sweep`` conditions one tabular environment state on every state index, then
+samples one designated action from every conditioned state::
 
-Example:
-    >>> from jaxtor.env import tabular
-    >>> from jaxtor.sampler import mc, sweep
-    >>> config = tabular.garnet.Config(state_size=10, action_size=4)
-    >>> env = tabular.garnet.make(config)
-    >>> mc_sampler = mc.Mc(max_eps_len=100, env=env)
-    >>> sweeper = sweep.Sweep(mc=mc_sampler)
-    >>> env_state = env.init(key)
-    >>> transition, mc_state = sweeper.sample(key, env_state)
+    sweep = Sweep(mc=mc)
+    transitions, states = sweep.sample(key, env_state)
+
+The flat batch is action-major: ``position = action * state_size + state``.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Protocol
+from typing import Protocol, Self
 
+import chex
+from chex import dataclass
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
-import chex
-from chex import dataclass
-
-from jaxtor.env.tabular import Mdp, TabularEnv
 
 
-class Mc[McStateT, TransitionT](Protocol):
-    """Markov-chain capability required by ``Sweep``."""
+class Mdp(Protocol):
+    """Finite MDP surface consumed by ``Sweep``."""
 
-    def init(self, key: chex.PRNGKey, env: TabularEnv.State) -> McStateT: ...
-    def sample(
-        self, act: chex.Array, state: McStateT
-    ) -> tuple[TransitionT, McStateT]: ...
+    @property
+    def state_size(self) -> int: ...
+    @property
+    def action_size(self) -> int: ...
+    def replace(self, **changes: object) -> Self: ...
+
+
+class EnvState(Protocol):
+    """Tabular environment-state surface consumed by ``Sweep``."""
+
+    @property
+    def mdp(self) -> Mdp: ...
+    def replace(self, **changes: object) -> Self: ...
+
+
+class Mc[EnvS, McS, Transition](Protocol):
+    """Markov-chain surface consumed by ``Sweep``."""
+
+    def init(self, key: jax.Array, env: EnvS) -> McS: ...
+    def sample(self, act: chex.Array, state: McS) -> tuple[Transition, McS]: ...
 
 
 @dataclass
-class Sweep[McStateT, TransitionT]:
-    """Sweep over all (s,a) pairs with stochastic transitions.
+class Sweep[EnvS: EnvState, McS, Transition]:
+    """Sample one stochastic transition from every state-action pair.
 
-    Flat batch ordering: position = a * S + s (action-major).
+    Required protocols::
+
+        env_state.mdp.state_size: int
+        env_state.mdp.action_size: int
+        env_state.mdp.replace(initial=...) -> mdp
+        env_state.replace(mdp=...) -> env_state
+        mc.init(key, env_state) -> mc_state
+        mc.sample(action, mc_state) -> (transition, mc_state)
 
     Attributes:
-        mc: Mc instance for single-environment sampling.
+        mc: Scalar Markov-chain sampler.
+
+    Public methods:
+        sample: Sample every state-action pair in one action-major batch.
     """
 
-    mc: Mc[McStateT, TransitionT]
-
-    def _condition_mdp_initial(self, mdp: Mdp, init_dist: jax.Array) -> Mdp:
-        """Create an MDP with a modified initial distribution.
-
-        Args:
-            mdp: Original MDP.
-            init_dist: New initial state distribution (typically one-hot).
-
-        Returns:
-            MDP with the new initial distribution, sharing other arrays.
-        """
-        return replace(mdp, initial=init_dist)
+    mc: Mc[EnvS, McS, Transition]
 
     def sample(
         self,
-        key: chex.PRNGKey,
-        env: TabularEnv.State,
-    ) -> tuple[TransitionT, McStateT]:
-        """Sample one transition from each (s,a) pair.
+        key: jax.Array,
+        env: EnvS,
+    ) -> tuple[Transition, McS]:
+        """Sample every state-action pair in one action-major batch."""
+        state_size = env.mdp.state_size
+        action_size = env.mdp.action_size
+        batch_size = action_size * state_size
 
-        Initializes A*S parallel MC states with conditioned initial distributions,
-        then samples with the designated initial action for each position.
+        state_indices = jnp.tile(jnp.arange(state_size), action_size)
+        initials = jax.nn.one_hot(state_indices, state_size)
+        chex.assert_shape(state_indices, (batch_size,))
+        chex.assert_shape(initials, (batch_size, state_size))
 
-        Args:
-            key: Random key for initialization and sampling.
-            env: Environment state (template).
+        def condition(initial: jax.Array) -> EnvS:
+            return env.replace(mdp=env.mdp.replace(initial=initial))
 
-        Returns:
-            Batched transitions and MC states with shape (A*S, ...).
-        """
-        S, A = env.mdp.state_size, env.mdp.action_size
-
-        state_indices = jnp.tile(jnp.arange(S), A)
-        init_dists = jax.nn.one_hot(state_indices, S)
-        chex.assert_shape(state_indices, (A * S,))
-        chex.assert_shape(init_dists, (A * S, S))
-
-        def condition_env_state(init_dist: jax.Array) -> TabularEnv.State:
-            new_mdp = self._condition_mdp_initial(env.mdp, init_dist)
-            return replace(env, mdp=new_mdp)
-
-        conditioned_env_states = jax.vmap(condition_env_state)(init_dists)
-
-        keys = jrd.split(key, A * S)
-        mc_state = jax.vmap(self.mc.init)(keys, conditioned_env_states)
-        init_action = jnp.arange(A * S) // S
-        chex.assert_shape(init_action, (A * S,))
-        return jax.vmap(self.mc.sample)(init_action, mc_state)
+        envs = jax.vmap(condition)(initials)
+        states = jax.vmap(self.mc.init)(jrd.split(key, batch_size), envs)
+        actions = jnp.arange(batch_size) // state_size
+        chex.assert_shape(actions, (batch_size,))
+        return jax.vmap(self.mc.sample)(actions, states)

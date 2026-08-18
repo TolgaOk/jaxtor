@@ -24,7 +24,7 @@ def test_garnet_init():
     assert state.mdp.action_size == config.action_size
     assert state.s == -1
     assert state.step == 0
-    assert state.max_eps_len == 1000
+    assert env.config.max_eps_len == 1000
 
     # After reset, s is a valid index
     obs, state = env.reset(reset_key, state)
