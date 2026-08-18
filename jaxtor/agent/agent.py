@@ -1,23 +1,33 @@
-"""Composed policy, value-policy, and normalized-advantage agents.
+"""Structural policy, value-policy, and quadratic agent components.
 
-An agent joins a shared body and semantic heads while state remains explicit::
+Each component stores child transforms as configuration and threads their
+dynamic states through a nested ``State`` pytree::
 
-    agent = Pi(body=body, pi=pi)
+    agent = Pi(body=body, policy=pi)
     state = agent.init(key, body=body_state, pi=pi_state)
-    pred, applied_state = agent.apply(obs, state)
+    pi, applied_state = agent.pi(obs, state)
     act, acted_state = agent.act(obs, state)
 
-``apply`` returns all predictions. ``act`` evaluates only action dependencies.
-For :class:`Naf`, the prediction exposes a state-bound Q-function and behavior
-policy::
+Value-policy agents expose separate value and joint value-policy endpoints::
 
-    pred, state = naf.apply(obs, state)
-    q = pred.qfn.evaluate(act)
-    logp = pred.pi.evaluate(act).logp
+    value_policy, state = agent.vpi(obs, state)
+    value, state = agent.v(obs, state)
+
+Quadratic agents expose value and action-value endpoints::
+
+    q, state = agent.q(obs, act, state)
+    value, state = agent.v(obs, state)
+
+``Ou`` adds temporal exploration by wrapping action selection::
+
+    explorer = Ou(agent=deterministic_agent, sigma=0.1)
+    state = explorer.init(key, noise, agent_state)
+    act, state = explorer.act(obs, state)
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Protocol
 
@@ -26,11 +36,16 @@ import jax
 import jax.numpy as jnp
 from chex import dataclass
 
-from jaxtor.agent.dist import Normal
-
 
 class Distribution[Act, Eval](Protocol):
-    """Action-distribution capability consumed by composed agents."""
+    """Action-distribution interface used by policy agents.
+
+    Required methods::
+
+        sample(key) -> action
+        evaluate(action) -> evaluation
+        mode() -> action
+    """
 
     def sample(self, key: jax.Array) -> Act: ...
     def evaluate(self, act: Act) -> Eval: ...
@@ -38,48 +53,174 @@ class Distribution[Act, Eval](Protocol):
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation capability consumed by composed agents."""
+    """Stateful transformation interface used by composed agents.
+
+    Required methods::
+
+        apply(input, state) -> (output, state)
+    """
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
+
+
+class Agent[Obs, S](Protocol):
+    """Action-selection interface wrapped by :class:`Ou`.
+
+    Required methods::
+
+        act(obs, state) -> (action, state)
+    """
+
+    def act(self, obs: Obs, state: S) -> tuple[jax.Array, S]: ...
+
+
+@dataclass
+class Ou[Obs, S]:
+    """Add bounded Ornstein–Uhlenbeck noise to an agent's actions.
+
+    The component advances one independent process per action entry:
+
+    .. code-block:: text
+
+        noise_t = noise_{t-1} + theta (0 - noise_{t-1}) dt
+                  + sigma sqrt(dt) epsilon_t
+        action_t = clip(agent_action_t + noise_t, low, high)
+
+    The noise is added to the action returned by ``agent``. A deterministic
+    child agent makes this process the sole source of action-selection noise.
+    Supplying the initial noise explicitly keeps its batch shape visible and
+    supports scalar, vectorized, or nested-vectorized agents. The process does
+    not infer episode boundaries and continues until its state is reinitialized.
+
+    Required protocols::
+
+        agent.act(obs, agent_state) -> (action: jax.Array, agent_state)
+
+    Attributes:
+        agent: Child agent producing the unperturbed action.
+        theta: Rate at which noise returns to zero.
+        sigma: Standard deviation of each Gaussian innovation.
+        dt: Process time increment per action.
+        low: Lower action bound.
+        high: Upper action bound.
+
+    Public dataclasses:
+        State: Child-agent, random-key, and noise-process states.
+
+    Public methods:
+        init: Combine initialized child and noise states.
+        act: Select an action and advance the noise process.
+    """
+
+    agent: Agent[Obs, S]
+    theta: float = 0.15
+    sigma: float = 0.1
+    dt: float = 1.0
+    low: float = -1.0
+    high: float = 1.0
+
+    @dataclass
+    class State[AgentData]:
+        """Child-agent state and Ornstein-Uhlenbeck process state.
+
+        Attributes:
+            agent: Child-agent state.
+            key: Random key used for the next noise innovation.
+            noise: Current action-shaped process value.
+        """
+
+        agent: AgentData
+        key: jax.Array
+        noise: jax.Array
+
+    def __post_init__(self) -> None:
+        """Validate process and action-bound parameters."""
+        if self.theta < 0:
+            raise ValueError("theta must be non-negative")
+        if self.sigma < 0:
+            raise ValueError("sigma must be non-negative")
+        if self.dt <= 0:
+            raise ValueError("dt must be positive")
+        if self.low >= self.high:
+            raise ValueError("low must be less than high")
+
+    def init(
+        self,
+        key: jax.Array,
+        noise: jax.Array,
+        agent: S,
+    ) -> Ou.State[S]:
+        """Combine initialized child and noise-process states."""
+        return self.State(agent=agent, key=key, noise=noise)
+
+    def act(
+        self,
+        obs: Obs,
+        state: Ou.State[S],
+    ) -> tuple[jax.Array, Ou.State[S]]:
+        """Select an action and advance its correlated perturbation."""
+        act, agent = self.agent.act(obs, state.agent)
+        chex.assert_equal_shape([act, state.noise])
+        key, sample_key = jax.random.split(state.key)
+        noise = (
+            state.noise
+            - self.theta * state.noise * self.dt
+            + self.sigma
+            * math.sqrt(self.dt)
+            * jax.random.normal(sample_key, act.shape, dtype=act.dtype)
+        )
+        return jnp.clip(act + noise, self.low, self.high), replace(
+            state,
+            agent=agent,
+            key=key,
+            noise=noise,
+        )
 
 
 @dataclass
 class Pi[Obs, Feat, Act, Eval, BodyS, PiS]:
     """Compose a body and policy head into an acting agent.
 
+    Required protocols::
+
+        body.apply(obs, body_state) -> (features, body_state)
+        policy.apply(features, policy_state) -> (distribution, policy_state)
+        distribution.sample(key) -> action
+        distribution.evaluate(action) -> evaluation
+        distribution.mode() -> action
+
     Attributes:
         body: Transform mapping observations to common features.
-        pi: Transform producing a policy distribution.
+        policy: Transform producing a policy distribution.
         deterministic: Whether acting uses the distribution mode instead of a
             stochastic sample.
 
     Public dataclasses:
         State: Complete child-state tree and sampling key.
-        Pred: Policy prediction.
 
     Public methods:
         init: Combine initialized children and the sampling key.
-        apply: Produce a policy prediction.
+        pi: Produce a policy distribution.
         act: Select an action from the policy.
     """
 
     body: Transform[Obs, Feat, BodyS]
-    pi: Transform[Feat, Distribution[Act, Eval], PiS]
+    policy: Transform[Feat, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
     class State[BodyData, PiData]:
-        """Policy child-state tree and sampling key."""
+        """Policy child-state tree and sampling key.
+
+        Attributes:
+            body: Body-transform state.
+            pi: Policy-head state.
+            key: Action-sampling key.
+        """
 
         body: BodyData
         pi: PiData
         key: jax.Array
-
-    @dataclass
-    class Pred[ActData, EvalData]:
-        """Policy prediction aligned with the observation leading axes."""
-
-        pi: Distribution[ActData, EvalData]
 
     def init(
         self,
@@ -90,15 +231,15 @@ class Pi[Obs, Feat, Act, Eval, BodyS, PiS]:
         """Combine initialized children and the sampling key."""
         return self.State(body=body, pi=pi, key=key)
 
-    def apply(
+    def pi(
         self,
         obs: Obs,
         state: Pi.State[BodyS, PiS],
-    ) -> tuple[Pi.Pred[Act, Eval], Pi.State[BodyS, PiS]]:
-        """Produce a policy prediction without selecting an action."""
+    ) -> tuple[Distribution[Act, Eval], Pi.State[BodyS, PiS]]:
+        """Produce a policy distribution without selecting an action."""
         features, body = self.body.apply(obs, state.body)
-        dist, pi = self.pi.apply(features, state.pi)
-        return self.Pred(pi=dist), self.State(body=body, pi=pi, key=state.key)
+        dist, pi = self.policy.apply(features, state.pi)
+        return dist, replace(state, body=body, pi=pi)
 
     def act(
         self,
@@ -107,39 +248,49 @@ class Pi[Obs, Feat, Act, Eval, BodyS, PiS]:
     ) -> tuple[Act, Pi.State[BodyS, PiS]]:
         """Select an action from the policy distribution."""
         features, body = self.body.apply(obs, state.body)
-        dist, pi = self.pi.apply(features, state.pi)
+        dist, pi = self.policy.apply(features, state.pi)
         if self.deterministic:
             act, key = dist.mode(), state.key
         else:
             key, sample_key = jax.random.split(state.key)
             act = dist.sample(sample_key)
-        return act, self.State(body=body, pi=pi, key=key)
+        return act, replace(state, body=body, pi=pi, key=key)
 
 
 @dataclass
 class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
     """Compose a body, value head, and policy head into an acting agent.
 
+    Required protocols::
+
+        body.apply(obs, body_state) -> (features, body_state)
+        value.apply(features, value_state) -> (value, value_state)
+        policy.apply(features, policy_state) -> (distribution, policy_state)
+        distribution.sample(key) -> action
+        distribution.evaluate(action) -> evaluation
+        distribution.mode() -> action
+
     Attributes:
         body: Transform mapping observations to common features.
-        v: Transform producing ``V(s)``.
-        pi: Transform producing a policy distribution.
+        value: Transform producing ``V(s)``.
+        policy: Transform producing a policy distribution.
         deterministic: Whether acting uses the distribution mode instead of a
             stochastic sample.
 
     Public dataclasses:
         State: Complete child-state tree and sampling key.
-        Pred: Value and policy prediction.
+        ValuePolicy: Joint value and policy result.
 
     Public methods:
         init: Combine initialized children and the selection key.
-        apply: Produce value and policy predictions.
+        v: Produce state values without evaluating the policy.
+        vpi: Produce state values and policies from shared features.
         act: Select only the action required by a minimal sampler.
     """
 
     body: Transform[Obs, Feat, BodyS]
-    v: Transform[Feat, jax.Array, ValS]
-    pi: Transform[Feat, Distribution[Act, Eval], PiS]
+    value: Transform[Feat, jax.Array, ValS]
+    policy: Transform[Feat, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
@@ -159,8 +310,13 @@ class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
         key: jax.Array
 
     @dataclass
-    class Pred[ActData, EvalData]:
-        """Value and policy predictions aligned by leading axes."""
+    class ValuePolicy[ActData, EvalData]:
+        """State values and policies aligned by leading axes.
+
+        Attributes:
+            v: State values.
+            pi: Policy distributions.
+        """
 
         v: jax.Array
         pi: Distribution[ActData, EvalData]
@@ -175,18 +331,28 @@ class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
         """Combine initialized children and the sampling key."""
         return self.State(body=body, v=v, pi=pi, key=key)
 
-    def apply(
+    def v(
         self,
         obs: Obs,
         state: VPi.State[BodyS, ValS, PiS],
-    ) -> tuple[VPi.Pred[Act, Eval], VPi.State[BodyS, ValS, PiS]]:
-        """Produce value and policy predictions without selecting an action."""
+    ) -> tuple[jax.Array, VPi.State[BodyS, ValS, PiS]]:
+        """Produce state values without evaluating the policy head."""
         features, body = self.body.apply(obs, state.body)
-        value, v = self.v.apply(features, state.v)
-        dist, pi = self.pi.apply(features, state.pi)
+        value, v = self.value.apply(features, state.v)
+        return value, replace(state, body=body, v=v)
+
+    def vpi(
+        self,
+        obs: Obs,
+        state: VPi.State[BodyS, ValS, PiS],
+    ) -> tuple[VPi.ValuePolicy[Act, Eval], VPi.State[BodyS, ValS, PiS]]:
+        """Produce state values and policies from one shared body application."""
+        features, body = self.body.apply(obs, state.body)
+        value, v = self.value.apply(features, state.v)
+        dist, pi = self.policy.apply(features, state.pi)
         return (
-            self.Pred(v=value, pi=dist),
-            self.State(body=body, v=v, pi=pi, key=state.key),
+            self.ValuePolicy(v=value, pi=dist),
+            replace(state, body=body, v=v, pi=pi),
         )
 
     def act(
@@ -196,15 +362,15 @@ class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
     ) -> tuple[Act, VPi.State[BodyS, ValS, PiS]]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
-        dist, pi = self.pi.apply(features, state.pi)
+        dist, pi = self.policy.apply(features, state.pi)
         if self.deterministic:
             act, key = dist.mode(), state.key
         else:
             key, sample_key = jax.random.split(state.key)
             act = dist.sample(sample_key)
-        return act, self.State(
+        return act, replace(
+            state,
             body=body,
-            v=state.v,
             pi=pi,
             key=key,
         )
@@ -214,33 +380,51 @@ class VPi[Obs, Feat, Act, Eval, BodyS, ValS, PiS]:
 class VQPi[Obs, Feat, Act, Eval, BodyS, ValS, QS, PiS]:
     """Compose value, action-value, and policy components into an agent.
 
+    Required protocols::
+
+        body.apply(obs, body_state) -> (features, body_state)
+        value.apply(features, value_state) -> (value, value_state)
+        q_values.apply(features, q_state) -> (q_values, q_state)
+        policy.apply(features, policy_state) -> (distribution, policy_state)
+        distribution.sample(key) -> action
+        distribution.evaluate(action) -> evaluation
+        distribution.mode() -> action
+
     Attributes:
         body: Transform mapping observations to common features.
-        v: Transform producing ``V(s)``.
-        q: Transform producing ``Q(s, .)``.
-        pi: Transform producing a policy distribution.
+        value: Transform producing ``V(s)``.
+        q_values: Transform producing ``Q(s, .)``.
+        policy: Transform producing a policy distribution.
         deterministic: Whether acting uses the distribution mode instead of a
             stochastic sample.
 
     Public dataclasses:
         State: Complete child-state tree and sampling key.
-        Pred: Value, action values, and policy prediction.
+        ValueQPolicy: Joint value, action-value, and policy result.
 
     Public methods:
         init: Combine initialized children and the selection key.
-        apply: Produce value, action-value, and policy predictions.
+        vqpi: Produce value, action-value, and policy results.
         act: Select only the action required by a minimal sampler.
     """
 
     body: Transform[Obs, Feat, BodyS]
-    v: Transform[Feat, jax.Array, ValS]
-    q: Transform[Feat, jax.Array, QS]
-    pi: Transform[Feat, Distribution[Act, Eval], PiS]
+    value: Transform[Feat, jax.Array, ValS]
+    q_values: Transform[Feat, jax.Array, QS]
+    policy: Transform[Feat, Distribution[Act, Eval], PiS]
     deterministic: bool = False
 
     @dataclass
     class State[BodyData, ValData, QData, PiData]:
-        """Value-action-values-policy child-state tree."""
+        """Value-action-values-policy child-state tree.
+
+        Attributes:
+            body: Body-transform state.
+            v: Value-head state.
+            q: Action-value-head state.
+            pi: Policy-head state.
+            key: Action-sampling key.
+        """
 
         body: BodyData
         v: ValData
@@ -249,8 +433,14 @@ class VQPi[Obs, Feat, Act, Eval, BodyS, ValS, QS, PiS]:
         key: jax.Array
 
     @dataclass
-    class Pred[ActData, EvalData]:
-        """Value, action values, and policy predictions."""
+    class ValueQPolicy[ActData, EvalData]:
+        """State values, action values, and policy distributions.
+
+        Attributes:
+            v: State values.
+            q: Finite-action value vectors.
+            pi: Policy distributions.
+        """
 
         v: jax.Array
         q: jax.Array
@@ -267,24 +457,27 @@ class VQPi[Obs, Feat, Act, Eval, BodyS, ValS, QS, PiS]:
         """Combine initialized children and the sampling key."""
         return self.State(body=body, v=v, q=q, pi=pi, key=key)
 
-    def apply(
+    def vqpi(
         self,
         obs: Obs,
         state: VQPi.State[BodyS, ValS, QS, PiS],
-    ) -> tuple[VQPi.Pred[Act, Eval], VQPi.State[BodyS, ValS, QS, PiS]]:
-        """Produce value, action-value, and policy predictions."""
+    ) -> tuple[
+        VQPi.ValueQPolicy[Act, Eval],
+        VQPi.State[BodyS, ValS, QS, PiS],
+    ]:
+        """Produce value, action values, and policy from shared features."""
         features, body = self.body.apply(obs, state.body)
-        value, v = self.v.apply(features, state.v)
-        q, q_state = self.q.apply(features, state.q)
-        dist, pi = self.pi.apply(features, state.pi)
+        value, v = self.value.apply(features, state.v)
+        q, q_state = self.q_values.apply(features, state.q)
+        dist, pi = self.policy.apply(features, state.pi)
         return (
-            self.Pred(v=value, q=q, pi=dist),
-            self.State(
+            self.ValueQPolicy(v=value, q=q, pi=dist),
+            replace(
+                state,
                 body=body,
                 v=v,
                 q=q_state,
                 pi=pi,
-                key=state.key,
             ),
         )
 
@@ -295,200 +488,141 @@ class VQPi[Obs, Feat, Act, Eval, BodyS, ValS, QS, PiS]:
     ) -> tuple[Act, VQPi.State[BodyS, ValS, QS, PiS]]:
         """Select only the action required by a minimal sampler."""
         features, body = self.body.apply(obs, state.body)
-        dist, pi = self.pi.apply(features, state.pi)
+        dist, pi = self.policy.apply(features, state.pi)
         if self.deterministic:
             act, key = dist.mode(), state.key
         else:
             key, sample_key = jax.random.split(state.key)
             act = dist.sample(sample_key)
-        return act, self.State(
+        return act, replace(
+            state,
             body=body,
-            v=state.v,
-            q=state.q,
             pi=pi,
             key=key,
         )
 
 
 @dataclass
-class Naf[Obs, Feat, BodyS, ValS, LocS, PS]:
-    """Compose a diagonal normalized advantage function agent.
+class Quadratic[Obs, Feat, BodyS, ValS, LocS, PS]:
+    """Compose a diagonal quadratic action-value agent.
 
     The agent parameterizes
 
     .. code-block:: text
 
-        mu(s) = tanh(loc(s))
+        mu(s) = loc(s)
         d(s) = softplus(raw_p(s)) + eps
         P(s) = diag(d(s))
         A(s, a) = -1/2 (a - mu(s))^T P(s) (a - mu(s))
         Q(s, a) = V(s) + A(s, a)
 
-    The behavior policy reuses ``P(s)`` as precision:
+    Required protocols::
 
-    .. code-block:: text
-
-        Sigma(s) = scale^2 P(s)^-1
-        pi(. | s) = Normal(mu(s), Sigma(s))
+        body.apply(obs, body_state) -> (features, body_state)
+        value.apply(features, value_state) -> (value, value_state)
+        loc.apply(features, loc_state) -> (location, loc_state)
+        p.apply(features, p_state) -> (raw_precision, p_state)
 
     Attributes:
         act_size: Size of the continuous action vector.
         body: Transform mapping observations to common features.
-        v: Transform producing ``V(s)``.
-        loc: Transform producing unconstrained action locations.
+        value: Transform producing ``V(s)``.
+        loc: Transform producing action locations.
         p: Transform producing unconstrained diagonal precisions.
         eps: Positive floor applied to transformed precisions.
-        scale: Positive exploration standard-deviation scale.
-        deterministic: Whether acting returns ``mu(s)``.
 
     Public dataclasses:
-        State: Complete child-state tree and sampling key.
-        Qfn: State-bound function mapping actions to Q-values.
-        Pred: Value, Q-function, and behavior-policy prediction.
+        State: Complete child-state tree.
 
     Public methods:
-        init: Combine initialized children and the sampling key.
-        apply: Produce the complete NAF prediction.
-        act: Select an action without evaluating ``V(s)``.
+        init: Combine initialized children.
+        q: Evaluate ``Q(s, a)``.
+        v: Evaluate ``V(s)`` without evaluating action-dependent heads.
+        act: Select the maximizing action without evaluating ``V(s)`` or ``P(s)``.
     """
 
     act_size: int
     body: Transform[Obs, Feat, BodyS]
-    v: Transform[Feat, jax.Array, ValS]
+    value: Transform[Feat, jax.Array, ValS]
     loc: Transform[Feat, jax.Array, LocS]
     p: Transform[Feat, jax.Array, PS]
     eps: float = 1.0
-    scale: float = 0.1
-    deterministic: bool = False
 
     @dataclass
     class State[BodyData, ValData, LocData, PData]:
-        """Body, value, location, precision, and sampling state."""
+        """Body, value, location, and precision child states.
+
+        Attributes:
+            body: Body-transform state.
+            v: Value-head state.
+            loc: Location-head state.
+            p: Precision-head state.
+        """
 
         body: BodyData
         v: ValData
         loc: LocData
         p: PData
-        key: jax.Array
-
-    @dataclass
-    class Qfn:
-        """State-bound normalized advantage Q-function.
-
-        Attributes:
-            v: State values shaped ``[...]``.
-            loc: Actions maximizing Q, shaped ``[..., A]``.
-            p: Positive-definite precision matrices shaped ``[..., A, A]``.
-
-        Public methods:
-            evaluate: Evaluate ``Q(s, a)`` for supplied actions.
-        """
-
-        v: jax.Array
-        loc: jax.Array
-        p: jax.Array
-
-        def evaluate(self, act: jax.Array) -> jax.Array:
-            """Evaluate the state-bound Q-function at ``act``."""
-            chex.assert_equal_shape([act, self.loc])
-            chex.assert_shape(self.v, self.loc.shape[:-1])
-            delta = act - self.loc
-            q = self.v - 0.5 * jnp.einsum(
-                "...i,...ij,...j->...",
-                delta,
-                self.p,
-                delta,
-            )
-            chex.assert_equal_shape([self.v, q])
-            return q
-
-    @dataclass
-    class Pred:
-        """Complete NAF prediction aligned by leading axes.
-
-        Attributes:
-            v: State values shaped ``[...]``.
-            qfn: State-bound function ``a -> Q(s, a)``.
-            pi: Normal behavior policy with event shape ``[A]``.
-        """
-
-        v: jax.Array
-        qfn: Naf.Qfn
-        pi: Normal
 
     def __post_init__(self) -> None:
-        """Validate the action size, precision floor, and policy scale."""
+        """Validate the action size and precision floor."""
         if self.act_size < 1:
             raise ValueError("act_size must be positive")
         if self.eps <= 0:
             raise ValueError("eps must be positive")
-        if self.scale <= 0:
-            raise ValueError("scale must be positive")
 
     def init(
         self,
-        key: jax.Array,
         body: BodyS,
         v: ValS,
         loc: LocS,
         p: PS,
-    ) -> Naf.State[BodyS, ValS, LocS, PS]:
-        """Combine initialized children and the sampling key."""
-        return self.State(body=body, v=v, loc=loc, p=p, key=key)
+    ) -> Quadratic.State[BodyS, ValS, LocS, PS]:
+        """Combine initialized child states."""
+        return self.State(body=body, v=v, loc=loc, p=p)
 
-    def _policy(
-        self,
-        features: Feat,
-        state: Naf.State[BodyS, ValS, LocS, PS],
-    ) -> tuple[Normal, jax.Array, Naf.State[BodyS, ValS, LocS, PS]]:
-        """Produce the behavior policy, precision, and advanced child state."""
-        loc, loc_state = self.loc.apply(features, state.loc)
-        raw_p, p_state = self.p.apply(features, state.p)
-        shape = (*loc.shape[:-1], self.act_size)
-        chex.assert_shape(loc, shape)
-        chex.assert_shape(raw_p, shape)
-        diagonal = jax.nn.softplus(raw_p) + self.eps
-        eye = jnp.eye(self.act_size, dtype=loc.dtype)
-        precision = jnp.einsum("...i,ij->...ij", diagonal, eye)
-        return (
-            Normal(
-                loc=jnp.tanh(loc),
-                cov=jnp.einsum("...i,ij->...ij", self.scale**2 / diagonal, eye),
-            ),
-            precision,
-            replace(state, loc=loc_state, p=p_state),
-        )
-
-    def apply(
+    def q(
         self,
         obs: Obs,
-        state: Naf.State[BodyS, ValS, LocS, PS],
-    ) -> tuple[Naf.Pred, Naf.State[BodyS, ValS, LocS, PS]]:
-        """Produce value, state-bound Q-function, and policy predictions."""
+        act: jax.Array,
+        state: Quadratic.State[BodyS, ValS, LocS, PS],
+    ) -> tuple[jax.Array, Quadratic.State[BodyS, ValS, LocS, PS]]:
+        """Evaluate ``Q(s, a)`` and advance every required child state."""
         features, body = self.body.apply(obs, state.body)
-        state = replace(state, body=body)
-        value, v = self.v.apply(features, state.v)
-        policy, precision, state = self._policy(features, state)
-        chex.assert_shape(value, policy.loc.shape[:-1])
-        return self.Pred(
-            v=value,
-            qfn=self.Qfn(v=value, loc=policy.loc, p=precision),
-            pi=policy,
-        ), replace(
+        value, v = self.value.apply(features, state.v)
+        loc, loc_state = self.loc.apply(features, state.loc)
+        raw_p, p_state = self.p.apply(features, state.p)
+        chex.assert_shape(act, (*act.shape[:-1], self.act_size))
+        chex.assert_equal_shape([act, loc, raw_p])
+        chex.assert_shape(value, loc.shape[:-1])
+        diagonal = jax.nn.softplus(raw_p) + self.eps
+        q = value - 0.5 * jnp.sum(diagonal * (act - loc) ** 2, axis=-1)
+        chex.assert_equal_shape([value, q])
+        return q, replace(
             state,
+            body=body,
             v=v,
+            loc=loc_state,
+            p=p_state,
         )
+
+    def v(
+        self,
+        obs: Obs,
+        state: Quadratic.State[BodyS, ValS, LocS, PS],
+    ) -> tuple[jax.Array, Quadratic.State[BodyS, ValS, LocS, PS]]:
+        """Evaluate ``V(s)`` without evaluating location or precision heads."""
+        features, body = self.body.apply(obs, state.body)
+        value, v = self.value.apply(features, state.v)
+        return value, replace(state, body=body, v=v)
 
     def act(
         self,
         obs: Obs,
-        state: Naf.State[BodyS, ValS, LocS, PS],
-    ) -> tuple[jax.Array, Naf.State[BodyS, ValS, LocS, PS]]:
-        """Select an action without evaluating the value transform."""
+        state: Quadratic.State[BodyS, ValS, LocS, PS],
+    ) -> tuple[jax.Array, Quadratic.State[BodyS, ValS, LocS, PS]]:
+        """Select the maximizing action without evaluating value or precision."""
         features, body = self.body.apply(obs, state.body)
-        state = replace(state, body=body)
-        policy, _, state = self._policy(features, state)
-        if self.deterministic:
-            return policy.mode(), state
-        key, sample_key = jax.random.split(state.key)
-        return policy.sample(sample_key), replace(state, key=key)
+        loc, loc_state = self.loc.apply(features, state.loc)
+        chex.assert_shape(loc, (*loc.shape[:-1], self.act_size))
+        return loc, replace(state, body=body, loc=loc_state)

@@ -37,7 +37,12 @@ def _assert_value(value: jax.Array, features: jax.Array) -> None:
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation capability consumed by semantic heads."""
+    """Stateful transformation interface used by semantic heads.
+
+    Required methods::
+
+        apply(input, state) -> (output, state)
+    """
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
@@ -45,6 +50,10 @@ class Transform[In, Out, S](Protocol):
 @dataclass
 class VHead[NetS]:
     """Produce one scalar state value from each feature vector.
+
+    Required protocols::
+
+        net.apply(features, net_state) -> (values: jax.Array, net_state)
 
     Attributes:
         net: Transform producing vectors with a final singleton axis.
@@ -61,7 +70,11 @@ class VHead[NetS]:
 
     @dataclass
     class State[NetData]:
-        """Value-head state mirroring its child transform."""
+        """Value-head state mirroring its child transform.
+
+        Attributes:
+            net: Value-transform state.
+        """
 
         net: NetData
 
@@ -85,6 +98,10 @@ class VHead[NetS]:
 class QHead[NetS]:
     """Produce all finite-action values from each feature vector.
 
+    Required protocols::
+
+        net.apply(features, net_state) -> (q_values: jax.Array, net_state)
+
     Attributes:
         n_actions: Size of the final action-value axis.
         net: Transform producing action-value vectors.
@@ -102,7 +119,11 @@ class QHead[NetS]:
 
     @dataclass
     class State[NetData]:
-        """Action-value-head state mirroring its child transform."""
+        """Action-value-head state mirroring its child transform.
+
+        Attributes:
+            net: Action-value-transform state.
+        """
 
         net: NetData
 
@@ -131,6 +152,10 @@ class QHead[NetS]:
 class QsaHead[ValS]:
     """Produce ``Q(s, a)`` from state features and one action.
 
+    Required protocols::
+
+        value.apply(concatenated_input, value_state) -> (q: jax.Array, value_state)
+
     Attributes:
         value: Transform applied after concatenating features and actions.
 
@@ -146,7 +171,11 @@ class QsaHead[ValS]:
 
     @dataclass
     class State[ValData]:
-        """State-action-value-head state."""
+        """State-action-value-head state.
+
+        Attributes:
+            value: State-action-value-transform state.
+        """
 
         value: ValData
 
@@ -177,6 +206,10 @@ class QsaHead[ValS]:
 class CategoricalHead[LogitS]:
     """Produce categorical policy distributions from feature vectors.
 
+    Required protocols::
+
+        logits.apply(features, logits_state) -> (logits: jax.Array, logits_state)
+
     Attributes:
         n_actions: Number of categorical actions.
         logits: Transform producing unnormalized logits.
@@ -194,7 +227,11 @@ class CategoricalHead[LogitS]:
 
     @dataclass
     class State[LogitData]:
-        """Categorical-head state."""
+        """Categorical-head state.
+
+        Attributes:
+            logits: Logit-transform state.
+        """
 
         logits: LogitData
 
@@ -223,6 +260,12 @@ class CategoricalHead[LogitS]:
 class DiagNormalHead[LocS, LogScaleS]:
     """Produce diagonal-Normal policy distributions from feature vectors.
 
+    Required protocols::
+
+        loc.apply(features, loc_state) -> (location: jax.Array, loc_state)
+        log_scale.apply(features, log_scale_state)
+            -> (log_scale: jax.Array, log_scale_state)
+
     Attributes:
         act_size: Size of the vector-valued action event.
         loc: Transform producing distribution locations.
@@ -242,7 +285,12 @@ class DiagNormalHead[LocS, LogScaleS]:
 
     @dataclass
     class State[LocData, LogScaleData]:
-        """Diagonal-Normal-head child-state tree."""
+        """Diagonal-Normal-head child-state tree.
+
+        Attributes:
+            loc: Location-transform state.
+            log_scale: Log-scale-transform state.
+        """
 
         loc: LocData
         log_scale: LogScaleData

@@ -61,8 +61,8 @@ class CounterEnv:
 
 
 @dataclass
-class Pred:
-    """Value-policy output replayed over collected transitions."""
+class ValuePolicy:
+    """Joint value and policy result replayed over collected transitions."""
 
     v: jax.Array
     pi: Categorical
@@ -90,18 +90,23 @@ class Agent:
         """Select zero and count exactly one sampler decision."""
         return jnp.zeros_like(obs), replace(state, actions=state.actions + 1)
 
-    def apply(self, obs: jax.Array, state: State) -> tuple[Pred, State]:
-        """Evaluate a value-policy prediction without selecting an action."""
+    def v(self, obs: jax.Array, state: State) -> tuple[jax.Array, State]:
+        """Evaluate values over stored successor observations."""
+        jax.debug.callback(_record_replayed, obs)
+        return obs.astype(jnp.float32), state
+
+    def vpi(self, obs: jax.Array, state: State) -> tuple[ValuePolicy, State]:
+        """Evaluate joint values and policies over current observations."""
         jax.debug.callback(_record_replayed, obs)
         value = obs.astype(jnp.float32)
-        return Pred(
+        return ValuePolicy(
             v=value,
             pi=Categorical(logits=jnp.stack((value, -value), axis=-1)),
         ), state
 
 
 def test_roll_inference_and_stats_have_exact_values_and_work():
-    """The composed path selects T actions and evaluates only needed nodes."""
+    """The composed path selects T actions and evaluates both dense node sets."""
     _replayed.clear()
     env = CounterEnv()
     agent = Agent()
@@ -133,6 +138,6 @@ def test_roll_inference_and_stats_have_exact_values_and_work():
     assert metrics.avg_eps_len == 2
     assert metrics.n_episodes == 2
     assert state.agent.actions == 4
-    assert len(_replayed) == 6
-    assert sorted(_replayed) == [0, 0, 1, 1, 2, 2]
+    assert len(_replayed) == 8
+    assert sorted(_replayed) == [0, 0, 1, 1, 1, 1, 2, 2]
     chex.assert_tree_all_finite((seq, infer, metrics))

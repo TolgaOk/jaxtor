@@ -1,69 +1,81 @@
-"""Agent inference aligned with sampled transition sequences.
+"""Dense agent inference over sampled transition sequences.
 
-Inference replays an agent and aligns values with true successors::
+Each component combines a structural agent interface with the transition fields
+required by one alignment rule::
 
     inference = VPiNextVInference(agent=agent, seq_axis=1)
     infer = inference.apply(seq, agent_state)
     values, next_values = infer.v_tm1, infer.v_t
     policies = infer.pi_tm1
 
-An agent may instead expose a state-bound Q-function. The corresponding
-inference evaluates it at sampled actions and produces the Q and V sequences
-expected by RLax off-policy returns::
+Action-value inference uses independent ``q`` and ``v`` methods::
 
-    inference = QfnVnextInference(agent=agent, seq_axis=1)
+    inference = QNextVInference(agent=agent, seq_axis=1)
     infer = inference.apply(seq, agent_state)
     q_t, v_t = infer.q_t, infer.v_t
 
-Ordinary continuations reuse the next value. Sequence tails and truncations
-evaluate their true successor observations.
+Every ``nobs`` is evaluated directly. Algorithms remain responsible for
+discounting terminal successor values.
 """
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Protocol
 
 import chex
 import jax
-import jax.numpy as jnp
 from chex import dataclass
 
 
-class VPred(Protocol):
-    """Agent prediction containing one value per observation."""
+class ValuePolicy[Pi](Protocol):
+    """Joint value-policy result consumed by value-policy inference.
 
-    v: jax.Array
+    Required attributes::
 
-
-class VPiPred[Pi](Protocol):
-    """Agent prediction containing a value and policy per observation."""
+        v: jax.Array
+        pi: Pi
+    """
 
     v: jax.Array
     pi: Pi
 
 
-class Qfn(Protocol):
-    """State-bound action-value function consumed during sequence replay."""
+class VPiAgent[Pi, S](Protocol):
+    """Value-policy interface used by joint policy and value inference.
 
-    def evaluate(self, act: jax.Array) -> jax.Array: ...
+    Required methods::
+
+        v(obs, agent_state) -> (value: jax.Array, agent_state)
+        vpi(obs, agent_state) -> (value_policy: ValuePolicy, agent_state)
+    """
+
+    def v(self, obs: jax.Array, state: S) -> tuple[jax.Array, S]: ...
+    def vpi(self, obs: jax.Array, state: S) -> tuple[ValuePolicy[Pi], S]: ...
 
 
-class VQfnPred[Q](Protocol):
-    """Agent prediction containing a value and state-bound Q-function."""
+class QVAgent[S](Protocol):
+    """Action-value and value interface used by Q/V inference.
 
-    v: jax.Array
-    qfn: Q
+    Required methods::
 
+        q(obs, action, agent_state) -> (q: jax.Array, agent_state)
+        v(obs, agent_state) -> (value: jax.Array, agent_state)
+    """
 
-class Agent[Pred, S](Protocol):
-    """Read-only application capability consumed during sequence replay."""
-
-    def apply(self, obs: jax.Array, state: S) -> tuple[Pred, S]: ...
+    def q(self, obs: jax.Array, act: jax.Array, state: S) -> tuple[jax.Array, S]: ...
+    def v(self, obs: jax.Array, state: S) -> tuple[jax.Array, S]: ...
 
 
 class Sequence(Protocol):
-    """Transition fields needed to align current and successor inference."""
+    """Transition sequence interface used by value inference.
+
+    Required attributes::
+
+        obs: jax.Array
+        nobs: jax.Array
+        term: jax.Array
+        trun: jax.Array
+    """
 
     obs: jax.Array
     nobs: jax.Array
@@ -72,62 +84,22 @@ class Sequence(Protocol):
 
 
 class ActionSequence(Protocol):
-    """Transition fields needed for action-value sequence inference."""
+    """Transition sequence interface used by action-value inference.
+
+    Required attributes::
+
+        obs: jax.Array
+        act: jax.Array
+        nobs: jax.Array
+        term: jax.Array
+        trun: jax.Array
+    """
 
     obs: jax.Array
     act: jax.Array
     nobs: jax.Array
     term: jax.Array
     trun: jax.Array
-
-
-@dataclass
-class _BootstrapInput:
-    """One successor value that may require explicit inference."""
-
-    obs: jax.Array
-    fallback: jax.Array
-    infer: jax.Array
-
-
-@dataclass
-class _Endpoint[S]:
-    """Inputs shared by the two conditional bootstrap branches."""
-
-    obs: jax.Array
-    fallback: jax.Array
-    state: S
-
-
-def _apply_endpoint[Pred: VPred, S](
-    endpoint: _Endpoint[S],
-    *,
-    agent: Agent[Pred, S],
-) -> jax.Array:
-    """Evaluate one true successor observation."""
-    pred, _ = agent.apply(endpoint.obs, endpoint.state)
-    chex.assert_equal_shape([pred.v, endpoint.fallback])
-    return pred.v
-
-
-def _reuse_endpoint[S](endpoint: _Endpoint[S]) -> jax.Array:
-    """Reuse the next current value for an ordinary continuation."""
-    return endpoint.fallback
-
-
-def _bootstrap[Pred: VPred, S](
-    item: _BootstrapInput,
-    *,
-    agent: Agent[Pred, S],
-    state: S,
-) -> jax.Array:
-    """Infer or reuse one successor value under a scalar condition."""
-    return jax.lax.cond(
-        item.infer,
-        partial(_apply_endpoint, agent=agent),
-        _reuse_endpoint,
-        _Endpoint(obs=item.obs, fallback=item.fallback, state=state),
-    )
 
 
 def _validate_sequence(seq: Sequence, seq_axis: int) -> None:
@@ -155,119 +127,42 @@ def _after_start(x: jax.Array, seq_axis: int) -> jax.Array:
     )
 
 
-def _align_vnext[Pred: VPred, S](
-    agent: Agent[Pred, S],
-    seq: Sequence,
-    v_next: jax.Array,
-    state: S,
-    seq_axis: int,
-) -> jax.Array:
-    """Align true-successor values without evaluating terminal observations."""
-    chex.assert_equal_shape([v_next, _after_start(seq.term, seq_axis)])
-
-    v_next = jnp.moveaxis(v_next, seq_axis, 0)
-    nobs = jnp.moveaxis(seq.nobs, seq_axis, 0)
-    term = jnp.moveaxis(seq.term, seq_axis, 0)
-    trun = jnp.moveaxis(seq.trun, seq_axis, 0)
-
-    fallback = jnp.concatenate((v_next, jnp.zeros_like(term[:1], dtype=v_next.dtype)))
-    fallback = jnp.where(term, 0, fallback)
-    tail = jnp.zeros_like(term).at[-1].set(True)
-    infer = (~term) & (trun | tail)
-    obs_shape = nobs.shape[term.ndim :]
-
-    v_t = jax.lax.map(
-        partial(_bootstrap, agent=agent, state=state),
-        _BootstrapInput(
-            obs=nobs.reshape((-1, *obs_shape)),
-            fallback=fallback.reshape(-1),
-            infer=infer.reshape(-1),
-        ),
-    ).reshape(term.shape)
-    return jnp.moveaxis(v_t, 0, seq_axis)
-
-
-@dataclass
-class VNextVInference[AgentS]:
-    """Replay values and align them with true transition successors.
-
-    Ordinary continuations reuse the next current value. Truncations and an
-    open sequence tail evaluate their true ``nobs``; natural terminations use
-    zero without evaluating an invalid terminal successor.
-
-    ``agent.apply`` is observational here: its returned state is discarded.
-    Sequence-dependent agents require a sequence-aware inference component.
-
-    Attributes:
-        agent: Agent whose prediction contains ``V(s)``.
-        seq_axis: Axis containing consecutive transitions.
-
-    Public dataclasses:
-        Inference: Current and true-successor values.
-
-    Public methods:
-        apply: Replay the agent and align values for every transition.
-    """
-
-    agent: Agent[VPred, AgentS]
-    seq_axis: int = 0
-
-    @dataclass
-    class Inference:
-        """Values aligned with ``T`` sampled transitions.
-
-        Attributes:
-            v_tm1: Current values ``V(s_t)``, shaped ``[..., T, ...]``.
-            v_t: True-successor values ``V(s_{t+1})``, with the same shape.
-        """
-
-        v_tm1: jax.Array
-        v_t: jax.Array
-
-    def apply(
-        self,
-        seq: Sequence,
-        state: AgentS,
-    ) -> VNextVInference.Inference:
-        """Return current and true-successor values for one sequence."""
-        _validate_sequence(seq, self.seq_axis)
-        pred, _ = self.agent.apply(seq.obs, state)
-        chex.assert_equal_shape([pred.v, seq.term])
-        return self.Inference(
-            v_tm1=pred.v,
-            v_t=_align_vnext(
-                self.agent,
-                seq,
-                _after_start(pred.v, self.seq_axis),
-                state,
-                self.seq_axis,
-            ),
-        )
-
-
 @dataclass
 class VPiNextVInference[Pi, AgentS]:
-    """Replay current values and policies, then align successor values.
+    """Evaluate current value-policy results and stored successor values.
 
-    Ordinary continuations reuse the next current value. Truncations and an
-    open sequence tail evaluate their true ``nobs``; natural terminations use
-    zero without evaluating an invalid terminal successor.
+    Every ``nobs`` is evaluated directly through the value-only endpoint.
+    Terminal values are returned unchanged because the consuming algorithm owns
+    discounting.
 
-    ``agent.apply`` is observational here: its returned state is discarded.
-    Sequence-dependent agents require a sequence-aware inference component.
+    The states returned by ``agent.vpi`` and ``agent.v`` are ignored. Both
+    methods receive the supplied state. Use a sequence-aware inference
+    component when evaluation must advance agent state.
+
+    Required protocols::
+
+        agent.v(obs, agent_state) -> (value: jax.Array, agent_state)
+        agent.vpi(obs, agent_state) -> (value_policy, agent_state)
+        value_policy.v: jax.Array
+        value_policy.pi: Pi
+        seq.obs: jax.Array
+        seq.nobs: jax.Array
+        seq.term: jax.Array
+        seq.trun: jax.Array
 
     Attributes:
-        agent: Agent whose prediction contains ``V(s)`` and ``pi(.|s)``.
+        agent: Agent providing joint ``V(s)`` and ``pi(.|s)`` plus value-only
+            evaluation.
         seq_axis: Axis containing consecutive transitions.
 
     Public dataclasses:
         Inference: Current policy and current and true-successor values.
 
     Public methods:
-        apply: Replay the agent and align inference for every transition.
+        apply: Evaluate policy and values for every transition.
     """
 
-    agent: Agent[VPiPred[Pi], AgentS]
+    agent: VPiAgent[Pi, AgentS]
     seq_axis: int = 0
 
     @dataclass
@@ -291,24 +186,19 @@ class VPiNextVInference[Pi, AgentS]:
     ) -> VPiNextVInference.Inference[Pi]:
         """Return current policy and current and successor values."""
         _validate_sequence(seq, self.seq_axis)
-        pred, _ = self.agent.apply(seq.obs, state)
-        chex.assert_equal_shape([pred.v, seq.term])
+        value_policy, _ = self.agent.vpi(seq.obs, state)
+        v_t, _ = self.agent.v(seq.nobs, state)
+        chex.assert_equal_shape([value_policy.v, v_t, seq.term])
         return self.Inference(
-            v_tm1=pred.v,
-            pi_tm1=pred.pi,
-            v_t=_align_vnext(
-                self.agent,
-                seq,
-                _after_start(pred.v, self.seq_axis),
-                state,
-                self.seq_axis,
-            ),
+            v_tm1=value_policy.v,
+            pi_tm1=value_policy.pi,
+            v_t=v_t,
         )
 
 
 @dataclass
-class QfnVnextInference[Q: Qfn, AgentS]:
-    """Evaluate state-bound Q-functions and align successor values.
+class QNextVInference[AgentS]:
+    """Evaluate Q-values and values on their dense sequence inputs.
 
     A sequence begins at ``s_0``::
 
@@ -319,37 +209,47 @@ class QfnVnextInference[Q: Qfn, AgentS]:
         q_t = [Q(s_1, a_1), ..., Q(s_{T-1}, a_{T-1})]
         v_t = [V(s_1), ..., V(s_T)]
 
-    The starting prediction ``Q(s_0, a_0)`` is excluded. Learning evaluates it
-    separately as ``q_tm1``. Ordinary continuations reuse inference at the next
-    sampled observation. Truncations and the sequence tail evaluate their true
-    ``nobs``; natural terminations use zero.
+    The starting value ``Q(s_0, a_0)`` is excluded. Learning evaluates current
+    Q-values separately with the parameters being optimized. Successor values
+    are evaluated directly from every ``nobs``. Terminal values are returned
+    unchanged because RLax discounts determine whether they contribute.
 
-    ``agent.apply`` is observational here: its returned state is discarded.
-    Sequence-dependent agents require a sequence-aware inference component.
+    The states returned by ``agent.q`` and ``agent.v`` are ignored. Both methods
+    receive the supplied state. Use a sequence-aware inference component when
+    evaluation must advance agent state.
+
+    Required protocols::
+
+        agent.q(obs, action, agent_state) -> (q: jax.Array, agent_state)
+        agent.v(obs, agent_state) -> (value: jax.Array, agent_state)
+        seq.obs: jax.Array
+        seq.act: jax.Array
+        seq.nobs: jax.Array
+        seq.term: jax.Array
+        seq.trun: jax.Array
 
     Attributes:
-        agent: Agent whose prediction contains ``V(s)`` and ``Q(s, .)``.
+        agent: Agent providing independent ``Q(s, a)`` and ``V(s)`` methods.
         seq_axis: Axis containing consecutive transitions.
 
     Public dataclasses:
         Inference: Action-evaluated Q-values and true-successor values.
 
     Public methods:
-        apply: Replay the agent and align inference for off-policy returns.
+        apply: Evaluate action-values and successor values for off-policy returns.
     """
 
-    agent: Agent[VQfnPred[Q], AgentS]
+    agent: QVAgent[AgentS]
     seq_axis: int = 0
 
     @dataclass
     class Inference:
-        """Q-values and successor values aligned for RLax.
+        """Q-values and raw successor values aligned for RLax.
 
         Attributes:
             q_t: Values ``Q(s_t, a_t)`` for times ``1`` through ``T - 1``,
                 shaped ``[..., T - 1]``.
-            v_t: Values ``V(s_t)`` for times ``1`` through ``T``, shaped
-                ``[..., T]``.
+            v_t: Values of every stored ``nobs``, shaped ``[..., T]``.
         """
 
         q_t: jax.Array
@@ -359,20 +259,16 @@ class QfnVnextInference[Q: Qfn, AgentS]:
         self,
         seq: ActionSequence,
         state: AgentS,
-    ) -> QfnVnextInference.Inference:
+    ) -> QNextVInference.Inference:
         """Return action-evaluated Q-values and true-successor values."""
         _validate_sequence(seq, self.seq_axis)
         chex.assert_equal_shape_prefix([seq.act, seq.term], seq.term.ndim)
-        pred, _ = self.agent.apply(_after_start(seq.obs, self.seq_axis), state)
-        q_t = pred.qfn.evaluate(_after_start(seq.act, self.seq_axis))
-        chex.assert_equal_shape([pred.v, q_t, _after_start(seq.term, self.seq_axis)])
-        return self.Inference(
-            q_t=q_t,
-            v_t=_align_vnext(
-                self.agent,
-                seq,
-                pred.v,
-                state,
-                self.seq_axis,
-            ),
+        q_t, _ = self.agent.q(
+            _after_start(seq.obs, self.seq_axis),
+            _after_start(seq.act, self.seq_axis),
+            state,
         )
+        v_t, _ = self.agent.v(seq.nobs, state)
+        chex.assert_equal_shape([q_t, _after_start(seq.term, self.seq_axis)])
+        chex.assert_equal_shape([v_t, seq.term])
+        return self.Inference(q_t=q_t, v_t=v_t)

@@ -5,48 +5,20 @@ import jax
 import jax.numpy as jnp
 import pytest
 from chex import dataclass
-from jax.experimental import checkify
 
 from jaxtor.agent import (
     Categorical,
-    QfnVnextInference,
-    VNextVInference,
+    QNextVInference,
     VPiNextVInference,
 )
 
 
 @dataclass
-class VPred:
-    """Value-only prediction used by ``VNextVInference``."""
-
-    v: jax.Array
-
-
-@dataclass
-class VPiPred:
-    """Value-policy prediction used by ``VPiNextVInference``."""
+class ValuePolicy:
+    """Joint value and policy result used by ``VPiNextVInference``."""
 
     v: jax.Array
     pi: Categorical
-
-
-@dataclass
-class Qfn:
-    """State-bound action-value function used by inference tests."""
-
-    v: jax.Array
-
-    def evaluate(self, act: jax.Array) -> jax.Array:
-        """Add one scalar action to the state value."""
-        return self.v + act[..., 0]
-
-
-@dataclass
-class VQfnPred:
-    """Value and state-bound Q-function prediction."""
-
-    v: jax.Array
-    qfn: Qfn
 
 
 @dataclass
@@ -57,50 +29,38 @@ class State:
 
 
 @dataclass
-class VAgent:
-    """Value-only agent supporting arbitrary leading observation axes."""
-
-    def apply(self, obs: jax.Array, state: State) -> tuple[VPred, State]:
-        """Return one scaled value per observation."""
-        return VPred(v=obs[..., 0] * state.scale), state
-
-
-@dataclass
 class VPiAgent:
-    """Value-policy agent rejecting invalid successor observations."""
+    """Agent providing value-only and joint value-policy endpoints."""
 
-    def apply(self, obs: jax.Array, state: State) -> tuple[VPiPred, State]:
+    def v(self, obs: jax.Array, state: State) -> tuple[jax.Array, State]:
+        """Return scaled values without constructing policies."""
+        return obs[..., 0] * state.scale, state
+
+    def vpi(self, obs: jax.Array, state: State) -> tuple[ValuePolicy, State]:
         """Return scaled values and categorical policies."""
-        checkify.check(jnp.all(obs >= 0), "invalid successor was evaluated")
         value = obs[..., 0] * state.scale
-        return VPiPred(
+        return ValuePolicy(
             v=value,
             pi=Categorical(logits=jnp.stack((value, -value), axis=-1)),
         ), state
 
 
 @dataclass
-class PureVPiAgent:
-    """Differentiable value-policy agent without runtime checks."""
+class QVAgent:
+    """Agent exposing independent action-value and value computations."""
 
-    def apply(self, obs: jax.Array, state: State) -> tuple[VPiPred, State]:
-        """Return scaled values and categorical policies."""
-        value = obs[..., 0] * state.scale
-        return VPiPred(
-            v=value,
-            pi=Categorical(logits=jnp.stack((value, -value), axis=-1)),
-        ), state
+    def q(
+        self,
+        obs: jax.Array,
+        act: jax.Array,
+        state: State,
+    ) -> tuple[jax.Array, State]:
+        """Evaluate one Q-value for each observation-action pair."""
+        return obs[..., 0] * state.scale + act[..., 0], state
 
-
-@dataclass
-class VQfnAgent:
-    """Value and Q-function agent rejecting invalid successor observations."""
-
-    def apply(self, obs: jax.Array, state: State) -> tuple[VQfnPred, State]:
-        """Return values and state-bound Q-functions."""
-        checkify.check(jnp.all(obs >= 0), "invalid successor was evaluated")
-        value = obs[..., 0] * state.scale
-        return VQfnPred(v=value, qfn=Qfn(v=value)), state
+    def v(self, obs: jax.Array, state: State) -> tuple[jax.Array, State]:
+        """Evaluate one value for each observation."""
+        return obs[..., 0] * state.scale, state
 
 
 @dataclass
@@ -124,8 +84,8 @@ class ActionSequence:
     trun: jax.Array
 
 
-def test_vpi_next_v_aligns_every_boundary_with_a_hand_computed_oracle():
-    """Continuation, termination, truncation, and both flags align exactly."""
+def test_vpi_next_v_evaluates_every_stored_successor():
+    """Successor values remain raw across every boundary combination."""
     component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.array([[1.0], [2.0], [3.0], [4.0]]),
@@ -134,19 +94,18 @@ def test_vpi_next_v_aligns_every_boundary_with_a_hand_computed_oracle():
         trun=jnp.array([False, False, True, True]),
     )
 
-    error, infer = checkify.checkify(jax.jit(component.apply))(
+    infer = jax.jit(component.apply)(
         seq,
         State(scale=jnp.array(1.0)),
     )
-    error.throw()
 
     assert jnp.array_equal(infer.v_tm1, jnp.array([1.0, 2.0, 3.0, 4.0]))
-    assert jnp.array_equal(infer.v_t, jnp.array([2.0, 0.0, 30.0, 0.0]))
+    assert jnp.array_equal(infer.v_t, jnp.array([2.0, -999.0, 30.0, -999.0]))
     assert infer.pi_tm1.evaluate(jnp.zeros(4, dtype=jnp.int32)).logp.shape == (4,)
 
 
-def test_vpi_next_v_reuses_continuations_and_applies_only_the_open_tail():
-    """Intermediate ``nobs`` values are unused while an open tail bootstraps."""
+def test_vpi_next_v_does_not_substitute_continuation_values():
+    """Dense inference evaluates stored successors rather than shifted values."""
     component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.array([[1.0], [2.0], [3.0], [4.0]]),
@@ -155,18 +114,17 @@ def test_vpi_next_v_reuses_continuations_and_applies_only_the_open_tail():
         trun=jnp.zeros(4, dtype=jnp.bool_),
     )
 
-    error, infer = checkify.checkify(jax.jit(component.apply))(
+    infer = jax.jit(component.apply)(
         seq,
         State(scale=jnp.array(1.0)),
     )
-    error.throw()
 
-    assert jnp.array_equal(infer.v_t, jnp.array([2.0, 3.0, 4.0, 5.0]))
+    assert jnp.array_equal(infer.v_t, jnp.array([-999.0, -999.0, -999.0, 5.0]))
 
 
-def test_qfn_vnext_evaluates_actions_and_aligns_every_boundary():
-    """Q and Vnext alignment excludes s0 and handles every boundary."""
-    component = QfnVnextInference(agent=VQfnAgent(), seq_axis=1)
+def test_q_next_v_evaluates_q_and_raw_successor_values():
+    """Q excludes the first source while V evaluates every true successor."""
+    component = QNextVInference(agent=QVAgent(), seq_axis=1)
     seq = ActionSequence(
         obs=jnp.array(
             [
@@ -200,11 +158,10 @@ def test_qfn_vnext_evaluates_actions_and_aligns_every_boundary():
         ),
     )
 
-    error, infer = checkify.checkify(jax.jit(component.apply))(
+    infer = jax.jit(component.apply)(
         seq,
         State(scale=jnp.array(1.0)),
     )
-    error.throw()
 
     assert jnp.array_equal(
         infer.q_t,
@@ -212,13 +169,13 @@ def test_qfn_vnext_evaluates_actions_and_aligns_every_boundary():
     )
     assert jnp.array_equal(
         infer.v_t,
-        jnp.array([[2.0, 0.0, 30.0, 0.0], [6.0, 60.0, 0.0, 9.0]]),
+        jnp.array([[2.0, -999.0, 30.0, -999.0], [6.0, 60.0, -999.0, 9.0]]),
     )
 
 
-def test_v_next_v_needs_no_policy_and_supports_a_nonleading_sequence_axis():
-    """Value-only inference preserves batch axes when time is axis one."""
-    component = VNextVInference(agent=VAgent(), seq_axis=1)
+def test_vpi_next_v_supports_a_nonleading_sequence_axis():
+    """Value-policy inference preserves batch axes when time is axis one."""
+    component = VPiNextVInference(agent=VPiAgent(), seq_axis=1)
     obs = jnp.array([[[1.0], [2.0], [3.0]], [[4.0], [5.0], [6.0]]])
     seq = Sequence(
         obs=obs,
@@ -231,12 +188,13 @@ def test_v_next_v_needs_no_policy_and_supports_a_nonleading_sequence_axis():
 
     chex.assert_shape(infer.v_tm1, (2, 3))
     chex.assert_shape(infer.v_t, (2, 3))
+    chex.assert_shape(infer.pi_tm1.logits, (2, 3, 2))
     assert jnp.array_equal(infer.v_t, jnp.array([[2.0, 20.0, 4.0], [5.0, 50.0, 7.0]]))
 
 
 def test_vpi_next_v_supports_nested_vmap_jit_and_tree_structure():
     """Independent mapped axes compose around scalar sequence inference."""
-    component = VPiNextVInference(agent=PureVPiAgent())
+    component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.array([[1.0], [2.0]]),
         nobs=jnp.array([[2.0], [3.0]]),
@@ -260,8 +218,8 @@ def test_vpi_next_v_supports_nested_vmap_jit_and_tree_structure():
 
 
 def test_vpi_next_v_remains_differentiable_through_replayed_values():
-    """Inference leaves current, reused, and explicit values differentiable."""
-    component = VPiNextVInference(agent=PureVPiAgent())
+    """Inference leaves current and stored-successor values differentiable."""
+    component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.array([[1.0], [2.0]]),
         nobs=jnp.array([[2.0], [3.0]]),
@@ -278,9 +236,9 @@ def test_vpi_next_v_remains_differentiable_through_replayed_values():
 
 
 @pytest.mark.parametrize("seq_axis", [-2, 1])
-def test_v_next_v_rejects_an_axis_outside_scalar_sequence_samples(seq_axis):
+def test_vpi_next_v_rejects_an_axis_outside_scalar_sequence_samples(seq_axis):
     """The configured sequence axis must index a transition sample axis."""
-    component = VNextVInference(agent=VAgent(), seq_axis=seq_axis)
+    component = VPiNextVInference(agent=VPiAgent(), seq_axis=seq_axis)
     seq = Sequence(
         obs=jnp.ones((2, 1)),
         nobs=jnp.ones((2, 1)),
@@ -292,9 +250,9 @@ def test_v_next_v_rejects_an_axis_outside_scalar_sequence_samples(seq_axis):
         component.apply(seq, State(scale=jnp.array(1.0)))
 
 
-def test_v_next_v_rejects_a_sequence_without_a_sample_axis():
+def test_vpi_next_v_rejects_a_sequence_without_a_sample_axis():
     """Scalar boundary flags cannot describe a transition sequence."""
-    component = VNextVInference(agent=VAgent())
+    component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.ones(1),
         nobs=jnp.ones(1),
@@ -306,9 +264,9 @@ def test_v_next_v_rejects_a_sequence_without_a_sample_axis():
         component.apply(seq, State(scale=jnp.array(1.0)))
 
 
-def test_v_next_v_rejects_an_empty_sequence():
-    """Successor alignment requires at least one transition."""
-    component = VNextVInference(agent=VAgent())
+def test_vpi_next_v_rejects_an_empty_sequence():
+    """Dense inference requires at least one transition."""
+    component = VPiNextVInference(agent=VPiAgent())
     seq = Sequence(
         obs=jnp.empty((0, 1)),
         nobs=jnp.empty((0, 1)),

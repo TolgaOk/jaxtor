@@ -23,7 +23,14 @@ _LOG_TWO_PI = math.log(2.0 * math.pi)
 
 
 class Distribution[Act, Eval](Protocol):
-    """Pure distribution mapping keys to actions and actions to evaluations."""
+    """Pure action-distribution interface.
+
+    Required methods::
+
+        sample(key) -> action
+        evaluate(action) -> evaluation
+        mode() -> action
+    """
 
     def sample(self, key: jax.Array) -> Act: ...
     def evaluate(self, act: Act) -> Eval: ...

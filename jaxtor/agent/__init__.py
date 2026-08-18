@@ -1,5 +1,8 @@
-from jaxtor.agent.agent import Naf as Naf
+"""Composable agent, distribution, head, inference, and model interfaces."""
+
+from jaxtor.agent.agent import Ou as Ou
 from jaxtor.agent.agent import Pi as Pi
+from jaxtor.agent.agent import Quadratic as Quadratic
 from jaxtor.agent.agent import VPi as VPi
 from jaxtor.agent.agent import VQPi as VQPi
 from jaxtor.agent.dist import Categorical as Categorical
@@ -12,9 +15,11 @@ from jaxtor.agent.head import DiagNormalHead as DiagNormalHead
 from jaxtor.agent.head import QHead as QHead
 from jaxtor.agent.head import QsaHead as QsaHead
 from jaxtor.agent.head import VHead as VHead
-from jaxtor.agent.inference import QfnVnextInference as QfnVnextInference
-from jaxtor.agent.inference import VNextVInference as VNextVInference
+from jaxtor.agent.inference import QNextVInference as QNextVInference
+from jaxtor.agent.inference import QVAgent as QVAgent
+from jaxtor.agent.inference import VPiAgent as VPiAgent
 from jaxtor.agent.inference import VPiNextVInference as VPiNextVInference
+from jaxtor.agent.inference import ValuePolicy as ValuePolicy
 from jaxtor.agent.model import Function as Function
 from jaxtor.agent.model import Model as Model
 from jaxtor.agent.model import Module as Module
