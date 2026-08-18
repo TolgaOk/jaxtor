@@ -11,7 +11,7 @@ Components::
     │
     ├── agent: Pi
     │   ├── body: Module(Linear → tanh)
-    │   └── pi: CategoricalHead
+    │   └── policy: CategoricalHead
     │       └── Module(Linear logits)
     ├── mc: VecMc
     │   └── Mc
@@ -162,7 +162,7 @@ pi_net, pi_net_state = module(eqx.nn.Linear(cfg.hidden_size, int(act_size), key=
 
 
 pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
-agent = Pi(body=body_net, pi=pi)
+agent = Pi(body=body_net, policy=pi)
 agent_state = agent.init(
     act_key,
     body=body_net_state,
@@ -200,10 +200,10 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
     parts = partition(roll_state.agent)
 
     def loss(params: AgentState) -> tuple[chex.Numeric, Metrics]:
-        pred, _ = agent.apply(seq.obs, combine(params, parts.frozen))
-        policy = pred.pi.evaluate(seq.act)
-        pi_loss = -jnp.mean(policy.logp * jax.lax.stop_gradient(ret))
-        entropy = jnp.mean(policy.entropy)
+        policy, _ = agent.pi(seq.obs, combine(params, parts.frozen))
+        evaluation = policy.evaluate(seq.act)
+        pi_loss = -jnp.mean(evaluation.logp * jax.lax.stop_gradient(ret))
+        entropy = jnp.mean(evaluation.entropy)
         total = pi_loss - cfg.ent_coef * entropy
         return total, Metrics(loss=total, pi_loss=pi_loss, entropy=entropy)
 

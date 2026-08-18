@@ -13,9 +13,9 @@ Components::
     │   │   ├── norm: ObsNorm
     │   │   │   └── RunningStats
     │   │   └── model: Module(Linear → tanh)
-    │   ├── v: VHead
+    │   ├── value: VHead
     │   │   └── Module(Linear value)
-    │   └── pi: CategoricalHead
+    │   └── policy: CategoricalHead
     │       └── Module(Linear logits)
     ├── mc: VecMc
     │   └── Mc
@@ -61,9 +61,8 @@ Flow::
         ├→ report training metrics
         └→ evaluate deterministic agent
 
-The optimization loops and RLax target remain visible because they define PPO.
-Replaying the fixed agent trades one batched forward pass for an action-only
-sampling interface.
+The update computes policy and value inference from the collected observations,
+forms fixed advantages and returns, and then reuses that batch across epochs.
 """
 
 from __future__ import annotations
@@ -197,10 +196,10 @@ cfg = tyro.cli(Config) if __name__ == "__main__" else Config()
 env = gymnax.make(cfg.env_id)
 obs_shape = tuple(env.env.observation_space(env.params).shape)
 if len(obs_shape) != 1:
-    raise ValueError("the lean agent requires vector observations")
+    raise ValueError("the PPO example requires vector observations")
 act_size = getattr(env.env.action_space(env.params), "n", None)
 if act_size is None:
-    raise ValueError("the lean agent requires a discrete action space")
+    raise ValueError("the PPO example requires a discrete action space")
 
 
 act_key, body_key, v_key, pi_key = jrd.split(agent_key, 4)
@@ -220,7 +219,7 @@ norm = ObsNorm(stats=RunningStats(clip=10.0))
 body = NormModel(norm=norm, model=body_net)
 v = VHead(net=v_net)
 pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
-agent = VPi(body=body, v=v, pi=pi)
+agent = VPi(body=body, value=v, policy=pi)
 
 
 agent_state = agent.init(
@@ -262,11 +261,7 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
     seq, roll_state = roll.sample(state.roll)
     stats_state = stats.update(seq, state.stats)
     done = seq.term | seq.trun
-    rew, rew_norm_state = rew_norm.update(
-        seq.rew,
-        done,
-        state.rew_norm,
-    )
+    rew, rew_norm_state = rew_norm.update(seq.rew, done, state.rew_norm)
     seq = replace(seq, rew=rew)
     infer = inference.apply(seq, roll_state.agent)
     chex.assert_equal_shape([infer.v_tm1, seq.rew, infer.v_t])
@@ -287,17 +282,14 @@ def update(state: TrainState) -> tuple[Metrics, TrainState]:
     parts = partition(roll_state.agent)
 
     def loss(params: AgentState, batch: Batch) -> tuple[chex.Numeric, Metrics]:
-        pred, _ = agent.apply(
-            batch.obs,
-            combine(params, parts.frozen),
-        )
-        policy = pred.pi.evaluate(batch.act)
+        value_policy, _ = agent.vpi(batch.obs, combine(params, parts.frozen))
+        policy = value_policy.pi.evaluate(batch.act)
         pi_loss = rlax.clipped_surrogate_pg_loss(
             jnp.exp(policy.logp - batch.log_mu),
             batch.adv,
             cfg.clip_eps,
         )
-        v_loss = 0.5 * jnp.mean((pred.v - batch.ret) ** 2)
+        v_loss = 0.5 * jnp.mean((value_policy.v - batch.ret) ** 2)
         entropy = jnp.mean(policy.entropy)
         total = pi_loss + cfg.vf_coef * v_loss - cfg.ent_coef * entropy
         return total, Metrics(
