@@ -65,6 +65,7 @@ build/
 
 # development
 dev/
+todo/
 
 # agent
 .claude/

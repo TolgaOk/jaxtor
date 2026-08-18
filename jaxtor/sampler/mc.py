@@ -1,292 +1,292 @@
-"""Markov chain sampling utilities.
+"""Open Markov-chain sampling with episode lifecycle handling.
 
-Provides environment wrappers for transition collection with episode statistics.
+``Mc`` turns an environment into a transition sampler::
 
-Classes:
-    Mc: Single-environment sampler with episode tracking.
-    VecMc: Vectorized sampler for multiple parallel environments.
+    mc = Mc(max_eps_len=500, env=env)
+    state = mc.init(key, env_state)
+    transition, state = mc.sample(act, state)
 
-Example:
-    >>> mc_sampler = Mc(max_episode_len=100, queue_size=10, env=env)
-    >>> env_state = env.init(key)
-    >>> state = mc_sampler.init(key, env_state)
-    >>> transition, state = mc_sampler.sample(action, state)
-
-    >>> vec_mc = VecMc(mc=mc_sampler)
-    >>> keys = jax.random.split(key, 4)
-    >>> state = vec_mc.init(keys, env_state)
-    >>> transition, state = vec_mc.sample(batched_actions, state)
+``VecMc`` applies the same interface to a batch of independent environment
+states.
 """
 
 from __future__ import annotations
 
-from typing import Generic, Protocol, TypeVar
+from dataclasses import replace
+from typing import Protocol, cast
 
+import chex
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
-import chex
 from chex import dataclass
 
-EnvState = TypeVar("EnvState")
+
+class EnvStep(Protocol):
+    """Environment output fields consumed by ``Mc``."""
+
+    nobs: chex.Array
+    rew: chex.Array
+    term: chex.Array
+    trun: chex.Array
 
 
-class Env(Protocol[EnvState]):
-    class Step(Protocol):
-        nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+class Env[S, Step: EnvStep](Protocol):
+    """Environment capability required by ``Mc``."""
 
-    def reset(
-        self, key: chex.PRNGKey, env: EnvState
-    ) -> tuple[chex.Array, EnvState]: ...
-
-    def step(
-        self, key: chex.PRNGKey, act: chex.Array, env: EnvState
-    ) -> tuple[Step, EnvState]: ...
+    def reset(self, key: jax.Array, state: S) -> tuple[chex.Numeric, S]: ...
+    def step(self, key: jax.Array, act: jax.Array, state: S) -> tuple[Step, S]: ...
 
 
 @dataclass
-class Mc(Generic[EnvState]):
-    """Markov chain sampler for collecting transitions from environments.
+class Mc[EnvS, Step: EnvStep]:
+    """Sample an open Markov chain with reset and truncation handling.
 
-    Provides a uniform interface for interacting with environments and tracking
-    episode statistics through rolling queues.
+    Its state keeps the current observation and episode index so
+    :meth:`observe` does not inspect backend-specific environment state.
 
     Attributes:
-        max_episode_len: Maximum length of an episode before truncation.
-        queue_size: Size of rolling queues for episode statistics.
-        env: Environment instance following the Env protocol.
+        max_eps_len: Maximum number of transitions in one episode.
+        env: Environment implementing ``reset`` and non-autoreset ``step``.
+
+    Public dataclasses:
+        State: Environment, RNG, current observation, and episode index.
+        Transition: One aligned ``obs, act, rew, term, trun, nobs`` sample.
+
+    Public methods:
+        init: Initialize state from a backend-specific environment state.
+        observe: Read the current observation without advancing state.
+        sample: Advance once and autoreset at an episode boundary.
     """
 
-    max_episode_len: int
-    queue_size: int
-    env: Env
+    max_eps_len: int
+    env: Env[EnvS, Step]
 
     @dataclass
-    class State:
-        """State of the Markov chain sampler.
+    class State[EnvData]:
+        """Dynamic state threaded through ``Mc``.
 
         Attributes:
-            key: Random key for sampling.
-            env: Environment state.
-            last_obs: Last observation from environment.
-            last_done: Whether last transition was terminal.
-            eps_idx: Current step index in episode.
-            eps_rew: Cumulative reward in current episode.
-            eps_rew_queue: Rolling queue of episode returns.
-            eps_len_queue: Rolling queue of episode lengths.
+            key: Random key used by environment steps and resets.
+            env: Backend-specific environment state.
+            last_obs: Observation from which the next action is taken.
+            eps_idx: Number of transitions completed in the current episode.
         """
 
-        key: chex.PRNGKey
-        env: EnvState
-        last_obs: chex.Array
-        last_done: chex.Numeric
-        eps_idx: chex.Numeric
-        eps_rew: chex.Numeric
-        eps_rew_queue: chex.Array
-        eps_len_queue: chex.Array
+        key: jax.Array
+        env: EnvData
+        last_obs: jax.Array
+        eps_idx: jax.Array
 
     @dataclass
     class Transition:
-        """Environment transition sample.
+        """One environment transition.
 
         Attributes:
-            obs: Current observation.
-            act: Action taken.
-            rew: Reward received.
-            term: Terminal flag (episode ended naturally).
-            trun: Truncated flag (episode ended due to time limit).
-            nobs: Next observation.
+            obs: Observation from which the action was taken.
+            act: Action supplied to the environment.
+            rew: Scalar reward produced by the action.
+            term: Whether the episode terminated naturally.
+            trun: Whether the episode was truncated.
+            nobs: True observation reached by the action.
         """
 
-        obs: chex.Array
-        act: chex.Array
-        rew: chex.Array
-        term: chex.Array
-        trun: chex.Array
-        nobs: chex.Array
+        obs: jax.Array
+        act: jax.Array
+        rew: jax.Array
+        term: jax.Array
+        trun: jax.Array
+        nobs: jax.Array
 
     @dataclass
-    class Metrics:
-        avg_eps_rew: chex.Numeric
-        avg_eps_len: chex.Numeric
+    class _Advance[EnvData]:
+        """Data required to finish one environment advance."""
 
-    def sample(self, act: chex.Array, state: State) -> tuple[Transition, State]:
-        """Sample a transition from the environment.
+        state: Mc.State[EnvData]
+        env: EnvData
+        transition: Mc.Transition
+        key: jax.Array
+        reset_key: jax.Array
 
-        Args:
-            act: Action to take in the environment.
-            state: Current state of the sampler.
+    def __post_init__(self) -> None:
+        """Validate the static episode limit."""
+        if self.max_eps_len < 1:
+            raise ValueError("max_eps_len must be positive")
 
-        Returns:
-            Sampled transition and updated sampler state.
-        """
-        key, step_key, reset_key = jrd.split(state.key, 3)
-        result, env_state = self.env.step(step_key, act, state.env)
-
-        chex.assert_rank([result.rew, result.term, result.trun], 0)
-        chex.assert_equal_shape([state.last_obs, result.nobs])
-
-        trun = jnp.logical_or(result.trun, state.eps_idx == self.max_episode_len - 1)
-
-        transition = self.Transition(
-            obs=state.last_obs,
-            act=act,
-            rew=result.rew,  # type: ignore[reportArgumentType]
-            term=result.term,  # type: ignore[reportArgumentType]
-            trun=trun,
-            nobs=result.nobs,
+    def init(self, key: jax.Array, env: EnvS) -> Mc.State[EnvS]:
+        """Initialize the Markov chain from an environment state."""
+        key, reset_key = jrd.split(key)
+        obs, env = self.env.reset(reset_key, env)
+        return self.State(
+            key=key,
+            env=env,
+            last_obs=jnp.asarray(obs),
+            eps_idx=jnp.array(0, dtype=jnp.int32),
         )
 
+    def observe(self, state: Mc.State[EnvS]) -> jax.Array:
+        """Read the current observation without advancing state."""
+        return state.last_obs
+
+    def sample(
+        self,
+        act: chex.Array,
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc.State[EnvS]]:
+        """Advance once and reset only when the episode reaches a boundary."""
+        transition, advance = self._advance(act, state)
         done = jnp.logical_or(transition.term, transition.trun)
-
-        # Compute reset values (used only if done)
-        reset_obs, reset_env = self.env.reset(reset_key, env_state)
-
-        state = jax.tree.map(
-            lambda x, y: jax.lax.select(done, x, y),
-            # If done: reset and update statistics
-            state.replace(  # type: ignore[reportAttributeAccessIssue]
-                key=key,
-                eps_idx=state.eps_idx * 0,
-                eps_rew=state.eps_rew * 0,
-                eps_rew_queue=(
-                    jnp.roll(state.eps_rew_queue, shift=1)
-                    .at[0]
-                    .set(state.eps_rew + transition.rew)
-                ),
-                eps_len_queue=(
-                    jnp.roll(state.eps_len_queue, shift=1).at[0].set(state.eps_idx + 1)
-                ),
-                last_done=done,
-                last_obs=reset_obs,
-                env=reset_env,
-            ),
-            # If not done: continue episode
-            state.replace(  # type: ignore[reportAttributeAccessIssue]
-                key=key,
-                eps_idx=state.eps_idx + 1,
-                eps_rew=state.eps_rew + transition.rew,
-                eps_rew_queue=state.eps_rew_queue,
-                eps_len_queue=state.eps_len_queue,
-                env=env_state,
-                last_obs=result.nobs,
-                last_done=done,
-            ),
+        state = jax.lax.cond(
+            done,
+            self._reset_episode,
+            self._continue_episode,
+            advance,
         )
         return transition, state
 
-    def _refresh_queues(self, state: State) -> State:
-        """Reset the episode statistics queues.
+    def _advance(
+        self,
+        act: chex.Array,
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc._Advance[EnvS]]:
+        """Step the environment and retain data needed for boundary handling."""
+        key, step_key, reset_key = jrd.split(state.key, 3)
+        act = jnp.asarray(act)
+        result, env = self.env.step(step_key, act, state.env)
+        nobs = jnp.asarray(result.nobs)
+        rew = jnp.asarray(result.rew)
+        term = jnp.asarray(result.term, dtype=jnp.bool_)
+        env_trun = jnp.asarray(result.trun, dtype=jnp.bool_)
 
-        Args:
-            state: Current state of the sampler.
+        chex.assert_rank([rew, term, env_trun], 0)
+        chex.assert_equal_shape([state.last_obs, nobs])
 
-        Returns:
-            Updated state with cleared queue statistics.
-        """
-        return state.replace(  # type: ignore[reportAttributeAccessIssue]
-            eps_rew_queue=jnp.full_like(state.eps_rew_queue, jnp.nan),
-            eps_len_queue=jnp.full_like(state.eps_len_queue, jnp.nan),
+        reached_limit = state.eps_idx + 1 >= self.max_eps_len
+        transition = self.Transition(
+            obs=state.last_obs,
+            act=act,
+            rew=rew,
+            term=term,
+            trun=jnp.logical_or(env_trun, reached_limit),
+            nobs=nobs,
         )
-
-    def metrics(self, state: State) -> tuple[Metrics, State]:
-        """Compute metrics from episode statistics queues and refresh them.
-
-        Args:
-            state: Current state containing episode statistics queues.
-
-        Returns:
-            Computed metrics and updated state with refreshed queues.
-        """
-        avg_eps_rew = jnp.nanmean(state.eps_rew_queue)
-        avg_eps_len = jnp.nanmean(state.eps_len_queue)
-        return (
-            self.Metrics(avg_eps_rew=avg_eps_rew, avg_eps_len=avg_eps_len),
-            self._refresh_queues(state),
-        )
-
-    def init(self, key: chex.PRNGKey, env: EnvState) -> State:
-        """Initialize the state of the Markov chain sampler.
-
-        Args:
-            key: Random key for initialization.
-            env: Pre-initialized environment state.
-
-        Returns:
-            Initialized sampler state.
-        """
-        key, reset_key = jrd.split(key, 2)
-        last_obs, env_state = self.env.reset(reset_key, env)
-
-        return self.State(
+        return transition, self._Advance(
+            state=state,
+            env=env,
+            transition=transition,
             key=key,
-            env=env_state,
-            last_obs=last_obs,
-            last_done=True,
-            eps_idx=0,
-            eps_rew=0.0,
-            eps_rew_queue=jnp.full(self.queue_size, jnp.nan),
-            eps_len_queue=jnp.full(self.queue_size, jnp.nan),
+            reset_key=reset_key,
+        )
+
+    def _reset_episode(self, advance: Mc._Advance[EnvS]) -> Mc.State[EnvS]:
+        """Reset after a terminal or truncated transition."""
+        state = advance.state
+        obs, env = self.env.reset(advance.reset_key, advance.env)
+        return replace(
+            state,
+            key=advance.key,
+            env=env,
+            last_obs=jnp.asarray(obs),
+            eps_idx=jnp.zeros_like(state.eps_idx),
+        )
+
+    @staticmethod
+    def _continue_episode(advance: Mc._Advance[EnvS]) -> Mc.State[EnvS]:
+        """Continue an unfinished episode from its true next observation."""
+        state = advance.state
+        transition = advance.transition
+        return replace(
+            state,
+            key=advance.key,
+            env=advance.env,
+            last_obs=transition.nobs,
+            eps_idx=state.eps_idx + 1,
         )
 
 
 @dataclass
-class VecMc(Generic[EnvState]):
-    """Vectorized Markov chain sampler.
+class VecMc[EnvS, Step: EnvStep]:
+    """Vectorize one ``Mc`` over independent environment states.
 
-    Wraps Mc with internal vmap for parallel environment sampling.
-    Plugs directly into Imc and Roll without external vmap.
+    A normal batch step does not compute reset states. If any lane reaches a
+    boundary, reset states are prepared once for the batch and selected only
+    for boundary lanes.
 
     Attributes:
-        mc: Single-environment Mc sampler.
+        mc: Scalar Markov-chain sampler shared by all lanes.
+
+    Public methods:
+        init: Vectorize ``Mc.init`` over random keys.
+        observe: Read batched current observations.
+        sample: Advance all lanes and handle mixed boundaries.
     """
 
-    mc: Mc
+    mc: Mc[EnvS, Step]
 
-    def init(self, keys: chex.Array, env: EnvState) -> Mc.State:
-        """Initialize parallel sampler states.
+    @dataclass
+    class _Boundary[EnvData]:
+        """Batched data required for conditional reset selection."""
 
-        Args:
-            keys: Batch of random keys with shape (n_env, ...).
-            env: Pre-initialized environment state (broadcast to all envs).
+        done: jax.Array
+        advance: Mc._Advance[EnvData]
+        continued: Mc.State[EnvData]
 
-        Returns:
-            Batched Mc.State with leading dimension n_env.
-        """
-        return jax.vmap(self.mc.init, in_axes=(0, None))(keys, env)
+    def init(self, keys: jax.Array, env: EnvS) -> Mc.State[EnvS]:
+        """Initialize from matching batches of keys and environment states."""
+        return jax.vmap(self.mc.init)(keys, env)
+
+    def observe(self, state: Mc.State[EnvS]) -> jax.Array:
+        """Read the batched current observations."""
+        return jax.vmap(self.mc.observe)(state)
 
     def sample(
-        self, act: chex.Array, state: Mc.State
-    ) -> tuple[Mc.Transition, Mc.State]:
-        """Sample transitions from all environments in parallel.
-
-        Args:
-            act: Batched actions with shape (n_env, ...).
-            state: Batched Mc.State.
-
-        Returns:
-            Batched transitions and updated batched state.
-        """
+        self,
+        act: chex.Array,
+        state: Mc.State[EnvS],
+    ) -> tuple[Mc.Transition, Mc.State[EnvS]]:
+        """Advance every lane and reset only boundary-containing batches."""
         chex.assert_equal_shape_prefix([act, state.key], 1)
-        return jax.vmap(self.mc.sample)(act, state)
+        transition, advance = jax.vmap(self.mc._advance)(act, state)
+        done = jnp.logical_or(transition.term, transition.trun)
+        boundary = self._Boundary(
+            done=done,
+            advance=advance,
+            continued=jax.vmap(self.mc._continue_episode)(advance),
+        )
+        state = jax.lax.cond(
+            jnp.any(done),
+            self._reset_boundaries,
+            self._continue_boundaries,
+            boundary,
+        )
+        return transition, state
 
-    def metrics(self, state: Mc.State) -> tuple[Mc.Metrics, Mc.State]:
-        """Aggregate metrics across all environments and refresh queues.
+    def _reset_boundaries(self, boundary: VecMc._Boundary[EnvS]) -> Mc.State[EnvS]:
+        """Prepare reset states and select them only for completed lanes."""
+        reset = jax.vmap(self.mc._reset_episode)(boundary.advance)
+        return self._select_boundary(boundary.done, reset, boundary.continued)
 
-        Args:
-            state: Batched Mc.State.
+    @staticmethod
+    def _continue_boundaries(boundary: VecMc._Boundary[EnvS]) -> Mc.State[EnvS]:
+        """Return already-computed continuation states for a normal batch."""
+        return boundary.continued
 
-        Returns:
-            Aggregated metrics (scalar) and updated batched state.
-        """
-        per_env, state = jax.vmap(self.mc.metrics)(state)
-        return (
-            Mc.Metrics(
-                avg_eps_rew=jnp.nanmean(per_env.avg_eps_rew),
-                avg_eps_len=jnp.nanmean(per_env.avg_eps_len),
-            ),
-            state,
+    @staticmethod
+    def _select_boundary(
+        boundary: jax.Array,
+        reset: Mc.State[EnvS],
+        continued: Mc.State[EnvS],
+    ) -> Mc.State[EnvS]:
+        """Select reset-state leaves for boundary lanes."""
+
+        def select(reset_leaf: jax.Array, continued_leaf: jax.Array) -> jax.Array:
+            extra_dims = continued_leaf.ndim - boundary.ndim
+            if extra_dims < 0:
+                raise ValueError("state leaves must include the environment batch axis")
+            mask = jnp.reshape(boundary, (*boundary.shape, *(1,) * extra_dims))
+            return jnp.where(mask, reset_leaf, continued_leaf)
+
+        return cast(
+            Mc.State[EnvS],
+            jax.tree.map(select, reset, continued),
         )

@@ -6,8 +6,7 @@ Example:
     >>> import jax
     >>> from jaxtor.env import tabular
     >>> key = jax.random.PRNGKey(0)
-    >>> config = tabular.garnet.Config(state_size=50, action_size=10)
-    >>> env = tabular.garnet.make(config)
+    >>> env = tabular.make(tabular.garnet.Config())
     >>> init_key, reset_key = jax.random.split(key)
     >>> state = env.init(init_key)
     >>> obs, state = env.reset(reset_key, state)
@@ -15,21 +14,64 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import Protocol
 
+import jax
 import jax.numpy as jnp
 import jax.random as jrd
 import chex
 from chex import dataclass
-from jaxdp.mdp import MDP as JaxdpMDP
+from jaxdp.mdp import MDP as JaxdpMdp
 from jaxdp.mdp.garnet import garnet_mdp
 from jaxdp.mdp.simple_graph import graph_mdp as jaxdp_graph_mdp
 from jaxdp.mdp.grid_world import grid_world
 
 
+@dataclass
+class Mdp:
+    """Array-only tabular Markov decision process.
+
+    Attributes:
+        transition: Transition probabilities with shape ``(A, S, S)``.
+        reward: Transition rewards with shape ``(A, S, S)``.
+        initial: Initial-state distribution with shape ``(S,)``.
+        terminal: Terminal-state indicators with shape ``(S,)``.
+    """
+
+    transition: jax.Array
+    reward: jax.Array
+    initial: jax.Array
+    terminal: jax.Array
+
+    @property
+    def state_size(self) -> int:
+        """Number of states."""
+        return self.transition.shape[-1]
+
+    @property
+    def action_size(self) -> int:
+        """Number of actions."""
+        return self.transition.shape[-3]
+
+
+def _adapt(mdp: JaxdpMdp) -> Mdp:
+    """Copy a generated jaxdp MDP into Jaxtor's array-only representation."""
+    return Mdp(
+        transition=jnp.asarray(mdp.transition),
+        reward=jnp.asarray(mdp.reward),
+        initial=jnp.asarray(mdp.initial),
+        terminal=jnp.asarray(mdp.terminal),
+    )
+
+
 def _sample_transition(
-    key: chex.PRNGKey, mdp: JaxdpMDP, s: chex.Numeric, a: chex.Numeric
-) -> tuple[chex.Numeric, chex.Numeric, chex.Numeric]:
+    key: chex.PRNGKey,
+    mdp: Mdp,
+    s: jax.Array,
+    a: chex.Numeric,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Sample transition from MDP using indices.
 
     Args:
@@ -51,9 +93,9 @@ def _sample_transition(
 class ConfigProtocol(Protocol):
     """Protocol for tabular MDP configurations."""
 
-    max_episode_len: int
+    max_eps_len: int
 
-    def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP: ...
+    def init_mdp(self, key: chex.PRNGKey) -> Mdp: ...
 
 
 @dataclass
@@ -72,13 +114,13 @@ class TabularEnv:
             mdp: Underlying jaxdp MDP instance.
             s: Current state index.
             step: Current step within the episode.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
-        mdp: JaxdpMDP
-        s: chex.Numeric
-        step: chex.Numeric
-        max_episode_len: chex.Numeric
+        mdp: Mdp
+        s: jax.Array
+        step: jax.Array
+        max_eps_len: jax.Array
 
     @dataclass
     class Step:
@@ -91,10 +133,10 @@ class TabularEnv:
             trun: Truncation flag.
         """
 
-        nobs: chex.Numeric
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        nobs: chex.Array
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     config: ConfigProtocol
 
@@ -112,10 +154,15 @@ class TabularEnv:
             Step result and next state.
         """
         s_next, rew, term = _sample_transition(key, state.mdp, state.s, act)
-        trun = state.step >= state.max_episode_len - 1
-        new_state = state.replace(s=s_next, step=state.step + 1)  # type: ignore[attr-defined]
+        trun = state.step >= state.max_eps_len - 1
+        new_state = replace(state, s=s_next, step=state.step + 1)
         return (
-            TabularEnv.Step(nobs=s_next, rew=rew, term=term, trun=trun),
+            TabularEnv.Step(
+                nobs=jnp.asarray(s_next),
+                rew=jnp.asarray(rew),
+                term=jnp.asarray(term),
+                trun=jnp.asarray(trun),
+            ),
             new_state,
         )
 
@@ -133,10 +180,10 @@ class TabularEnv:
             mdp=mdp,
             s=jnp.array(-1),
             step=jnp.array(0),
-            max_episode_len=jnp.array(self.config.max_episode_len),
+            max_eps_len=jnp.array(self.config.max_eps_len),
         )
 
-    def obs(self, state: TabularEnv.State) -> chex.Numeric:
+    def obs(self, state: TabularEnv.State) -> jax.Array:
         """Get observation from state.
 
         Args:
@@ -149,7 +196,7 @@ class TabularEnv:
 
     def reset(
         self, key: chex.PRNGKey, state: TabularEnv.State
-    ) -> tuple[chex.Numeric, TabularEnv.State]:
+    ) -> tuple[jax.Array, TabularEnv.State]:
         """Reset to a new episode.
 
         Args:
@@ -159,8 +206,12 @@ class TabularEnv:
         Returns:
             Initial observation and reset state.
         """
-        s = jrd.choice(key, state.mdp.state_size, p=state.mdp.initial)
-        new_state = state.replace(s=s, step=jnp.array(0))  # type: ignore[attr-defined]
+        s = jrd.choice(
+            key,
+            state.mdp.state_size,
+            p=state.mdp.initial,
+        )
+        new_state = replace(state, s=s, step=jnp.array(0))
         return (s, new_state)
 
 
@@ -177,7 +228,7 @@ class garnet:
             branch_size: Number of successor states per state-action pair.
             min_reward: Minimum reward value.
             max_reward: Maximum reward value.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
         state_size: int = 50
@@ -185,17 +236,19 @@ class garnet:
         branch_size: int = 5
         min_reward: float = 0.0
         max_reward: float = 1.0
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
-        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+        def init_mdp(self, key: chex.PRNGKey) -> Mdp:
             """Initialize a Garnet MDP from this config."""
-            return garnet_mdp(
-                state_size=self.state_size,
-                action_size=self.action_size,
-                branch_size=self.branch_size,
-                min_reward=self.min_reward,
-                max_reward=self.max_reward,
-                key=key,
+            return _adapt(
+                garnet_mdp(
+                    state_size=self.state_size,
+                    action_size=self.action_size,
+                    branch_size=self.branch_size,
+                    min_reward=self.min_reward,
+                    max_reward=self.max_reward,
+                    key=key,
+                )
             )
 
     @staticmethod
@@ -222,14 +275,14 @@ class graph:
         This is a fixed 6-state graph with predefined edge structure.
 
         Attributes:
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
         """
 
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
-        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+        def init_mdp(self, key: chex.PRNGKey) -> Mdp:
             """Initialize a Graph MDP from this config."""
-            return jaxdp_graph_mdp()
+            return _adapt(jaxdp_graph_mdp())
 
     @staticmethod
     def make(config: graph.Config) -> TabularEnv:
@@ -261,30 +314,38 @@ class gridworld:
             ' ': Regular passable space
 
         Attributes:
-            board: List of strings representing the 2D grid layout.
+            board: Sequence of strings representing the 2D grid layout.
             p_slip: Probability of slipping to unintended action.
-            max_episode_len: Maximum episode length before truncation.
+            max_eps_len: Maximum episode length before truncation.
 
         Example:
             >>> config = gridworld.Config(
-            ...     board=[
+            ...     board=(
             ...         "#####",
             ...         "#  @#",
             ...         "# #X#",
             ...         "#P  #",
-            ...         "#####"
-            ...     ],
-            ...     p_slip=0.1
+            ...         "#####",
+            ...     ),
+            ...     p_slip=0.1,
             ... )
         """
 
-        board: list[str]
+        board: Sequence[str] = (
+            "#######",
+            "#     #",
+            "#  #  #",
+            "#P # @#",
+            "#  #  #",
+            "#     #",
+            "#######",
+        )
         p_slip: float = 0.0
-        max_episode_len: int = 1000
+        max_eps_len: int = 1000
 
-        def init_mdp(self, key: chex.PRNGKey) -> JaxdpMDP:
+        def init_mdp(self, key: chex.PRNGKey) -> Mdp:
             """Initialize a GridWorld MDP from this config."""
-            return grid_world(board=self.board, p_slip=self.p_slip)
+            return _adapt(grid_world(board=list(self.board), p_slip=self.p_slip))
 
     @staticmethod
     def make(config: gridworld.Config) -> TabularEnv:
@@ -297,3 +358,83 @@ class gridworld:
             TabularEnv instance.
         """
         return TabularEnv(config=config)
+
+
+_ENVS: dict[str, ConfigProtocol] = {
+    "cliffworld": gridworld.Config(
+        board=(
+            "#########",
+            "#     @X#",
+            "#      X#",
+            "#      X#",
+            "#      X#",
+            "#P     X#",
+            "#########",
+        ),
+    ),
+    "cliff-walking": gridworld.Config(
+        board=(
+            "##############",
+            "#            #",
+            "#            #",
+            "#            #",
+            "#PXXXXXXXXXX@#",
+            "##############",
+        ),
+    ),
+    "four-rooms": gridworld.Config(
+        board=(
+            "#############",
+            "#     #    @#",
+            "#     #     #",
+            "#           #",
+            "#     #     #",
+            "#     #     #",
+            "## #### #####",
+            "#     #     #",
+            "#     #     #",
+            "#           #",
+            "#     #     #",
+            "#P    #     #",
+            "#############",
+        ),
+    ),
+    "frozen-lake": gridworld.Config(
+        board=(
+            "######",
+            "#P   #",
+            "# X X#",
+            "#   X#",
+            "#X  @#",
+            "######",
+        ),
+        p_slip=1 / 3,
+    ),
+    "mid-garnet": garnet.Config(state_size=50, action_size=10, branch_size=5),
+    "graph": graph.Config(),
+}
+
+
+def make(name: str) -> TabularEnv:
+    """Create a pre-defined tabular environment by name.
+
+    For custom configurations, use the namespace make functions directly
+    (e.g. ``tabular.garnet.make(config)``).
+
+    Args:
+        name: Environment name ("cliffworld", "cliff-walking", "four-rooms",
+            "frozen-lake", "mid-garnet", "graph").
+
+    Returns:
+        TabularEnv instance.
+
+    Raises:
+        ValueError: If name is not recognized.
+
+    Example:
+        >>> env = make("cliffworld")
+        >>> env = make("mid-garnet")
+    """
+    if name not in _ENVS:
+        raise ValueError(f"Unknown env {name!r}, choose from {list(_ENVS)}")
+    return TabularEnv(config=_ENVS[name])

@@ -13,7 +13,10 @@ Example:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import gymnax as _gymnax
+import jax
 import jax.numpy as jnp
 import chex
 from chex import dataclass
@@ -54,9 +57,9 @@ class GymnaxEnv:
         """
 
         nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     def init(self, key: chex.PRNGKey) -> GymnaxEnv.State:
         """Initialize the environment state.
@@ -71,7 +74,7 @@ class GymnaxEnv:
         return self.State(env=env_state)
 
     def step(
-        self, key: chex.PRNGKey, act: chex.Numeric, state: State
+        self, key: chex.PRNGKey, act: jax.Array, state: State
     ) -> tuple[Step, State]:
         """Step the environment without auto-reset.
 
@@ -90,7 +93,7 @@ class GymnaxEnv:
         term = jnp.logical_and(done, jnp.logical_not(trun))
         return (
             self.Step(nobs=obs, rew=rew, term=term, trun=trun),
-            state.replace(env=env_state),
+            replace(state, env=env_state),
         )
 
     def reset(self, key: chex.PRNGKey, state: State) -> tuple[chex.Array, State]:
@@ -104,7 +107,7 @@ class GymnaxEnv:
             Initial observation and reset state.
         """
         obs, env_state = self.env.reset(key, self.params)
-        return obs, state.replace(env=env_state)
+        return obs, replace(state, env=env_state)
 
     def obs(self, state: State) -> chex.Array:
         """Get observation from state.
@@ -130,5 +133,5 @@ def make(name: str, **kwargs) -> GymnaxEnv:
     """
     env, params = _gymnax.make(name)
     if kwargs:
-        params = params.replace(**kwargs)
+        params = replace(params, **kwargs)
     return GymnaxEnv(env=env, params=params)

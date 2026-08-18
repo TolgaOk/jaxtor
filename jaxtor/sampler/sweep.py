@@ -7,7 +7,7 @@ Example:
     >>> from jaxtor.sampler import mc, sweep
     >>> config = tabular.garnet.Config(state_size=10, action_size=4)
     >>> env = tabular.garnet.make(config)
-    >>> mc_sampler = mc.Mc(max_episode_len=100, queue_size=10, env=env)
+    >>> mc_sampler = mc.Mc(max_eps_len=100, env=env)
     >>> sweeper = sweep.Sweep(mc=mc_sampler)
     >>> env_state = env.init(key)
     >>> transition, mc_state = sweeper.sample(key, env_state)
@@ -15,34 +15,29 @@ Example:
 
 from __future__ import annotations
 
-from typing import Protocol, TypeVar
+from dataclasses import replace
+from typing import Protocol
 
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
 import chex
 from chex import dataclass
-from jaxdp.mdp import MDP
 
-Transition = TypeVar("Transition")
-
-
-class Env(Protocol):
-    class State(Protocol):
-        mdp: MDP
+from jaxtor.env.tabular import Mdp, TabularEnv
 
 
-class Mc(Protocol):
-    class State(Protocol): ...
+class Mc[McStateT, TransitionT](Protocol):
+    """Markov-chain capability required by ``Sweep``."""
 
-    def init(self, key: chex.PRNGKey, env: Env.State) -> Mc.State: ...
+    def init(self, key: chex.PRNGKey, env: TabularEnv.State) -> McStateT: ...
     def sample(
-        self, act: chex.Array, state: Mc.State
-    ) -> tuple[Transition, Mc.State]: ...
+        self, act: chex.Array, state: McStateT
+    ) -> tuple[TransitionT, McStateT]: ...
 
 
 @dataclass
-class Sweep:
+class Sweep[McStateT, TransitionT]:
     """Sweep over all (s,a) pairs with stochastic transitions.
 
     Flat batch ordering: position = a * S + s (action-major).
@@ -51,9 +46,9 @@ class Sweep:
         mc: Mc instance for single-environment sampling.
     """
 
-    mc: Mc
+    mc: Mc[McStateT, TransitionT]
 
-    def _condition_mdp_initial(self, mdp: MDP, init_dist: chex.Array) -> MDP:
+    def _condition_mdp_initial(self, mdp: Mdp, init_dist: jax.Array) -> Mdp:
         """Create an MDP with a modified initial distribution.
 
         Args:
@@ -63,17 +58,13 @@ class Sweep:
         Returns:
             MDP with the new initial distribution, sharing other arrays.
         """
-        return MDP(
-            transition=mdp.transition,
-            reward=mdp.reward,
-            initial=init_dist,
-            terminal=mdp.terminal,
-            features=mdp.features,
-            name=mdp.name,
-            validate=False,
-        )
+        return replace(mdp, initial=init_dist)
 
-    def sample(self, key: chex.PRNGKey, env: Env.State) -> tuple[Transition, Mc.State]:
+    def sample(
+        self,
+        key: chex.PRNGKey,
+        env: TabularEnv.State,
+    ) -> tuple[TransitionT, McStateT]:
         """Sample one transition from each (s,a) pair.
 
         Initializes A*S parallel MC states with conditioned initial distributions,
@@ -93,9 +84,9 @@ class Sweep:
         chex.assert_shape(state_indices, (A * S,))
         chex.assert_shape(init_dists, (A * S, S))
 
-        def condition_env_state(init_dist: chex.Array) -> Env.State:
+        def condition_env_state(init_dist: jax.Array) -> TabularEnv.State:
             new_mdp = self._condition_mdp_initial(env.mdp, init_dist)
-            return env.replace(mdp=new_mdp)  # type: ignore[attr-defined]
+            return replace(env, mdp=new_mdp)
 
         conditioned_env_states = jax.vmap(condition_env_state)(init_dists)
 

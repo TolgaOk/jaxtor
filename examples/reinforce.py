@@ -1,226 +1,262 @@
-"""REINFORCE on CartPole-v1 (`gymnax`) using `jaxtor`, `rlax`, and `equinox`.
+"""REINFORCE for discrete-action Gymnax environments with Jaxtor components.
 
-Policy gradient method from Williams (1992) "Simple statistical gradient-following
-algorithms for connectionist reinforcement learning", Machine Learning, 8(3-4).
+CartPole-v1 is the default. ``--env-id`` may select any Gymnax environment
+with one-dimensional observations and a discrete action space. Fixed-length
+sequences may contain several episodes; episode boundaries stop return
+propagation, while an unfinished trailing fragment uses a zero bootstrap.
 
-The gradient estimator is:
+Components::
 
-    ∇J(θ) = E_π [ ∑_t ∇ log π_θ(a_t|s_t) · G_t ]
+    Composition
+    │
+    ├── agent: Pi
+    │   ├── body: Module(Linear → tanh)
+    │   └── policy: CategoricalHead
+    │       └── Module(Linear logits)
+    ├── mc: VecMc
+    │   └── Mc
+    │       └── GymnaxEnv
+    ├── roll: Roll
+    │   └── Imc
+    │       ├── agent
+    │       └── mc
+    ├── stats: EpisodeStats
+    └── Eval
+        └── Imc
+            ├── deterministic agent
+            └── mc
 
-where G_t = ∑_{k=0}^{T-t} γ^k r_{t+k} is the discounted return from step t.
-A baseline-free variant with an entropy bonus H(π) to encourage exploration:
+State::
 
-    L(θ) = -E_π [ log π_θ(a_t|s_t) · G_t ] - c_ent · H(π_θ)
+    TrainState
+    ├── roll: imc state (agent + mc)
+    ├── opt: optimizer state
+    └── stats: episode statistics
 
-- `jaxtor`:
-  - rollout sampler: `GymnaxEnv → VecMc → Imc → Roll` for parallel rollouts.
-  - evaluation: `GymnaxEnv → VecMc → Imc → Eval` for evaluation.
-- `equinox`: network with tanh activation, MLP (4 → 64 → 2).
-- `rlax`: `discounted_returns`, `policy_gradient_loss`, `entropy_loss` primitives.
+Flow::
 
+    Main loop ↻
+    ├→ collect sequence
+    │   ├→ update stats
+    │   └→ infer policy
+    ├→ discounted returns
+    ├→ policy loss → gradients → update
+    └→ periodically
+        ├→ report training metrics
+        └→ evaluate deterministic agent
 """
 
 from __future__ import annotations
 
-import time
+from dataclasses import dataclass as static_dataclass
+from dataclasses import replace
+from typing import Any
 
+import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
+import optax
 import rlax
 import tyro
-import chex
 from chex import dataclass
-from rich import print
-from rich.progress import track
 
-from jaxtor.env.gymnax import make
-from jaxtor.eval.mc import Eval as Evaluator
-from jaxtor.sampler import Mc, VecMc, Imc, Roll
+from jaxtor.agent import (
+    CategoricalHead,
+    Function,
+    Module,
+    Pi,
+    combine,
+    partition,
+)
+from jaxtor.env import gymnax
+from jaxtor.eval.mc import Eval
+from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Config
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass
+@static_dataclass(frozen=True)
 class Config:
-    """Training configuration for tyro CLI."""
+    """Command-line REINFORCE configuration."""
 
-    n_iters: int = 100
-    hidden: int = 64
-    lr: float = 3e-3
-    gamma: float = 0.99
-    entropy_coef: float = 0.01
-    tau_pi: float = 1e-4  # target policy temperature
+    env_id: str = "CartPole-v1"
+    n_iters: int = 200
     n_envs: int = 16
-    seqlen: int = 200
-    max_episode_len: int = 500
-    tau_mu: float = 1.0  # behavior policy temperature
-    eval_freq: int = 5
-    eval_envs: int = 20
+    n_eval_envs: int = 8
+    seq_len: int = 200
+    hidden_size: int = 64
+    lr: float = 1e-3
+    gamma: float = 0.99
+    ent_coef: float = 0.01
+    max_grad_norm: float = 0.5
+    max_eps_len: int = 500
+    eval_freq: int = 20
     seed: int = 0
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Agent (satisfies jaxtor Agent protocol)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-class MLP(eqx.Module):
-    """Two-layer equinox MLP with tanh activation."""
-
-    w1: jax.Array
-    b1: jax.Array
-    w2: jax.Array
-    b2: jax.Array
-
-    def __init__(self, obs_dim: int, hidden: int, act_dim: int, *, key: jax.Array):
-        k1, k2 = jrd.split(key)
-        self.w1 = jrd.normal(k1, (obs_dim, hidden)) * jnp.sqrt(2.0 / obs_dim)
-        self.b1 = jnp.zeros(hidden)
-        self.w2 = jrd.normal(k2, (hidden, act_dim)) * jnp.sqrt(2.0 / hidden)
-        self.b2 = jnp.zeros(act_dim)
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        x = jnp.tanh(x @ self.w1 + self.b1)
-        return x @ self.w2 + self.b2
+def module(fn: object) -> tuple[Module[jax.Array], Module.State[jax.Array]]:
+    """Split an initialized Equinox module into component and state."""
+    if not isinstance(fn, Function):
+        raise TypeError("an Equinox module must be callable")
+    params, static = eqx.partition(fn, eqx.is_array)
+    if not isinstance(params, Function) or not isinstance(static, Function):
+        raise TypeError("both Equinox partitions must remain callable")
+    component: Module[jax.Array] = Module(static=static)
+    return component, component.init(params)
 
 
 @dataclass
-class Agent:
-    """Softmax policy agent with temperature scaling.
+class Metrics:
+    """Transient metrics from one policy update."""
 
-    tau=1.0: standard softmax sampling.
-    tau->0: approaches greedy (argmax).
-    """
-
-    tau: float = 1.0
-
-    @dataclass
-    class State:
-        key: jax.Array
-        params: eqx.Module
-
-    def act(
-        self, obs: chex.Array, state: Agent.State
-    ) -> tuple[chex.Array, Agent.State]:
-        """Select an action given an observation."""
-        key, act_key = jrd.split(state.key)
-        logits = state.params(obs)
-        action = jrd.categorical(act_key, logits / self.tau)
-        return action, state.replace(key=key)
+    loss: chex.Numeric
+    pi_loss: chex.Numeric
+    entropy: chex.Numeric
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# REINFORCE loss
-# ──────────────────────────────────────────────────────────────────────────────
+type ModuleState = Module.State[jax.Array]
+type PiState = CategoricalHead.State[ModuleState]
+type AgentState = Pi.State[ModuleState, PiState]
+type RollState = Imc.State[Mc.State[gymnax.GymnaxEnv.State], AgentState]
 
 
-def reinforce_loss(
-    params: eqx.Module,
-    trans: Mc.Transition,
-    gamma: float,
-    entropy_coef: float,
-) -> chex.Numeric:
-    """REINFORCE policy gradient loss with entropy bonus."""
-    logits = jax.vmap(jax.vmap(params))(trans.obs)
+@dataclass
+class TrainState:
+    """Dynamic state threaded through complete REINFORCE iterations."""
 
-    discount_t = jnp.where(trans.term, 0.0, gamma)
+    roll: RollState
+    opt: optax.OptState
+    stats: EpisodeStats.State
 
-    returns = jax.vmap(rlax.discounted_returns, in_axes=(0, 0, None))(
-        trans.rew, discount_t, jnp.float32(0.0)
+
+cfg = tyro.cli(Config) if __name__ == "__main__" else Config()
+
+(
+    agent_key,
+    env_key,
+    mc_key,
+    eval_env_key,
+    eval_mc_key,
+) = jrd.split(jrd.key(cfg.seed), 5)
+
+
+env = gymnax.make(cfg.env_id)
+obs_shape = tuple(env.env.observation_space(env.params).shape)
+if len(obs_shape) != 1:
+    raise ValueError("the REINFORCE agent requires vector observations")
+act_size = getattr(env.env.action_space(env.params), "n", None)
+if act_size is None:
+    raise ValueError("the REINFORCE agent requires a discrete action space")
+
+
+act_key, body_key, pi_key = jrd.split(agent_key, 3)
+body_net, body_net_state = module(
+    eqx.nn.Sequential(
+        [
+            eqx.nn.Linear(obs_shape[0], cfg.hidden_size, key=body_key),
+            eqx.nn.Lambda(jnp.tanh),
+        ]
     )
-
-    w_t = jnp.ones_like(returns)
-    pg_loss = jax.vmap(rlax.policy_gradient_loss)(
-        logits, trans.act.astype(jnp.int32), returns, w_t
-    ).mean()
-    ent_loss = jax.vmap(rlax.entropy_loss)(logits, w_t).mean()
-
-    return pg_loss + entropy_coef * ent_loss
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Setup
-# ──────────────────────────────────────────────────────────────────────────────
-
-cfg = tyro.cli(Config)
-key = jrd.PRNGKey(cfg.seed)
-mc = Mc(
-    max_episode_len=cfg.max_episode_len,
-    queue_size=20,
-    env=make("CartPole-v1"),
 )
-beavior_agent = Agent(tau=cfg.tau_mu)
-target_agent = Agent(tau=cfg.tau_pi)
+pi_net, pi_net_state = module(eqx.nn.Linear(cfg.hidden_size, int(act_size), key=pi_key))
 
-# Training rollout sampler
-roll = Roll(
-    imc=Imc(agent=beavior_agent, mc=VecMc(mc=mc)),
-    seqlen=cfg.seqlen,
-    seq_axis=1,
+
+pi = CategoricalHead(n_actions=int(act_size), logits=pi_net)
+agent = Pi(body=body_net, policy=pi)
+agent_state = agent.init(
+    act_key,
+    body=body_net_state,
+    pi=pi.init(pi_net_state),
 )
 
-# Eval component
-evaluator = Evaluator(
-    imc=Imc(agent=target_agent, mc=VecMc(mc=mc)),
-    episode_len=cfg.max_episode_len,
+
+mc = VecMc(mc=Mc(max_eps_len=cfg.max_eps_len, env=env))
+imc = Imc(agent=agent, mc=mc)
+roll = Roll(imc=imc, seq_len=cfg.seq_len, seq_axis=1)
+
+
+stats = EpisodeStats(seq_axis=1)
+optim: Any = optax.chain(
+    optax.clip_by_global_norm(cfg.max_grad_norm),
+    optax.adam(cfg.lr),
 )
+
+
+eval_imc = Imc(agent=replace(agent, deterministic=True), mc=mc)
+evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluate = jax.jit(evaluator.evaluate)
 
 
 @jax.jit
-def train_step(state: Imc.State) -> tuple[Imc.State, chex.Numeric]:
-    """Sample a rollout, compute REINFORCE loss, and update params."""
-    trans, state = roll.sample(state)
-    params = state.agent.params
-    loss, grads = jax.value_and_grad(reinforce_loss)(
-        params, trans, cfg.gamma, cfg.entropy_coef
+def update(state: TrainState) -> tuple[Metrics, TrainState]:
+    """Collect one sequence and apply one REINFORCE update."""
+    seq, roll_state = roll.sample(state.roll)
+    stats_state = stats.update(seq, state.stats)
+    ret = jax.vmap(rlax.discounted_returns, in_axes=(0, 0, None))(
+        seq.rew,
+        cfg.gamma * (~(seq.term | seq.trun)).astype(seq.rew.dtype),
+        jnp.zeros((), dtype=seq.rew.dtype),
     )
-    new_params = jax.tree.map(lambda p, g: p - cfg.lr * g, params, grads)
-    return eqx.tree_at(lambda s: s.agent.params, state, new_params), loss
+    parts = partition(roll_state.agent)
+
+    def loss(params: AgentState) -> tuple[chex.Numeric, Metrics]:
+        policy, _ = agent.pi(seq.obs, combine(params, parts.frozen))
+        evaluation = policy.evaluate(seq.act)
+        pi_loss = -jnp.mean(evaluation.logp * jax.lax.stop_gradient(ret))
+        entropy = jnp.mean(evaluation.entropy)
+        total = pi_loss - cfg.ent_coef * entropy
+        return total, Metrics(loss=total, pi_loss=pi_loss, entropy=entropy)
+
+    (_, metrics), grads = jax.value_and_grad(loss, has_aux=True)(parts.params)
+    updates, opt = optim.update(grads, state.opt, parts.params)
+    agent_state: AgentState = combine(
+        eqx.apply_updates(parts.params, updates),
+        parts.frozen,
+    )
+    return metrics, replace(
+        state,
+        roll=replace(roll_state, agent=agent_state),
+        opt=opt,
+        stats=stats_state,
+    )
 
 
-jit_eval = jax.jit(evaluator.metric)
+def train() -> TrainState:
+    """Initialize dynamic state and train the configured REINFORCE recipe."""
+    state = TrainState(
+        roll=imc.init(
+            mc.init(
+                jrd.split(mc_key, cfg.n_envs),
+                jax.vmap(env.init)(jrd.split(env_key, cfg.n_envs)),
+            ),
+            agent_state,
+        ),
+        opt=optim.init(partition(agent_state).params),
+        stats=stats.init((cfg.n_envs,)),
+    )
+    eval_state = eval_imc.init(
+        mc.init(
+            jrd.split(eval_mc_key, cfg.n_eval_envs),
+            jax.vmap(env.init)(jrd.split(eval_env_key, cfg.n_eval_envs)),
+        ),
+        agent_state,
+    )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Training loop
-# ──────────────────────────────────────────────────────────────────────────────
-
-print("[bold green]CartPole REINFORCE[/bold green]")
-
-# Init states
-key, params_key, env_key, agent_key, eval_key = jrd.split(key, 5)
-imc_state = Imc.State(
-    mc=VecMc(mc=mc).init(jrd.split(key, cfg.n_envs), env=mc.env.init(env_key)),
-    agent=Agent.State(key=agent_key, params=MLP(4, cfg.hidden, 2, key=params_key)),
-)
-
-t0 = time.time()
-for i in track(range(cfg.n_iters), description="Training"):
-    imc_state, loss = train_step(imc_state)
-
-    if (i + 1) % cfg.eval_freq == 0:
-        eval_key, env_key, k = jrd.split(eval_key, 3)
-        m = jit_eval(
-            Imc.State(
-                mc=VecMc(mc=mc).init(jrd.split(k, cfg.eval_envs), mc.env.init(env_key)),
-                agent=imc_state.agent,
+    for iteration in range(1, cfg.n_iters + 1):
+        metrics, state = update(state)
+        if iteration % cfg.eval_freq == 0:
+            train_metrics, stats_state = stats.drain(state.stats)
+            state = replace(state, stats=stats_state)
+            eval_metrics, _ = evaluate(
+                replace(eval_state, agent=state.roll.agent),
             )
-        )
-        steps = (i + 1) * cfg.n_envs * cfg.seqlen
-        print(
-            f"  iter {i + 1:4d}  loss={float(loss):+.4f}"
-            f"  rew={float(m.avg_eps_rew):.1f}±{float(m.std_eps_rew):.1f}"
-            f"  len={float(m.avg_eps_len):.1f}"
-            f"  steps={steps:,}"
-        )
+            print(
+                f"iter={iteration:3d}  loss={float(metrics.loss):+.3f}"
+                f"  train={float(train_metrics.avg_eps_rew):.1f}"
+                f"  eval={float(eval_metrics.avg_eps_rew):.1f}"
+            )
+    return state
 
-elapsed = time.time() - t0
-print(
-    f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s"
-    f"  rew={float(m.avg_eps_rew):.1f}±{float(m.std_eps_rew):.1f}"
-    f"  (over {int(m.n_episodes)} eps)"
-)
+
+if __name__ == "__main__":
+    train()

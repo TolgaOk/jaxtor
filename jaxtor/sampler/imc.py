@@ -1,94 +1,78 @@
-"""Induced Markov Chain sampling.
+"""Minimal agent-induced Markov-chain sampling.
 
-Wires agent action selection to environment stepping, creating the Markov chain
-induced by the agent-environment interaction.
+``Imc`` joins action selection and one Markov-chain step::
 
-Example:
-    >>> mc = Mc(max_episode_len=100, queue_size=10, env=env)
-    >>> imc = Imc(agent=agent, mc=mc)
-    >>> state = Imc.State(mc=mc.init(key, env_state), agent=agent_state)
-    >>> transition, state = imc.sample(state)
+    imc = Imc(agent=agent, mc=mc)
+    state = imc.init(mc_state, agent_state)
+    transition, state = imc.sample(state)
+
+The returned sample is produced by the Markov chain. Agent predictions needed
+for learning are replayed by a separate inference component.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, TypeVar
+from typing import Protocol
 
-import chex
 from chex import dataclass
 
-Transition = TypeVar("Transition")
+
+class MarkovChain[Obs, Act, Sample, S](Protocol):
+    """Open Markov-chain capability required by ``Imc``."""
+
+    def observe(self, state: S) -> Obs: ...
+    def sample(self, act: Act, state: S) -> tuple[Sample, S]: ...
 
 
-class MC(Protocol[Transition]):
-    class State(Protocol):
-        last_obs: chex.Array
+class Agent[Obs, Act, S](Protocol):
+    """Action-selection capability required by ``Imc``."""
 
-    def sample(
-        self, act: chex.Array, state: MC.State
-    ) -> tuple[Transition, MC.State]: ...
-
-
-class Agent(Protocol):
-    class State(Protocol): ...
-
-    def act(
-        self,
-        obs: chex.Array,
-        state: Agent.State,
-    ) -> tuple[chex.Array, Agent.State]: ...
+    def act(self, obs: Obs, state: S) -> tuple[Act, S]: ...
 
 
 @dataclass
-class Imc:
-    """Induced Markov Chain - single-step agent-MC interaction.
-
-    Wires: obs -> agent.act -> action -> mc.sample -> transition
+class Imc[Obs, Act, Sample, AgentS, McS]:
+    """Join an action-selecting agent to a Markov chain for one step.
 
     Attributes:
-        agent: Agent following the Agent protocol.
-        mc: Markov chain sampler following the MC protocol.
+        agent: Agent that selects an action from the current observation.
+        mc: Open Markov-chain sampler advanced by that action.
+
+    Public dataclasses:
+        State: Markov-chain and agent states.
+
+    Public methods:
+        init: Combine initialized child states.
+        sample: Select one action and advance the Markov chain once.
     """
 
-    agent: Agent
-    mc: MC
+    agent: Agent[Obs, Act, AgentS]
+    mc: MarkovChain[Obs, Act, Sample, McS]
 
     @dataclass
-    class State:
-        """State of the induced Markov chain.
+    class State[McData, AgentData]:
+        """Dynamic state threaded through ``Imc``.
 
         Attributes:
-            mc: Underlying Markov chain state.
-            agent: Agent state.
+            mc: State of the open Markov chain.
+            agent: State of the action-selecting agent.
         """
 
-        mc: MC.State
-        agent: Agent.State
+        mc: McData
+        agent: AgentData
 
-    def init(self, mc: MC.State, agent: Agent.State) -> Imc.State:
-        """Initialize the induced Markov chain state.
-
-        Args:
-            mc: Pre-initialized Markov chain state.
-            agent: Pre-initialized agent state.
-
-        Returns:
-            Initialized Imc state.
-        """
+    def init(self, mc: McS, agent: AgentS) -> Imc.State[McS, AgentS]:
+        """Combine initialized Markov-chain and agent states."""
         return self.State(mc=mc, agent=agent)
 
     def sample(
         self,
-        state: Imc.State,
-    ) -> tuple[Transition, Imc.State]:
-        """Execute one step of agent-MC interaction.
-
-        Args:
-            state: Current Imc state.
-
-        Returns:
-            Transition and updated state.
-        """
-        act, agent_state = self.agent.act(state.mc.last_obs, state.agent)
-        transition, mc_state = self.mc.sample(act, state.mc)
-        return transition, state.replace(mc=mc_state, agent=agent_state)  # type: ignore[unresolved-attribute]
+        state: Imc.State[McS, AgentS],
+    ) -> tuple[Sample, Imc.State[McS, AgentS]]:
+        """Select one action and advance the Markov chain once."""
+        act, agent = self.agent.act(self.mc.observe(state.mc), state.agent)
+        transition, mc = self.mc.sample(act, state.mc)
+        return transition, self.State(
+            mc=mc,
+            agent=agent,
+        )

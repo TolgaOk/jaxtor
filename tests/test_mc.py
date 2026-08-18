@@ -22,18 +22,38 @@ def test_mc_init():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
+    obs = sampler.observe(state)
 
+    assert obs.shape == ()
+    assert jnp.array_equal(obs, state.last_obs)
     assert state.last_obs.shape == ()
-    assert state.eps_rew_queue.shape == (5,)
-    assert state.eps_len_queue.shape == (5,)
-    assert jnp.all(jnp.isnan(state.eps_rew_queue))
+    assert state.eps_idx.shape == ()
+    assert state.eps_idx == 0
+
+
+@pytest.mark.parametrize(
+    ("max_eps_len", "message"),
+    [(0, "max_eps_len must be positive")],
+)
+def test_mc_rejects_nonpositive_static_configuration(
+    max_eps_len,
+    message,
+):
+    """The episode limit is validated when ``Mc`` is configured."""
+    env = tabular.garnet.make(tabular.garnet.Config(state_size=2, action_size=2))
+
+    with pytest.raises(ValueError, match=message):
+        Mc(
+            max_eps_len=max_eps_len,
+            env=env,
+        )
 
 
 def test_mc_single_sample():
@@ -43,11 +63,11 @@ def test_mc_single_sample():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -60,57 +80,6 @@ def test_mc_single_sample():
     assert transition.nobs.shape == ()
 
 
-def test_mc_episode_statistics():
-    """Test episode statistics are tracked correctly."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.gridworld.Config(
-        board=["####", "#P@#", "####"],
-        p_slip=0.0,
-        max_episode_len=10,
-    )
-    env = tabular.gridworld.make(config)
-
-    sampler = Mc(max_episode_len=10, queue_size=5, env=env)
-    env_state = env.init(key)
-    state = sampler.init(key, env_state)
-
-    # Take action right (index 1) to reach goal
-    action = jnp.array(1)
-    transition, state = sampler.sample(action, state)
-
-    # Episode should have completed
-    assert transition.term or transition.trun
-    assert not jnp.isnan(state.eps_rew_queue[0])
-
-
-def test_mc_metrics():
-    """Test metrics computation."""
-    key = jax.random.PRNGKey(0)
-
-    config = tabular.gridworld.Config(
-        board=["####", "#P@#", "####"],
-        p_slip=0.0,
-        max_episode_len=10,
-    )
-    env = tabular.gridworld.make(config)
-
-    sampler = Mc(max_episode_len=10, queue_size=5, env=env)
-    env_state = env.init(key)
-    state = sampler.init(key, env_state)
-
-    # Run a few episodes
-    action = jnp.array(1)
-    for _ in range(5):
-        _, state = sampler.sample(action, state)
-
-    metrics, refreshed_state = sampler.metrics(state)
-
-    assert hasattr(metrics, "avg_eps_rew")
-    assert hasattr(metrics, "avg_eps_len")
-    assert jnp.all(jnp.isnan(refreshed_state.eps_rew_queue))
-
-
 def test_mc_jit_compilation():
     """Verify sample() can be JIT compiled."""
     key = jax.random.PRNGKey(0)
@@ -118,11 +87,11 @@ def test_mc_jit_compilation():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -141,11 +110,11 @@ def test_mc_consecutive_observations():
     config = tabular.garnet.Config(
         state_size=10,
         action_size=4,
-        max_episode_len=50,
+        max_eps_len=50,
     )
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     env_state = env.init(key)
     state = sampler.init(key, env_state)
 
@@ -174,8 +143,8 @@ class NonScalarRewardEnv:
     class Step:
         nobs: chex.Array
         rew: chex.Array
-        term: chex.Numeric
-        trun: chex.Numeric
+        term: chex.Array
+        trun: chex.Array
 
     def reset(self, key, state):
         return jnp.array(0), state.replace(key=key)
@@ -202,9 +171,9 @@ class MismatchedObsEnv:
     @dataclass
     class Step:
         nobs: chex.Array
-        rew: chex.Numeric
-        term: chex.Numeric
-        trun: chex.Numeric
+        rew: chex.Array
+        term: chex.Array
+        trun: chex.Array
 
     def reset(self, key, state):
         return jnp.array(0), state.replace(key=key)
@@ -226,7 +195,7 @@ def test_chex_mc_nonscalar_reward():
     key = jax.random.PRNGKey(0)
 
     env = NonScalarRewardEnv()
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     state = sampler.init(key, NonScalarRewardEnv.State(key=key))
 
     with pytest.raises(AssertionError):
@@ -238,7 +207,7 @@ def test_chex_mc_mismatched_obs_nobs():
     key = jax.random.PRNGKey(0)
 
     env = MismatchedObsEnv()
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     state = sampler.init(key, MismatchedObsEnv.State(key=key))
 
     with pytest.raises(AssertionError):
@@ -250,20 +219,16 @@ def test_chex_vecmc_wrong_batch_action():
     key = jax.random.PRNGKey(0)
     n_env = 4
 
-    config = tabular.garnet.Config(
-        state_size=10, action_size=4, max_episode_len=50
-    )
+    config = tabular.garnet.Config(state_size=10, action_size=4, max_eps_len=50)
     env = tabular.garnet.make(config)
 
-    sampler = Mc(max_episode_len=50, queue_size=5, env=env)
+    sampler = Mc(max_eps_len=50, env=env)
     vec_mc = mc.VecMc(mc=sampler)
 
-    env_state = env.init(key)
     keys = jax.random.split(key, n_env)
+    env_state = jax.vmap(env.init)(keys)
     state = vec_mc.init(keys, env_state)
 
     wrong_action = jnp.zeros(3)
     with pytest.raises(AssertionError):
         vec_mc.sample(wrong_action, state)
-
-

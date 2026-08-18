@@ -1,16 +1,11 @@
-"""Sampling-based evaluation.
+"""Sampling-based evaluation over an induced Markov chain.
 
-Computes evaluation metrics from environment rollouts using episode statistics
-tracked by the sampler.
+``Eval`` derives episode metrics from public transition fields::
 
-Classes:
-    Eval: Sampling-based evaluator with batched environment support.
+    evaluator = Eval(imc=imc, episode_len=500)
+    metrics, state = evaluator.evaluate(state)
 
-Example:
-    >>> imc = Imc(agent=agent, mc=mc)
-    >>> evaluator = Eval(imc=imc, episode_len=100)
-    >>> imc_state = Imc.State(mc=mc.init(keys, env_state), agent=agent_state)
-    >>> metrics = evaluator.metric(imc_state)
+The sampler state is advanced without exposing its internal structure.
 """
 
 from __future__ import annotations
@@ -23,122 +18,214 @@ import jax.numpy as jnp
 from chex import dataclass
 
 
-class Imc(Protocol):
-    class State(Protocol): ...
+class Transition(Protocol):
+    """Transition fields required for episode evaluation."""
 
-    class Transition(Protocol):
-        term: chex.Array
-        trun: chex.Array
+    rew: jax.Array
+    term: jax.Array
+    trun: jax.Array
 
-    def sample(self, state: Imc.State) -> tuple[Transition, Imc.State]: ...
+
+class Imc[Sample: Transition, S](Protocol):
+    """Single-step sampler surface consumed by ``Eval``."""
+
+    def sample(self, state: S) -> tuple[Sample, S]: ...
 
 
 @dataclass
-class Eval:
-    """Sampling-based evaluator.
-
-    Rolls out the policy in the environment and aggregates episode statistics
-    from the sampler's queues.
+class Eval[Sample: Transition, S]:
+    """Evaluate completed episodes from a fixed-length rollout.
 
     Attributes:
-        imc: Induced Markov chain following the Imc protocol.
-        episode_len: Number of steps to rollout per evaluation.
-        _unroll: Loop unroll factor for jax.lax.scan.
+        imc: Single-step sampler consumed by the evaluator.
+        episode_len: Number of environment steps per evaluation.
+        unroll: Loop unroll factor for ``jax.lax.scan``.
     """
 
-    imc: Imc
+    imc: Imc[Sample, S]
     episode_len: int
-    _unroll: int = 1
+    unroll: int = 1
+
+    @dataclass
+    class _Accumulator:
+        """Scan-local episode and aggregate statistics.
+
+        Attributes:
+            episode_rew: Per-chain return of the current episode.
+            episode_len: Per-chain length of the current episode.
+            sum_eps_rew: Sum of completed episode returns.
+            sum_sq_eps_rew: Sum of squared completed episode returns.
+            sum_eps_len: Sum of completed episode lengths.
+            min_eps_rew: Minimum completed episode return.
+            max_eps_rew: Maximum completed episode return.
+            n_episodes: Number of completed episodes.
+            n_truncated: Number of completed episodes ending by truncation.
+        """
+
+        episode_rew: jax.Array
+        episode_len: jax.Array
+        sum_eps_rew: jax.Array
+        sum_sq_eps_rew: jax.Array
+        sum_eps_len: jax.Array
+        min_eps_rew: jax.Array
+        max_eps_rew: jax.Array
+        n_episodes: jax.Array
+        n_truncated: jax.Array
+
+    @dataclass
+    class _Carry[ImcData]:
+        """Evaluation scan state.
+
+        Attributes:
+            imc: State of the wrapped sampler.
+            accumulator: Episode statistics owned by the evaluator.
+        """
+
+        imc: ImcData
+        accumulator: Eval._Accumulator
 
     @dataclass
     class Metrics:
-        """Episode statistics from evaluation rollouts.
+        """Aggregate statistics for episodes completed during evaluation.
 
         Attributes:
-            avg_eps_rew: Mean episode return.
-            avg_eps_len: Mean episode length.
-            std_eps_rew: Standard deviation of episode returns.
-            min_eps_rew: Minimum episode return.
-            max_eps_rew: Maximum episode return.
+            avg_eps_rew: Mean completed episode return.
+            avg_eps_len: Mean completed episode length.
+            std_eps_rew: Standard deviation of completed episode returns.
+            min_eps_rew: Minimum completed episode return.
+            max_eps_rew: Maximum completed episode return.
             n_episodes: Number of completed episodes.
-            trun_rate: Fraction of episodes ending by truncation.
+            trun_rate: Fraction of completed episodes ending by truncation.
         """
 
-        avg_eps_rew: chex.Numeric
-        avg_eps_len: chex.Numeric
-        std_eps_rew: chex.Numeric
-        min_eps_rew: chex.Numeric
-        max_eps_rew: chex.Numeric
-        n_episodes: chex.Numeric
-        trun_rate: chex.Numeric
+        avg_eps_rew: jax.Array
+        avg_eps_len: jax.Array
+        std_eps_rew: jax.Array
+        min_eps_rew: jax.Array
+        max_eps_rew: jax.Array
+        n_episodes: jax.Array
+        trun_rate: jax.Array
 
-    @dataclass
-    class _Carry:
-        imc: Imc.State
-        done_count: chex.Numeric
-        trun_count: chex.Numeric
-
-    def _rollout(
-        self,
-        imc_state: Imc.State,
-    ) -> tuple[Imc.State, chex.Numeric, chex.Numeric]:
-        """Rollout the environment for episode_len steps.
-
-        Args:
-            imc_state: Imc state.
-
-        Returns:
-            Updated Imc state, done count, and truncation count.
-        """
-
-        def step_fn(carry, _):
-            transition, imc_state = self.imc.sample(carry.imc)
-            chex.assert_equal_shape([transition.term, transition.trun])
-            done = jnp.logical_or(transition.term, transition.trun)
-            return (
-                carry.replace(
-                    imc=imc_state,
-                    done_count=carry.done_count + jnp.sum(done),
-                    trun_count=carry.trun_count + jnp.sum(transition.trun),
-                ),
-                None,
-            )
-
-        carry, _ = jax.lax.scan(
-            step_fn,
-            Eval._Carry(
-                imc=imc_state,
-                done_count=jnp.array(0.0),
-                trun_count=jnp.array(0.0),
-            ),
-            length=self.episode_len,
-            unroll=self._unroll,
+    @staticmethod
+    def _init_accumulator(reward: jax.Array) -> Eval._Accumulator:
+        """Initialize statistics with the reward's batch shape."""
+        dtype = jnp.result_type(reward.dtype, jnp.float32)
+        reward_zero = reward.astype(dtype) * 0
+        episode_len = reward.astype(jnp.int32) * 0
+        scalar_zero = jnp.sum(reward_zero)
+        return Eval._Accumulator(
+            episode_rew=reward_zero,
+            episode_len=episode_len,
+            sum_eps_rew=scalar_zero,
+            sum_sq_eps_rew=scalar_zero,
+            sum_eps_len=scalar_zero,
+            min_eps_rew=scalar_zero + jnp.inf,
+            max_eps_rew=scalar_zero - jnp.inf,
+            n_episodes=jnp.sum(episode_len),
+            n_truncated=jnp.sum(episode_len),
         )
 
-        return carry.imc, carry.done_count, carry.trun_count
+    @staticmethod
+    def _accumulate(
+        accumulator: Eval._Accumulator,
+        transition: Transition,
+    ) -> tuple[Eval._Accumulator, None]:
+        """Add one timestep of possibly batched transitions to statistics."""
+        chex.assert_equal_shape([transition.rew, transition.term, transition.trun])
 
-    def metric(self, imc_state: Imc.State) -> Eval.Metrics:
-        """Evaluate agent by rolling out in the environment.
+        reward = transition.rew.astype(accumulator.episode_rew.dtype)
+        term = transition.term.astype(jnp.bool_)
+        trun = transition.trun.astype(jnp.bool_)
+        done = jnp.logical_or(term, trun)
 
-        Args:
-            imc_state: Imc state (vectorized if imc uses VecMc).
+        episode_rew = accumulator.episode_rew + reward
+        episode_len = accumulator.episode_len + 1
+        completed_rew = jnp.where(done, episode_rew, 0)
+        completed_len = jnp.where(done, episode_len, 0)
+        upper = episode_rew * 0 + jnp.inf
+        lower = episode_rew * 0 - jnp.inf
 
-        Returns:
-            Evaluation metrics.
-        """
-        imc_states, done_counts, trun_counts = self._rollout(imc_state)
+        return (
+            Eval._Accumulator(
+                episode_rew=jnp.where(done, 0, episode_rew),
+                episode_len=jnp.where(done, 0, episode_len),
+                sum_eps_rew=accumulator.sum_eps_rew + jnp.sum(completed_rew),
+                sum_sq_eps_rew=(accumulator.sum_sq_eps_rew + jnp.sum(completed_rew**2)),
+                sum_eps_len=(accumulator.sum_eps_len + jnp.sum(completed_len)),
+                min_eps_rew=jnp.minimum(
+                    accumulator.min_eps_rew,
+                    jnp.min(jnp.where(done, episode_rew, upper)),
+                ),
+                max_eps_rew=jnp.maximum(
+                    accumulator.max_eps_rew,
+                    jnp.max(jnp.where(done, episode_rew, lower)),
+                ),
+                n_episodes=accumulator.n_episodes + jnp.sum(done),
+                n_truncated=(
+                    accumulator.n_truncated + jnp.sum(jnp.logical_and(done, trun))
+                ),
+            ),
+            None,
+        )
 
-        eps_rew_queues = imc_states.mc.eps_rew_queue
-        eps_len_queues = imc_states.mc.eps_len_queue
-        total_done = jnp.sum(done_counts)
-        total_trun = jnp.sum(trun_counts)
+    @staticmethod
+    def _summarize(accumulator: Eval._Accumulator) -> Eval.Metrics:
+        """Convert aggregate sufficient statistics into evaluation metrics."""
+        dtype = accumulator.sum_eps_rew.dtype
+        has_episodes = accumulator.n_episodes > 0
+        count = jnp.maximum(accumulator.n_episodes, 1).astype(dtype)
+        avg_eps_rew = accumulator.sum_eps_rew / count
+        variance = jnp.maximum(
+            accumulator.sum_sq_eps_rew / count - avg_eps_rew**2,
+            0,
+        )
+        nan = accumulator.sum_eps_rew * 0 + jnp.nan
 
         return Eval.Metrics(
-            avg_eps_rew=jnp.nanmean(eps_rew_queues),
-            avg_eps_len=jnp.nanmean(eps_len_queues),
-            std_eps_rew=jnp.nanstd(eps_rew_queues),
-            min_eps_rew=jnp.nanmin(eps_rew_queues),
-            max_eps_rew=jnp.nanmax(eps_rew_queues),
-            n_episodes=jnp.sum(~jnp.isnan(eps_rew_queues)),
-            trun_rate=total_trun / jnp.maximum(total_done, 1),
+            avg_eps_rew=jnp.where(has_episodes, avg_eps_rew, nan),
+            avg_eps_len=jnp.where(has_episodes, accumulator.sum_eps_len / count, nan),
+            std_eps_rew=jnp.where(has_episodes, jnp.sqrt(variance), nan),
+            min_eps_rew=jnp.where(has_episodes, accumulator.min_eps_rew, nan),
+            max_eps_rew=jnp.where(has_episodes, accumulator.max_eps_rew, nan),
+            n_episodes=accumulator.n_episodes,
+            trun_rate=accumulator.n_truncated.astype(dtype) / count,
         )
+
+    def _step(self, carry: Eval._Carry[S], unused: None) -> tuple[Eval._Carry[S], None]:
+        """Sample and accumulate one evaluation step."""
+        del unused
+        transition, imc = self.imc.sample(carry.imc)
+        accumulator, _ = self._accumulate(carry.accumulator, transition)
+        return self._Carry(imc=imc, accumulator=accumulator), None
+
+    def evaluate(self, state: S) -> tuple[Eval.Metrics, S]:
+        """Evaluate completed episodes and return the advanced sampler state.
+
+        The input state is expected to begin at an episode boundary. Metrics
+        cover every episode completed during this call; incomplete trailing
+        episodes are excluded.
+
+        Args:
+            state: Freshly initialized sampler state.
+
+        Returns:
+            Evaluation metrics and the advanced sampler state.
+        """
+        if self.episode_len < 1:
+            raise ValueError("episode_len must be positive")
+        if self.unroll < 1:
+            raise ValueError("unroll must be positive")
+
+        transition, state = self.imc.sample(state)
+        accumulator, _ = self._accumulate(
+            self._init_accumulator(transition.rew),
+            transition,
+        )
+        carry, _ = jax.lax.scan(
+            self._step,
+            self._Carry(imc=state, accumulator=accumulator),
+            None,
+            length=self.episode_len - 1,
+            unroll=self.unroll,
+        )
+        return self._summarize(carry.accumulator), carry.imc

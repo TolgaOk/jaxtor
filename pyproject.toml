@@ -1,6 +1,6 @@
 [project]
 name = "jaxtor"
-version = "0.2.0-alpha"
+version = "0.2.0"
 description = "JAX-based sampling and evaluation utilities for reinforcement learning environments"
 readme = "README.md"
 authors = [
@@ -10,7 +10,6 @@ requires-python = ">=3.13"
 dependencies = [
     "chex>=0.1.91",
     "jax>=0.8.0",
-    "jaxdp @ git+https://github.com/TolgaOk/jaxdp",
     "jaxtyping>=0.3.3",
 ]
 
@@ -24,28 +23,52 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["jaxtor"]
 
-[dependency-groups]
-dev = [
-    "pyright>=1.1.407",
-    "pytest>=9.0.1",
-    "ruff>=0.14.5",
+[project.optional-dependencies]
+env = [
+    "distrax>=0.1.7",
+    "envpool>=1.2.5",
+    "gymnasium[mujoco]>=1.2.3",
+    "gymnax>=0.0.9",
+    "jaxdp",
+    "mujoco-mjx==3.5.0",
 ]
 example = [
-    "equinox>=0.13.4",
+    "distrax>=0.1.7",
+    "gymnasium[mujoco]>=1.2.3",
     "gymnax>=0.0.9",
+    "jaxdp",
+    "equinox>=0.13.4",
+    "optax>=0.2.7",
     "rich>=14.2.0",
     "rlax>=0.1.8",
     "tyro>=1.0.6",
 ]
 
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "ruff>=0.14.5",
+    "ty>=0.0.58",
+]
+
+[tool.ty.src]
+exclude = ["dev", "scripts"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
+    "backend: exercises optional third-party environment adapters",
+    "integration: composes multiple Jaxtor components end to end",
     "statistical: marks tests as statistical (verify probabilistic properties)",
+]
+filterwarnings = [
+    # Upstream mujoco-mjx 3.5.0 fluid model (Swimmer) uses the deprecated
+    # jax.numpy.clip positional args; nothing we can fix on our side.
+    "ignore:Passing arguments 'a', 'a_min' or 'a_max' to jax.numpy.clip is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]
 line-length = 88
+
+[tool.uv.sources]
+jaxdp = { git = "https://github.com/TolgaOk/jaxdp", rev = "v0.3.0" }

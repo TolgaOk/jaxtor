@@ -6,6 +6,7 @@ dynamics. Provides matrix-vector operations for backward (value) and forward
 """
 
 from __future__ import annotations
+
 from typing import Protocol
 
 import chex
@@ -15,7 +16,9 @@ from chex import dataclass
 
 
 class TabularMDP(Protocol):
-    transition: chex.Array
+    """Transition tensor required by ``ExpSweep``."""
+
+    transition: jax.Array
 
 
 @dataclass
@@ -30,9 +33,7 @@ class ExpSweep:
     n_step: int
     _unroll: int = 1
 
-    def backward(
-        self, q_arr: chex.Array, mdp: TabularMDP, mu: chex.Array
-    ) -> chex.Array:
+    def backward(self, q_arr: jax.Array, mdp: TabularMDP, mu: jax.Array) -> jax.Array:
         """Apply n-step backward propagation.
 
         Iteratively propagates value-like arrays backward through transition dynamics under
@@ -78,9 +79,7 @@ class ExpSweep:
         )
         return jnp.concatenate([q_arr[None], seq], axis=0)
 
-    def forward(
-        self, pi_arr: chex.Array, mdp: TabularMDP, mu: chex.Array
-    ) -> chex.Array:
+    def forward(self, pi_arr: jax.Array, mdp: TabularMDP, mu: jax.Array) -> jax.Array:
         """Apply n-step forward propagation.
 
         Iteratively propagates distribution-like arrays forward through transition dynamics
