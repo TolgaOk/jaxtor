@@ -60,7 +60,7 @@ flowchart TB
         sweep["Sweep<br/>stochastic all-(s,a) samples"]
         exp_sweep["ExpSweep<br/>exact forward / backward propagation"]
         tabular_eval["TabularEval<br/>convergence diagnostics"]
-        value_api(["Tabular agent protocol<br/>q_vals(state, observations)"])
+        value_api(["Tabular agent protocol<br/>qvec(observations, state)"])
         mdp --> sweep
         mdp --> exp_sweep
         mdp --> tabular_eval

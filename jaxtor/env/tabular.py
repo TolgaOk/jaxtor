@@ -5,7 +5,7 @@ Index-based interface for jaxdp tabular MDPs (no one-hot encoding).
 Example:
     >>> import jax
     >>> from jaxtor.env import tabular
-    >>> key = jax.random.PRNGKey(0)
+    >>> key = jax.random.key(0)
     >>> env = tabular.make(tabular.garnet.Config())
     >>> init_key, reset_key = jax.random.split(key)
     >>> state = env.init(init_key)
@@ -34,8 +34,8 @@ class Mdp:
     """Array-only tabular Markov decision process.
 
     Attributes:
-        transition: Transition probabilities with shape ``(A, S, S)``.
-        reward: Transition rewards with shape ``(A, S, S)``.
+        transition: Transition probabilities with shape ``(A, S_next, S)``.
+        reward: Transition rewards with shape ``(A, S, S_next)``.
         initial: Initial-state distribution with shape ``(S,)``.
         terminal: Terminal-state indicators with shape ``(S,)``.
     """
@@ -90,11 +90,11 @@ def _sample_transition(
     return s_next, rew, term
 
 
-class ConfigProtocol(Protocol):
-    """Protocol for tabular MDP configurations."""
+class MdpConfig(Protocol):
+    """Tabular MDP configuration consumed by ``TabularEnv``."""
 
-    max_eps_len: int
-
+    @property
+    def max_eps_len(self) -> int: ...
     def init_mdp(self, key: chex.PRNGKey) -> Mdp: ...
 
 
@@ -103,7 +103,7 @@ class TabularEnv:
     """Index-based tabular MDP environment.
 
     Attributes:
-        config: MDP configuration following ConfigProtocol.
+        config: MDP configuration used to initialize dynamics and truncation.
     """
 
     @dataclass
@@ -114,13 +114,11 @@ class TabularEnv:
             mdp: Underlying jaxdp MDP instance.
             s: Current state index.
             step: Current step within the episode.
-            max_eps_len: Maximum episode length before truncation.
         """
 
         mdp: Mdp
         s: jax.Array
         step: jax.Array
-        max_eps_len: jax.Array
 
     @dataclass
     class Step:
@@ -138,7 +136,7 @@ class TabularEnv:
         term: chex.Array
         trun: chex.Array
 
-    config: ConfigProtocol
+    config: MdpConfig
 
     def step(
         self, key: chex.PRNGKey, act: chex.Numeric, state: State
@@ -154,7 +152,7 @@ class TabularEnv:
             Step result and next state.
         """
         s_next, rew, term = _sample_transition(key, state.mdp, state.s, act)
-        trun = state.step >= state.max_eps_len - 1
+        trun = state.step >= self.config.max_eps_len - 1
         new_state = replace(state, s=s_next, step=state.step + 1)
         return (
             TabularEnv.Step(
@@ -180,7 +178,6 @@ class TabularEnv:
             mdp=mdp,
             s=jnp.array(-1),
             step=jnp.array(0),
-            max_eps_len=jnp.array(self.config.max_eps_len),
         )
 
     def obs(self, state: TabularEnv.State) -> jax.Array:
@@ -360,7 +357,7 @@ class gridworld:
         return TabularEnv(config=config)
 
 
-_ENVS: dict[str, ConfigProtocol] = {
+_ENVS: dict[str, MdpConfig] = {
     "cliffworld": gridworld.Config(
         board=(
             "#########",

@@ -32,7 +32,7 @@ Metrics include mean, standard deviation, minimum, and maximum return, mean epis
 
 ### Tabular convergence
 
-`TabularEval` consumes an agent with `q_vals(observations, state)`.
+`TabularEval` consumes an agent with `qvec(observations, state)`.
 It compares the current Q-table with its previous value, the Bellman optimality target, and known optimal Q-values.
 
 ```python

@@ -5,8 +5,7 @@ import jax.numpy as jnp
 import pytest
 from chex import dataclass
 from jaxtor.env import tabular
-from jaxtor.sampler import mc, sweep
-from jaxtor.sampler.exp_sweep import ExpSweep
+from jaxtor.sampler import ExpSweep, mc, sweep
 
 
 # ============================================================================
@@ -352,35 +351,6 @@ def test_sweep_single_action_env():
 
 
 # ============================================================================
-# _condition_mdp_initial Tests
-# ============================================================================
-
-
-def test_condition_mdp_initial_creates_one_hot(small_env):
-    """_condition_mdp_initial creates MDP with one-hot initial distribution."""
-    key = jax.random.PRNGKey(0)
-    mc_sampler = mc.Mc(max_eps_len=10, env=small_env)
-    sweeper = sweep.Sweep(mc=mc_sampler)
-
-    env_state = small_env.init(key)
-    mdp = env_state.mdp
-    S = mdp.state_size
-
-    # Test conditioning on each state
-    for s in range(S):
-        one_hot = jax.nn.one_hot(s, S)
-        conditioned_mdp = sweeper._condition_mdp_initial(mdp, one_hot)
-
-        # Initial distribution should match the one-hot
-        assert jnp.array_equal(conditioned_mdp.initial, one_hot)
-
-        # Other MDP properties should be unchanged
-        assert jnp.array_equal(conditioned_mdp.transition, mdp.transition)
-        assert jnp.array_equal(conditioned_mdp.reward, mdp.reward)
-        assert jnp.array_equal(conditioned_mdp.terminal, mdp.terminal)
-
-
-# ============================================================================
 # Large Environment Test
 # ============================================================================
 
@@ -416,50 +386,86 @@ def test_sweep_larger_env(garnet_env):
 
 
 @dataclass
-class FakeMDP:
+class FakeMdp:
     transition: jax.Array
 
 
+def test_exp_sweep_backward_propagates_q_sequence():
+    """Backward propagation follows the policy through exact dynamics."""
+    transition = jnp.broadcast_to(jnp.eye(2), (2, 2, 2))
+    mdp = FakeMdp(transition=transition)
+    q = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    policy = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+
+    sequence = jax.jit(ExpSweep(n_step=3).backward)(q, mdp, policy)
+
+    propagated = jnp.array([[1.0, 4.0], [1.0, 4.0]])
+    expected = jnp.stack([q, propagated, propagated])
+    assert jnp.array_equal(sequence, expected)
+
+
+def test_exp_sweep_forward_propagates_occupancy_sequence():
+    """Forward propagation follows exact dynamics into the supplied policy."""
+    transition = jnp.broadcast_to(jnp.eye(2), (2, 2, 2))
+    mdp = FakeMdp(transition=transition)
+    occupancy = jnp.array([[0.2, 0.3], [0.4, 0.1]])
+    policy = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+
+    sequence = jax.jit(ExpSweep(n_step=3).forward)(occupancy, mdp, policy)
+
+    propagated = jnp.array([[0.6, 0.0], [0.0, 0.4]])
+    expected = jnp.stack([occupancy, propagated, propagated])
+    assert jnp.allclose(sequence, expected)
+
+
+@pytest.mark.parametrize("field", ["n_step", "_unroll"])
+def test_exp_sweep_rejects_nonpositive_scan_configuration(field):
+    """ExpSweep requires positive propagation and unroll lengths."""
+    kwargs = {"n_step": 1, "_unroll": 1, field: 0}
+    with pytest.raises(ValueError, match="must be positive"):
+        ExpSweep(**kwargs)
+
+
 def test_chex_exp_sweep_wrong_rank_q():
-    """Assert ExpSweep.backward raises when q_arr has wrong rank."""
-    A, S = 3, 5
+    """Assert ExpSweep.backward raises when q has the wrong rank."""
+    action_size, state_size = 3, 5
     exp = ExpSweep(n_step=3)
-    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
-    mu = jnp.ones((A, S)) / A
+    mdp = FakeMdp(transition=jnp.ones((action_size, state_size, state_size)))
+    policy = jnp.ones((action_size, state_size)) / action_size
 
     with pytest.raises(AssertionError):
-        exp.backward(jnp.ones((A,)), mdp, mu)
+        exp.backward(jnp.ones((action_size,)), mdp, policy)
 
 
-def test_chex_exp_sweep_wrong_rank_mu():
-    """Assert ExpSweep.forward raises when mu has wrong rank."""
-    A, S = 3, 5
+def test_chex_exp_sweep_wrong_rank_policy():
+    """Assert ExpSweep.forward raises when policy has the wrong rank."""
+    action_size, state_size = 3, 5
     exp = ExpSweep(n_step=3)
-    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
-    q = jnp.ones((A, S))
+    mdp = FakeMdp(transition=jnp.ones((action_size, state_size, state_size)))
+    occupancy = jnp.ones((action_size, state_size))
 
     with pytest.raises(AssertionError):
-        exp.forward(q, mdp, jnp.ones((A * S,)))
+        exp.forward(occupancy, mdp, jnp.ones((action_size * state_size,)))
 
 
-def test_chex_exp_sweep_shape_mismatch_q_mu():
-    """Assert ExpSweep.backward raises when q_arr and mu have different shapes."""
-    A, S = 3, 5
+def test_chex_exp_sweep_shape_mismatch_q_policy():
+    """Assert ExpSweep.backward raises when q and policy shapes differ."""
+    action_size, state_size = 3, 5
     exp = ExpSweep(n_step=3)
-    mdp = FakeMDP(transition=jnp.ones((A, S, S)))
-    mu = jnp.ones((A, S)) / A
+    mdp = FakeMdp(transition=jnp.ones((action_size, state_size, state_size)))
+    policy = jnp.ones((action_size, state_size)) / action_size
 
     with pytest.raises(AssertionError):
-        exp.backward(jnp.ones((A + 1, S)), mdp, mu)
+        exp.backward(jnp.ones((action_size + 1, state_size)), mdp, policy)
 
 
 def test_chex_exp_sweep_transition_dim_mismatch():
-    """Assert ExpSweep.backward raises when transition dims don't match q_arr."""
-    A, S = 3, 5
+    """Assert ExpSweep.backward raises when transition dimensions differ."""
+    action_size, state_size = 3, 5
     exp = ExpSweep(n_step=3)
-    mdp = FakeMDP(transition=jnp.ones((A, S + 1, S)))
-    mu = jnp.ones((A, S)) / A
-    q = jnp.ones((A, S))
+    mdp = FakeMdp(transition=jnp.ones((action_size, state_size + 1, state_size)))
+    policy = jnp.ones((action_size, state_size)) / action_size
+    q = jnp.ones((action_size, state_size))
 
     with pytest.raises(AssertionError):
-        exp.backward(q, mdp, mu)
+        exp.backward(q, mdp, policy)
