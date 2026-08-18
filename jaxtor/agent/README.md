@@ -1,16 +1,16 @@
 # Agent components
 
-Agent components assemble models, reinforcement-learning heads, and action
-distributions while keeping dynamic data in explicit `State` pytrees.
+Agent components assemble models, reinforcement-learning heads, and action distributions while keeping dynamic data in explicit `State` pytrees.
 
-Composition is structural. A parent accepts only the child capability it uses,
-then nests the child states under its own `State`:
+Composition is structural.
+A parent accepts only the child capability it uses, then nests the child states under its own `State`:
 
 ```text
 Module:              array       -> features
 VHead:               features    -> V(s)
 CategoricalHead:     features    -> categorical distribution
 VPi:                 observation -> {V(s), distribution}
+Ou:                  observation -> correlated bounded action
 VPiNextVInference:   sequence    -> {V(s_t), pi(s_t), V(s_{t+1})}
 ```
 
@@ -20,13 +20,12 @@ The names distinguish how an action-value is represented and evaluated.
 
 | Name | Meaning |
 | --- | --- |
-| `Qfn` | A state-bound function `a -> Q(s, a)`, exposed through `evaluate(act)`. |
 | `Qvec` | The finite-action vector `[Q(s, a_1), ..., Q(s, a_A)]`. |
-| `Q` / `q` | An evaluated scalar `Q(s, a)`. Lowercase `q` is used for values. |
+| `Q` / `q` | An evaluated scalar `Q(s, a)` that an agent's `q` method computes from observations and actions. |
 | `Qsa` | A model that takes `(s, a)` directly and returns `q`. |
 
-`Qsa` describes the input signature. Continuous-action critics commonly use
-this signature, but it does not require a continuous action space.
+`Qsa` describes the input signature.
+Continuous-action critics commonly use this signature, but it does not require a continuous action space.
 
 ## Components
 
@@ -42,10 +41,11 @@ this signature, but it does not require a continuous action space.
 
 | Component | Requires | Produces |
 | --- | --- | --- |
-| `Pi` | An observation body and policy head. | `Pred(pi)` or a selected action. |
-| `VPi` | An observation body, value head, and policy head. | `Pred(v, pi)` or a selected action. |
-| `VQPi` | An observation body, value head, finite-action Q head, and policy head. | `Pred(v, q, pi)` or a selected action. |
-| `Naf` | An observation body plus value, location, and precision heads. | `Pred(v, qfn, pi)` or a selected action. |
+| `Pi` | An observation body and policy head. | A policy through `pi`, or a selected action. |
+| `VPi` | An observation body, value head, and policy head. | `ValuePolicy(v, pi)` through `vpi`, a value through `v`, or a selected action. |
+| `VQPi` | An observation body, value head, finite-action Q head, and policy head. | `ValueQPolicy(v, q, pi)` through `vqpi`, or a selected action. |
+| `Quadratic` | An observation body plus value, location, and precision heads. | An evaluated value through `v`, `Q(s, a)` through `q`, or the maximizing action. |
+| `Ou` | An action-selecting agent, key, and initial action-shaped noise. | A bounded action with temporally correlated exploration and nested state. |
 
 ### Heads
 
@@ -70,9 +70,8 @@ this signature, but it does not require a continuous action space.
 
 | Component | Requires | Produces |
 | --- | --- | --- |
-| `VNextVInference` | A sequence with `obs`, `nobs`, `term`, and `trun`; an agent whose prediction has `v`. | `Inference(v_tm1, v_t)` aligned to the sequence. |
-| `VPiNextVInference` | The same sequence; an agent whose prediction has `v` and `pi`. | `Inference(v_tm1, pi_tm1, v_t)` aligned to the sequence. |
-| `QfnVnextInference` | A sequence with actions; an agent whose prediction has `v` and `qfn`. | `Inference(q_t, v_t)` aligned for RLax off-policy returns. |
+| `VPiNextVInference` | A sequence with `obs`, `nobs`, `term`, and `trun`; an agent providing `vpi` and `v`. | `Inference(v_tm1, pi_tm1, v_t)` for policy-gradient returns. |
+| `QNextVInference` | A sequence with actions; an agent providing `q` and `v`. | `Inference(q_t, v_t)` for RLax off-policy returns. |
 
 ### State helpers
 
@@ -91,6 +90,8 @@ this signature, but it does not require a continuous action space.
 | `Transform` | `In` and `State`. | `Out` and updated `State`. |
 | `Normalizer` | A value and normalization state. | A normalized value and state; `update` produces updated state. |
 | `Distribution` | A key for `sample` or action for `evaluate`. | An action, evaluation, or deterministic mode. |
+| `VPiAgent` | Observations and agent state. | Values through `v`, or joint values and policies through `vpi`. |
+| `QVAgent` | Observations, actions, and agent state. | Action-values through `q`, or values through `v`. |
 
 ## Quickstart
 
@@ -100,10 +101,10 @@ Use `Pi` when acting requires only a policy:
 from jaxtor.agent import CategoricalHead, Pi
 
 pi = CategoricalHead(n_actions=n_actions, logits=policy_net)
-agent = Pi(body=body, pi=pi)
+agent = Pi(body=body, policy=pi)
 state = agent.init(key, body=body_state, pi=pi.init(policy_net_state))
 
-prediction, state = agent.apply(obs, state)
+policy, state = agent.pi(obs, state)
 action, state = agent.act(obs, state)
 ```
 
@@ -114,39 +115,48 @@ from jaxtor.agent import CategoricalHead, VHead, VPi
 
 agent = VPi(
     body=body,
-    v=VHead(net=value_net),
-    pi=CategoricalHead(n_actions=n_actions, logits=policy_net),
+    value=VHead(net=value_net),
+    policy=CategoricalHead(n_actions=n_actions, logits=policy_net),
 )
 
-prediction, state = agent.apply(obs, state)
+value_policy, state = agent.vpi(obs, state)
+value, state = agent.v(obs, state)
 action, state = agent.act(obs, state)
 ```
 
-Use `Naf` for a diagonal normalized advantage function:
+Use `Quadratic` for a diagonal normalized advantage function:
 
 ```python
-action, state = naf.act(obs, state)
-pred, state = naf.apply(obs, state)
-q = pred.qfn.evaluate(action)
-logp = pred.pi.evaluate(action).logp
+action, state = agent.act(obs, state)
+value, state = agent.v(obs, state)
+q, state = agent.q(obs, action, state)
+```
+
+Wrap a deterministic agent when physical control benefits from persistent exploration:
+
+```python
+from jaxtor.agent import Ou
+
+behavior = Ou(agent=deterministic_agent, sigma=0.1)
+state = behavior.init(key, jnp.zeros((n_envs, act_size)), agent_state)
+action, state = behavior.act(obs, state)
 ```
 
 ## Details
 
-### Acting and prediction
+### Semantic endpoints
 
-`apply` returns every configured prediction. `act` evaluates only the body and
-policy dependencies required to select an action. Setting `deterministic=True`
-selects the distribution mode.
+Agents expose the computations their algorithms request: `pi`, `v`, `q`, or a shared endpoint such as `vpi`.
+`act` evaluates only the dependencies required to select an action.
+Policy agents select a distribution sample or mode, while `Quadratic` selects its maximizing action.
 
 ### Trainable state
 
-`Param` marks trainable leaves without changing their JAX behavior. `partition`
-returns complementary trainable and frozen trees, and `combine` reconstructs
-the complete state after an optimizer update.
+`Param` marks trainable leaves without changing their JAX behavior.
+`partition` returns complementary trainable and frozen trees, and `combine` reconstructs the complete state after an optimizer update.
 
 ### Sequence inference
 
-The inference components replay an agent over observations collected by
-`Roll`. Natural terminations receive a zero successor value, while truncations
-and open sequence tails evaluate their true successor observation.
+The inference components replay an agent over observations collected by `Roll`.
+They return every stored successor value unchanged.
+The consuming RLax calculation owns terminal discounting.

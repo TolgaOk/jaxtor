@@ -38,28 +38,21 @@ flowchart TB
         agent_api(["Agent protocol<br/>act(observation, state)<br/>→ action · state"])
         imc["Imc<br/>select action · advance MC<br/>state: mc · agent"]
         imc_api(["Sampler protocol<br/>sample(state) → transition · state"])
-        loaded_agent_api(["Loaded agent protocol<br/>apply(observation, state)<br/>→ output · state"])
-        output[["Agent output<br/>act · learning data"]]
         agent_api --> imc
         mc_api --> imc
         imc --> imc_api
-        loaded_agent_api --> output
     end
 
     subgraph collection["4 · COLLECT / EVALUATE"]
         direction LR
         roll["Roll<br/>scan any sampler over T steps<br/>sequence: stacked samples"]
-        loaded_roll["LoadedRoll<br/>predict endpoints · advance MC over T steps<br/>sequence: dec · mc · succ<br/>state: mc · agent"]
         ep_stats["EpisodeStats<br/>partial episodes · completed sums<br/>state: return · length · count"]
         mc_eval["McEval<br/>sampled episode metrics"]
     end
 
     imc_api --> roll
     imc_api --> mc_eval
-    output --> loaded_roll
-    mc_api --> loaded_roll
     roll -->|transition sequence| ep_stats
-    loaded_roll -->|MC sequence| ep_stats
 
     subgraph tabular_branch["TABULAR OPERATIONS"]
         direction LR
@@ -86,7 +79,6 @@ flowchart TB
     end
 
     roll -->|aligned sequence| update
-    loaded_roll -->|loaded sequence| update
     sweep -->|batched transitions| update
     exp_sweep -->|value / occupancy sequences| update
     ep_stats -->|training episode metrics| report
@@ -102,11 +94,11 @@ flowchart TB
     classDef consumer fill:#FFFFFF,stroke:#7C8798,color:#273444,stroke-width:1.2px,stroke-dasharray:5 3;
 
     class tabular,gymnax,mjx,gym adapter;
-    class env_api,mc_api,agent_api,loaded_agent_api,imc_api,value_api protocol;
+    class env_api,mc_api,agent_api,imc_api,value_api protocol;
     class mc,vecmc sampler;
-    class imc,roll,loaded_roll interactionNode;
+    class imc,roll interactionNode;
     class ep_stats,mc_eval,sweep,exp_sweep,tabular_eval analysis;
-    class output,mdp data;
+    class mdp data;
     class update,report consumer;
 
     style environments fill:#F8FAFD,stroke:#C8D5E6,stroke-width:1px,color:#425466
@@ -121,15 +113,17 @@ flowchart TB
 Solid arrows show runtime composition and data flow. Dotted arrows show structural
 relationships. Components are configured objects, while dynamic data lives in
 explicit state pytrees. The composition can be wrapped in `jit`; `VecMc` uses
-`vmap`, while `Roll`, `LoadedRoll`, `EpisodeStats`, and `McEval` use `scan`.
+`vmap`, while `Roll`, `EpisodeStats`, and `McEval` use `scan`.
 Gradient transforms remain available along pure-JAX environment paths.
 
 ## Prediction and learning composition
 
 Agent components form a state tree that mirrors their configured children.
-Sampling consumes only `act`, while inference components replay the same agent
-through `apply`. This keeps collection small and leaves target computation in
-the algorithm that defines it.
+Sampling consumes only `act`. Inference components call only the semantic
+endpoints they require, such as `v`, `vpi`, or `q`. This keeps collection small
+and leaves target computation in the algorithm that defines it. An agent
+wrapper such as `Ou` can wrap `act` for stateful exploration without changing
+the learning endpoints.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui, sans-serif","fontSize":"15px","lineColor":"#718096","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":40,"padding":12}}}%%
@@ -141,9 +135,8 @@ flowchart LR
         body["Body transform<br/>observation → features"]
         vhead["VHead / QHead / QsaHead<br/>semantic values"]
         pihead["CategoricalHead / DiagNormalHead<br/>policy parameters"]
-        dist["Categorical / DiagNormal<br/>pure distributions"]
-        select["Draw / Mode<br/>action selection"]
-        agent["VPi / VQPi<br/>apply → prediction<br/>act → action"]
+        dist["Categorical / DiagNormal / Normal<br/>pure distributions"]
+        agent["VPi / VQPi / Quadratic<br/>v · q · vpi · vqpi<br/>act → action"]
 
         module --> norm --> body
         module --> vhead
@@ -152,7 +145,6 @@ flowchart LR
         body --> pihead
         vhead --> agent
         dist --> agent
-        select --> agent
     end
 
     subgraph collect["COLLECT"]
@@ -168,7 +160,7 @@ flowchart LR
     subgraph prepare["PREPARE"]
         direction TB
         rew["RewardNorm<br/>explicit return state"]
-        inference["VPiNextVInference<br/>agent replay + successor alignment"]
+        inference["VPiNextVInference<br/>dense agent replay"]
         infer[["Inference<br/>v_tm1 · pi_tm1 · v_t"]]
         target["RLax TD(λ)<br/>algorithm target"]
         batch[["Algorithm batch"]]
@@ -186,7 +178,7 @@ flowchart LR
     end
 
     agent -->|act| imc
-    agent -->|apply| inference
+    agent -->|v · vpi · q| inference
     seq --> rew
     seq --> inference
     seq --> batch
@@ -200,7 +192,7 @@ flowchart LR
     classDef data fill:#F2F4F7,stroke:#7C8798,color:#273444,stroke-width:1.2px;
     classDef learnNode fill:#E8F0FE,stroke:#4E73A8,color:#172A46,stroke-width:1.4px;
 
-    class module,norm,body,vhead,pihead,dist,select,agent model;
+    class module,norm,body,vhead,pihead,dist,agent model;
     class imc,roll,stats sampler;
     class rew,inference,target,mini prepareNode;
     class seq,infer,batch data;
