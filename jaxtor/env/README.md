@@ -1,95 +1,58 @@
 # Environment adapters
 
-All backends expose the same `Env` protocol.
+Every adapter exposes the same `Env` protocol and can be passed to sampling components such as `Mc`.
 
-## `GymEnv` with [Gymnasium](https://github.com/Farama-Foundation/Gymnasium)
+## Components
 
-Wraps CPU-based gym envs (MuJoCo, Atari, classic control) and makes them `jit`/`vmap` compatible via `io_callback` + `custom_vmap`, so they work with the rest of the `jaxtor` components out of the box. Omitting `num_envs` creates a scalar environment for `Mc`. Passing a positive integer, including one, creates a sync or async vector runtime for `VecMc`. However, we gain no JIT speedup or `grad` compatibility, since the envs run outside JAX, unlike gymnasium's own [JAX support](https://gymnasium.farama.org/main/api/functional/), which requires reimplementing envs in pure JAX.
+| Module | Component and options | Backend |
+| --- | --- | --- |
+| `gymnasium` | `GymEnv`; registered environments through `make`, custom runtimes through `from_factory`, optional `async_envs=True` | Host CPU through `io_callback` |
+| `envpool` | `GymEnv`; any environment supported by the installed EnvPool version | Vectorized host CPU |
+| `gymnax` | `GymnaxEnv`; any environment supported by the installed Gymnax version | Pure JAX |
+| `mjx` | `MjxEnv`; `Hopper-v5`, `Walker2d-v5`, `HalfCheetah-v5`, `Swimmer-v5` | MJX with XLA or NVIDIA Warp |
+| `tabular` | `TabularEnv`; `mid-garnet`, `graph`, `cliffworld`, `cliff-walking`, `four-rooms`, `frozen-lake` | Exact tabular JAX MDPs |
 
-```python
-from jaxtor.env import gymnasium
-
-# A numeric size allocates a vector runtime for VecMc.
-env = gymnasium.make("Hopper-v5", num_envs=16, async_envs=True)
-```
-
-## `GymEnv` with [EnvPool](https://github.com/sail-sg/envpool)
-
-EnvPool supplies fast vectorized CPU environments through the same `GymEnv`
-interface. Its native autoreset behavior is adapted so `Mc` still owns episode
-boundaries.
-
-```python
-from jaxtor.env import envpool
-
-env = envpool.make("Hopper-v5", num_envs=16, max_episode_steps=1000)
-```
-
-## `MjxEnv` with [MuJoCo MJX](https://mujoco.readthedocs.io/en/stable/mjx.html)
-
-GPU-native MuJoCo (MJX): pure-JAX, `jit`/`vmap`/`grad`-compatible, on-device. Reuses the exact Gymnasium v5 XML and obs/reward/termination, so it matches `gymnasium.make(name)` **one-to-one** (machine precision under `float64`).
-
-```python
-from jaxtor.env import mjx
-
-env = mjx.make("Hopper-v5")                          # MJX-JAX (XLA), default
-env = mjx.make("Hopper-v5", impl="warp", nconmax=..., njmax=...)  # NVIDIA Warp
-```
-
-Supported: `Hopper-v5`, `Walker2d-v5`, `HalfCheetah-v5`, `Swimmer-v5`.
-
-**Excluded (Ant/Humanoid):** MJX's collision algorithm differs from CPU MuJoCo,
-so 3D multi-contact dynamics and `cfrc_ext` contact forces diverge from
-Gymnasium. Gymnasium's own [MJX port](https://github.com/Farama-Foundation/Gymnasium/pull/834)
-encountered the same limitation.
-
-**Warp backend:** On NVIDIA GPUs, `impl="warp"` selects [MuJoCo
-Warp](https://mujoco.readthedocs.io/en/latest/mjwarp/). It is faster on
-contact-rich scenes, but it is not differentiable or parity-tested and requires
-`mujoco_warp` with CUDA.
-
-## `GymnaxEnv` with [Gymnax](https://github.com/RobertTLange/gymnax)
-
-Pure-JAX environments, fully `jit`/`vmap`/`grad`-compatible. All computation stays on-device.
+## Quickstart
 
 ```python
 from jaxtor.env import gymnax
+from jaxtor.sampler import Mc
 
 env = gymnax.make("CartPole-v1")
+mc = Mc(max_eps_len=500, env=env)
 ```
 
-## `tabular` with [jaxdp](https://github.com/TolgaOk/jaxdp)
+## Details
 
-Tabular MDPs with exact transition matrices.
+### Common interface
 
-### Pre-defined environments
+`init` creates backend state, `reset` begins an episode, `step` returns the next observation, reward, termination, and truncation, and `obs` reads the current observation.
+Episode resets and time limits are owned by `Mc`.
 
-```python
-from jaxtor.env import tabular
+### Gymnasium and EnvPool
 
-env = tabular.make("mid-garnet")      # 50S, 10A random MDP
-env = tabular.make("graph")           # 6-state graph (Fastest Convergence for Q-Learning)
-env = tabular.make("cliffworld")      # right-side cliff gridworld
-env = tabular.make("cliff-walking")   # Sutton & Barto classic cliff walking
-env = tabular.make("four-rooms")      # Sutton, Precup, Singh 1999
-env = tabular.make("frozen-lake")     # 4x4 frozen lake with p_slip=1/3
-```
+`gymnasium.make` creates a configured `GymEnv`.
+Executing `init` creates its process-local runtime.
+Mapping `init` with `jax.vmap` creates one runtime whose capacity matches the complete key batch.
+Call `env.close(state)` when the runtime is no longer needed and outside JAX transformations.
 
-### Custom configurations
+Gymnasium and EnvPool execute on the host.
+JIT allows them to compose with JAX code, but it does not provide device acceleration or gradients through their environment steps.
+EnvPool always creates a vector runtime, and its native autoreset behavior is adapted so `Mc` retains episode ownership.
 
-```python
-env = tabular.garnet.make(tabular.garnet.Config(state_size=100, action_size=4))
-env = tabular.graph.make(tabular.graph.Config(max_eps_len=500))
-env = tabular.gridworld.make(tabular.gridworld.Config(
-    board=(
-        "#####",
-        "#  @#",
-        "# #X#",
-        "#P  #",
-        "#####",
-    ),
-    p_slip=0.1,
-))
-```
+### Pure-JAX environments
 
-Board characters: `#` wall, `P` start, `@` terminal goal, `X` penalty, `+` reward, `=` absorbing, ` ` passable.
+Gymnax environments support `jit`, `vmap`, and gradients directly.
+MJX uses the Gymnasium v5 XML assets and matching observation, reward, and termination definitions for its four supported locomotion environments.
+
+MJX uses its JAX/XLA backend by default.
+`impl="warp"` selects MuJoCo Warp on NVIDIA GPUs and accepts `nconmax` and `njmax`.
+The Warp path is not differentiable or parity-tested.
+Ant and Humanoid are excluded because MJX does not reproduce their CPU MuJoCo contact dynamics and contact-force observations.
+
+### Tabular environments
+
+`tabular.make(name)` creates one of the named environments in the component table.
+Custom configurations are available through `tabular.garnet.make(config)`, `tabular.graph.make(config)`, and `tabular.gridworld.make(config)`.
+
+Gridworld boards use `#` for walls, `P` for starts, `@` for terminal goals, `X` for penalties, `+` for rewards, `=` for absorbing cells, and spaces for passable cells.

@@ -1,56 +1,46 @@
 # Evaluation
 
-## Sampled episodes
+Evaluation components produce metrics while threading the evaluated state explicitly.
 
-`McEval` runs a fixed number of sampler steps, aggregates completed episodes,
-and returns the sampler state advanced by those steps. This example assumes the
-agent, vectorized Markov chain, and their initial states already exist.
+## Components
+
+| Component | Role |
+| --- | --- |
+| `McEval` | Samples an induced Markov chain for a fixed number of steps and summarizes completed episodes. |
+| `TabularEval` | Measures convergence of a tabular Q-value agent. |
+| `optimal_q` | Computes reference optimal Q-values by policy iteration. |
+
+`TabularEval` and `optimal_q` require the `env` optional dependency.
+
+## Quickstart
 
 ```python
 import jax
 
 from jaxtor.eval import McEval
-from jaxtor.sampler import Imc
-
-imc = Imc(agent=agent, mc=vec_mc)
-state = imc.init(mc=mc_state, agent=agent_state)
 
 evaluator = McEval(imc=imc, episode_len=1_000)
-evaluate = jax.jit(evaluator.evaluate)
-
-metrics, state = evaluate(state)
-
-print(metrics.avg_eps_rew)
-print(metrics.n_episodes)
-
-transition, state = imc.sample(state)
+metrics, state = jax.jit(evaluator.evaluate)(state)
 ```
 
-## Tabular convergence
+## Details
 
-`TabularEval` compares the current Q-table with its previous value, the Bellman
-optimality target, and known optimal Q-values. The agent provides
-`q_vals(agent_state, states)`, which returns a Q-table with shape `(A, S)`.
+### Sampled episodes
+
+`McEval` advances its sampler state and reports statistics for episodes that finish during the evaluation window.
+Metrics include mean, standard deviation, minimum, and maximum return, mean episode length, completed episode count, and truncation rate.
+
+### Tabular convergence
+
+`TabularEval` consumes an agent with `q_vals(observations, state)`.
+It compares the current Q-table with its previous value, the Bellman optimality target, and known optimal Q-values.
 
 ```python
-import jax
-
-from jaxtor.eval import TabularEval, optimal_q
-
 q_star = optimal_q(mdp, gamma=0.99)
-
-evaluator = TabularEval(
-    mdp=mdp,
-    gamma=0.99,
-    agent=agent,
-    opt_q=q_star,
-)
+evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=q_star)
 state = evaluator.init(agent_state)
-evaluate = jax.jit(evaluator.evaluate)
 
-metrics, state = evaluate(state, updated_agent_state)
-
-print(metrics.bellman_linf)
-print(metrics.value_norm)
-print(metrics.iteration)
+metrics, state = evaluator.evaluate(updated_agent_state, state)
 ```
+
+The metrics cover Q-value change, Bellman error, error against `q_star`, and the quality and stability of the greedy policy.
