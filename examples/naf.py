@@ -1,34 +1,80 @@
-"""NAF on Hopper-v5 (Gymnasium/MuJoCo) using jaxtor, rlax, optax, equinox.
+"""Normalized Advantage Functions for continuous-action Gymnasium environments.
 
-Normalized Advantage Functions from Gu et al. (2016) "Continuous Deep
-Q-Learning with Model-based Acceleration", arXiv:1603.00748.
+Each iteration collects a fixed sequence, computes off-policy Q(λ) targets
+once, and reuses the fixed batch for several optimization epochs. The
+configuration uses neither a replay buffer nor a target network.
 
-Q(s,a) = V_θ(s) - ½ Σᵢ pᵢ(s) (aᵢ - μᵢ(s))²
+The `Quadratic` agent implements a diagonal normalized advantage function:
 
-where p(s) = softplus(net(s)) + ε is a diagonal precision vector.
-Exploration: aᵢ = μᵢ(s) + σ / √pᵢ(s) · εᵢ,  ε ~ N(0, I).
+    Q(s, a) = V(s) - 1/2 sum_i P_i(s) (a_i - mu_i(s))^2
+    mu(s) = tanh(mu_net(s))
 
-Training:
-1. Collect large rollout with scaled P⁻¹-shaped exploration noise
-2. Compute off-policy Q(λ) returns using target network
-3. Train Q via MSE over multiple epochs
-4. Polyak-update target network
+Collection adds persistent exploration around the deterministic action:
 
-- jaxtor:
-  - rollout sampler: GymEnv -> Mc -> VecMc -> Imc -> Roll
-  - evaluation: GymEnv -> Mc -> VecMc -> Imc -> Eval
-- equinox: V, μ, p networks (separate MLPs).
-- optax: Adam optimizer with gradient clipping and LR annealing.
-- rlax: general_off_policy_returns_from_q_and_v.
+    noise_t = (1 - theta) noise_{t-1} + sigma epsilon_t
+    a_t = clip(mu(s_t) + noise_t, -1, 1)
 
+Components::
+
+    Composition
+    │
+    ├── agent: Quadratic
+    │   ├── body: ObsNorm
+    │   │   └── RunningStats
+    │   ├── value: VHead
+    │   │   └── Equinox MLP
+    │   ├── loc: tanh-bounded Equinox MLP
+    │   └── p: Equinox MLP
+    ├── behavior: Ou
+    │   └── agent
+    ├── mc: VecMc
+    │   └── Mc
+    │       └── Gymnasium or EnvPool
+    ├── roll: Roll
+    │   └── Imc
+    │       ├── behavior
+    │       └── mc
+    ├── inference: QNextVInference
+    │   └── agent
+    ├── rew_norm: RewardNorm
+    │   └── RunningStats
+    ├── stats: EpisodeStats
+    ├── batches: Minibatches
+    └── Eval
+        └── Imc
+            ├── deterministic agent
+            └── mc
+
+State::
+
+    TrainState
+    ├── roll: imc state (behavior + mc)
+    ├── opt: optimizer state
+    ├── stats: episode statistics
+    └── rew_norm: reward-normalization state
+
+Flow::
+
+    Main loop ↻
+    ├→ collect sequence
+    │   ├→ update stats
+    │   ├→ normalize observations and rewards
+    │   └→ freeze Q(λ) targets
+    ├→ epochs ↻
+    │   ├→ shuffle minibatches
+    │   └→ minibatches ↻
+    │       └→ Q loss → gradients → update
+    └→ periodically
+        ├→ report training metrics
+        └→ evaluate deterministic agent
 """
 
 from __future__ import annotations
 
-import math
-import time
+from dataclasses import dataclass as static_dataclass
 from dataclasses import replace
-from typing import Literal
+from functools import partial
+from typing import Any, Literal
 
 import chex
 import equinox as eqx
@@ -39,191 +85,71 @@ import optax
 import rlax
 import tyro
 from chex import dataclass
-from rich import print
-from rich.progress import track
 
+from jaxtor.agent import (
+    Function,
+    Module,
+    Ou,
+    Quadratic,
+    QNextVInference,
+    VHead,
+    combine,
+    partition,
+)
 from jaxtor.env import gymnasium
-from jaxtor.eval.mc import Eval as Evaluator
+from jaxtor.eval.mc import Eval
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
-from jaxtor.util.reward_norm import RewardNorm
-from jaxtor.util.running_stats import RunningStats
+from jaxtor.util import Minibatches, ObsNorm, RewardNorm, RunningStats
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Config
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass
+@static_dataclass(frozen=True)
 class Config:
-    """Training configuration for tyro CLI.
-
-    Tuned hyperparameters per environment:
-        Hopper-v5:      --noise-scale 0.1 --noise-eps 1.0  (3085 @ 100 iters)
-        Walker2d-v5:    --noise-scale 0.1 --noise-eps 1.0  (2743 @ 100 iters)
-        HalfCheetah-v5: --noise-scale 0.1 --noise-eps 1.0  (4470 @ 100 iters)
-        Ant-v5:         --noise-scale 0.1 --noise-eps 1.0  (4194 @ 500 iters)
-    """
+    """Command-line NAF configuration."""
 
     env_id: str = "Hopper-v5"
+    env_backend: Literal["gymnasium", "envpool"] = "gymnasium"
+    async_envs: bool = True
     n_iters: int = 500
     n_envs: int = 16
+    n_eval_envs: int = 10
     seq_len: int = 2048
     max_eps_len: int = 1000
-    seed: int = 0
-
-    v_hiddens: tuple[int, ...] = (128, 128)
-    mu_hiddens: tuple[int, ...] = (64, 64)
-    p_hiddens: tuple[int, ...] = (128, 128)
-
+    v_width: int = 128
+    v_depth: int = 2
+    mu_width: int = 64
+    mu_depth: int = 2
+    p_width: int = 128
+    p_depth: int = 2
     lr: float = 3e-4
     lr_schedule: Literal["constant", "linear"] = "linear"
     max_grad_norm: float = 0.5
-
     gamma: float = 0.99
-    target_update_freq: int = 10
     trace_lambda: float = 0.9
-    noise_eps: float = 1.0
+    p_eps: float = 1.0
     noise_scale: float = 0.1
-
-    n_epochs: int = 10
+    noise_theta: float = 0.15
+    n_epochs: int = 5
     n_batches: int = 32
-
-    normalize_obs: bool = True
-    normalize_reward: bool = True
-    layer_norm: bool = True
+    norm_obs: bool = True
+    norm_rew: bool = True
     eval_freq: int = 5
-    eval_envs: int = 10
-    async_envs: bool = True
-    env_backend: str = (
-        "gymnasium"  # "gymnasium" (any env) | "envpool" (fast CPU MuJoCo)
-    )
+    seed: int = 0
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Networks (orthogonal init per Huang et al. 2022)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _ortho_init(key: jax.Array, shape: tuple, gain: float = 1.0) -> jax.Array:
-    """Orthogonal weight initialization."""
-    return jax.nn.initializers.orthogonal(scale=gain)(key, shape, jnp.float32)
-
-
-class MLP(eqx.Module):
-    """Multi-layer perceptron with tanh activations and orthogonal init."""
-
-    layers: list
-    layer_norms: list | None
-
-    def __init__(
-        self,
-        in_dim: int,
-        hiddens: tuple[int, ...],
-        out_dim: int,
-        *,
-        output_gain: float = math.sqrt(2),
-        layer_norm: bool = False,
-        key: jax.Array,
-    ):
-        keys = jrd.split(key, len(hiddens) + 1)
-        dims = [in_dim, *hiddens, out_dim]
-        self.layers = []
-        for i in range(len(dims) - 1):
-            gain = output_gain if i == len(dims) - 2 else math.sqrt(2)
-            w = _ortho_init(keys[i], (dims[i], dims[i + 1]), gain)
-            b = jnp.zeros(dims[i + 1])
-            self.layers.append((w, b))
-        if layer_norm:
-            self.layer_norms = [(jnp.ones(d), jnp.zeros(d)) for d in hiddens]
-        else:
-            self.layer_norms = None
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        for i, (w, b) in enumerate(self.layers[:-1]):
-            x = x @ w + b
-            if self.layer_norms is not None:
-                scale, bias = self.layer_norms[i]
-                x = scale * jax.nn.standardize(x, axis=-1) + bias
-            x = jnp.tanh(x)
-        w, b = self.layers[-1]
-        return x @ w + b
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Agent (deterministic policy with exploration noise)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Agent:
-    """Deterministic policy agent for NAF.
-
-    Q(s,a) = V(s) - ½ Σᵢ pᵢ(s) (aᵢ - μᵢ(s))²
-
-    where p(s) = softplus(net(s)) + ε, a diagonal precision vector.
-
-    Action sampling:
-        deterministic=False: a = μ(s) + σ / √p(s) · ε,  ε ~ N(0, I).
-        deterministic=True:  a = μ(s).
-    """
-
-    deterministic: bool = False
-    noise_eps: float = 0.1
-    noise_scale: float = 0.5
-    obs_norm: RunningStats | None = None
-
-    @dataclass
-    class State:
-        key: jax.Array
-        v_net: MLP
-        mu_net: MLP
-        p_net: MLP
-        obs_stats: RunningStats.State
-
-    def _precision(self, obs: jax.Array, state: Agent.State) -> jax.Array:
-        """Diagonal precision p = softplus(net(s)) + ε."""
-        return jax.nn.softplus(state.p_net(obs)) + self.noise_eps
-
-    def act(
-        self,
-        obs: jax.Array,
-        state: Agent.State,
-    ) -> tuple[jax.Array, Agent.State]:
-        """Select a deterministic or exploratory NAF action."""
-        policy_obs = (
-            self.obs_norm.normalize(obs, state.obs_stats)
-            if self.obs_norm is not None
-            else obs
-        )
-        mu_raw = state.mu_net(policy_obs)
-        if self.deterministic:
-            action = jnp.tanh(mu_raw)
-        else:
-            key, k = jrd.split(state.key)
-            p = self._precision(policy_obs, state)
-            eps = jrd.normal(k, mu_raw.shape)
-            action = jnp.tanh(mu_raw + self.noise_scale * eps / jnp.sqrt(p))
-            state = replace(state, key=key)
-        return action, state
-
-    def q_val(self, obs: jax.Array, act: jax.Array, state: Agent.State) -> jax.Array:
-        """Q(s,a) = V(s) - ½ Σᵢ pᵢ (aᵢ - μᵢ)²."""
-        v = state.v_net(obs).squeeze(-1)
-        mu = jnp.tanh(state.mu_net(obs))
-        p = self._precision(obs, state)
-        diff = act - mu
-        return v - 0.5 * jnp.sum(p * diff**2, axis=-1)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Training state and step
-# ──────────────────────────────────────────────────────────────────────────────
+def module(fn: object) -> tuple[Module[jax.Array], Module.State[jax.Array]]:
+    """Split an initialized Equinox module into component and state."""
+    if not isinstance(fn, Function):
+        raise TypeError("an Equinox module must be callable")
+    params, static = eqx.partition(fn, eqx.is_array)
+    if not isinstance(params, Function) or not isinstance(static, Function):
+        raise TypeError("both Equinox partitions must remain callable")
+    component: Module[jax.Array] = Module(static=static)
+    return component, component.init(params)
 
 
 @dataclass
 class Batch:
-    """Flattened minibatch for NAF updates."""
+    """Fixed observations, actions, and Q(λ) targets."""
 
     obs: jax.Array
     act: jax.Array
@@ -231,349 +157,295 @@ class Batch:
 
 
 @dataclass
-class State:
-    """Flat training state threaded immutably through NAF updates."""
+class Metrics:
+    """Transient metrics from one NAF minibatch update."""
 
-    mc: Mc.State
-    agent: Agent.State
+    loss: chex.Numeric
+    q_mean: chex.Numeric
+    ret_mean: chex.Numeric
+
+
+type NetState = Module.State[jax.Array]
+type AgentState = Quadratic.State[
+    ObsNorm.State, VHead.State[NetState], NetState, NetState
+]
+type BehaviorState = Ou.State[AgentState]
+type RollState = Imc.State[Mc.State[Any], BehaviorState]
+
+
+@dataclass
+class TrainState:
+    """Dynamic state threaded through complete NAF iterations."""
+
+    key: jax.Array
+    roll: RollState
+    opt: optax.OptState
     stats: EpisodeStats.State
-    rew_norm: RewardNorm.State
+    rew_norm: RewardNorm.State[RunningStats.State]
+
+
+@dataclass
+class LearnState:
+    """Parameters and optimizer state carried through NAF learning loops."""
+
+    params: AgentState
     opt: optax.OptState
 
 
-def train_step(
-    state: State,
-    *,
-    agent: Agent,
-    imc: Imc,
-    roll: Roll,
-    stats: EpisodeStats,
-    rew_norm: RewardNorm,
-    tx: optax.GradientTransformation,
-    cfg: Config,
-) -> tuple[State, dict]:
-    """One NAF iteration: collect rollout, compute Q(λ) targets, train Q."""
-    # 1. Collect rollout
-    imc_state = imc.init(state.mc, state.agent)
-    seq, imc_state = roll.sample(imc_state)
-    stats_state = stats.update(seq, state.stats)
-    sam_metrics, stats_state = stats.drain(stats_state)
-    state = replace(
-        state,
-        mc=imc_state.mc,
-        agent=imc_state.agent,
-        stats=stats_state,
-    )
-    dones = jnp.logical_or(seq.term, seq.trun)
+def make_env(config: Config):
+    """Configure one continuous-control environment backend."""
+    match config.env_backend:
+        case "gymnasium":
+            return gymnasium.make(config.env_id, async_envs=config.async_envs)
+        case "envpool":
+            from jaxtor.env import envpool
 
-    # 2. Obs normalization
-    if agent.obs_norm is not None:
-        obs_stats = agent.obs_norm.update(
-            seq.obs.reshape(-1, seq.obs.shape[-1]),
-            state.agent.obs_stats,
-        )
-        state = replace(state, agent=replace(state.agent, obs_stats=obs_stats))
-        obs_n = agent.obs_norm.normalize(seq.obs, state.agent.obs_stats)
-        nobs_n = agent.obs_norm.normalize(
-            seq.nobs,
-            state.agent.obs_stats,
-        )
-    else:
-        obs_n, nobs_n = seq.obs, seq.nobs
-
-    # 3. Reward normalization
-    if cfg.normalize_reward:
-        rewards, rew_state = rew_norm.update(
-            seq.rew,
-            dones,
-            state.rew_norm,
-        )
-        state = replace(state, rew_norm=rew_state)
-    else:
-        rewards = seq.rew
-
-    # 4. Off-policy Q(λ) returns — V_soft = V_θ + const (log det P cancels)
-    discount_t = cfg.gamma * (1.0 - seq.term.astype(jnp.float32))
-    v_t = jax.vmap(jax.vmap(state.agent.v_net))(nobs_n).squeeze(-1)
-    q_t = jax.vmap(jax.vmap(lambda o, a: agent.q_val(o, a, state.agent)))(
-        obs_n[:, 1:], seq.act[:, 1:]
-    )
-    c_t = cfg.trace_lambda * (1.0 - dones[:, :-1].astype(jnp.float32))
-
-    targets = jax.vmap(
-        lambda q, v, r, d, c: rlax.general_off_policy_returns_from_q_and_v(
-            q, v, r, d, c, stop_target_gradients=True
-        )
-    )(q_t, v_t, rewards, discount_t, c_t)
-
-    # 5. Flatten batch
-    batch_size = cfg.n_envs * cfg.seq_len
-    mb_size = batch_size // cfg.n_batches
-    batch = jax.tree.map(
-        lambda x: x.reshape(batch_size, *x.shape[2:]),
-        Batch(obs=obs_n, act=seq.act, ret=targets),
-    )
-
-    # 6. Epoch loop: shuffle and minibatch SGD over fixed targets
-    def epoch_step(state, _):
-        key, perm_key = jrd.split(state.agent.key)
-        state = replace(state, agent=replace(state.agent, key=key))
-        shuffled = jax.tree.map(
-            lambda x: x[jrd.permutation(perm_key, batch_size)], batch
-        )
-
-        def minibatch_step(state, start):
-            mb = jax.tree.map(
-                lambda x: jax.lax.dynamic_slice_in_dim(x, start, mb_size),
-                shuffled,
+            return envpool.make(
+                config.env_id,
+                max_episode_steps=config.max_eps_len,
             )
-            params = (state.agent.v_net, state.agent.mu_net, state.agent.p_net)
-
-            def loss_fn(params):
-                v_net, mu_net, p_net = params
-                s = replace(state.agent, v_net=v_net, mu_net=mu_net, p_net=p_net)
-                q = jax.vmap(lambda o, a: agent.q_val(o, a, s))(mb.obs, mb.act)
-                loss = jnp.mean((q - mb.ret) ** 2)
-                return loss, dict(
-                    q_loss=loss, q_mean=jnp.mean(q), ret_mean=jnp.mean(mb.ret)
-                )
-
-            (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
-            updates, opt_state = tx.update(grads, state.opt, params)
-            new_v, new_mu, new_p = eqx.apply_updates(params, updates)
-            return replace(
-                state,
-                agent=replace(
-                    state.agent,
-                    v_net=new_v,
-                    mu_net=new_mu,
-                    p_net=new_p,
-                ),
-                opt=opt_state,
-            ), info
-
-        starts = jnp.arange(cfg.n_batches) * mb_size
-        state, infos = jax.lax.scan(minibatch_step, state, starts)
-        return state, infos
-
-    state, all_infos = jax.lax.scan(epoch_step, state, length=cfg.n_epochs)
-    infos = jax.tree.map(jnp.mean, all_infos)
-    infos["sam_rew"] = sam_metrics.avg_eps_rew
-
-    # Diagnostics
-    infos["act_mean"] = jnp.mean(jnp.abs(seq.act))
-    infos["act_max"] = jnp.max(jnp.abs(seq.act))
-    mu_vals = jax.vmap(jax.vmap(state.agent.mu_net))(obs_n)
-    infos["mu_mean"] = jnp.mean(jnp.abs(mu_vals))
-    infos["mu_max"] = jnp.max(jnp.abs(mu_vals))
-    infos["v_mean"] = jnp.mean(v_t)
-    infos["v_std"] = jnp.std(v_t)
-    p_vals = jax.vmap(jax.vmap(lambda o: agent._precision(o, state.agent)))(obs_n)
-    infos["p_mean"] = jnp.mean(p_vals)
-    infos["ret_mean"] = jnp.mean(targets)
-    infos["ret_std"] = jnp.std(targets)
-    infos["rew_raw_mean"] = jnp.mean(seq.rew)
-    infos["rew_norm_mean"] = jnp.mean(rewards)
-    return state, infos
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
+cfg = tyro.cli(Config) if __name__ == "__main__" else Config()
+
+(
+    agent_key,
+    env_key,
+    mc_key,
+    update_key,
+    eval_key,
+) = jrd.split(jrd.key(cfg.seed), 5)
 
 
-def _make_env(cfg: Config):
-    """Build the rollout env from the configured backend.
-
-    ``gymnasium`` works for any env; ``envpool`` is fast CPU MuJoCo (its
-    ``max_episode_steps`` is aligned to ``max_eps_len`` so its truncation
-    matches ``Mc``'s).
-    """
-    if cfg.env_backend == "envpool":
-        from jaxtor.env import envpool
-
-        return envpool.make(cfg.env_id, max_episode_steps=cfg.max_eps_len)
-    return gymnasium.make(cfg.env_id, async_envs=cfg.async_envs)
+env = make_env(cfg)
+eval_env = make_env(cfg)
+if len(env.obs_shape) != 1 or len(env.act_shape) != 1:
+    raise ValueError("NAF requires vector observations and continuous vector actions")
+obs_size = env.obs_shape[0]
+act_size = env.act_shape[0]
 
 
-def train(cfg: Config) -> State:
-    """Train NAF and return the final training state."""
-    key = jrd.PRNGKey(cfg.seed)
-    key, v_key, mu_key, a_key, env_key, agent_key, eval_key = jrd.split(key, 7)
-
-    env = _make_env(cfg)
-    eval_env = _make_env(cfg)
-    (obs_dim,) = env.obs_shape
-    (act_dim,) = env.act_shape
-
-    total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_batches
-    if cfg.lr_schedule == "linear":
-        lr = optax.linear_schedule(cfg.lr, 0.0, total_updates)
-    else:
-        lr = cfg.lr
-    tx = optax.chain(
-        optax.clip_by_global_norm(cfg.max_grad_norm),
-        optax.adam(lr, eps=1e-5),
-    )
-
-    obs_rs = RunningStats(clip=10.0) if cfg.normalize_obs else None
-    rew_norm = RewardNorm(
-        gamma=cfg.gamma,
-        rms=RunningStats(),
-        seq_axis=1,
-        clip=10.0,
-    )
-    agent = Agent(
-        deterministic=False,
-        noise_eps=cfg.noise_eps,
-        noise_scale=cfg.noise_scale,
-        obs_norm=obs_rs,
-    )
-    eval_agent = Agent(deterministic=True, obs_norm=obs_rs)
-
-    train_mc = VecMc(
-        mc=Mc(
-            max_eps_len=cfg.max_eps_len,
-            env=env,
-        )
-    )
-    train_imc = Imc(agent=agent, mc=train_mc)
-    roll = Roll(
-        seq_len=cfg.seq_len,
-        seq_axis=1,
-        imc=train_imc,
-    )
-    stats = EpisodeStats(seq_axis=1)
-
-    eval_mc = VecMc(
-        mc=Mc(
-            max_eps_len=cfg.max_eps_len,
-            env=eval_env,
-        )
-    )
-    eval_imc = Imc(agent=eval_agent, mc=eval_mc)
-    evaluator = Evaluator(
-        episode_len=cfg.max_eps_len,
-        imc=eval_imc,
-    )
-
-    v_net = MLP(
-        obs_dim,
-        cfg.v_hiddens,
-        1,
-        output_gain=1.0,
-        layer_norm=cfg.layer_norm,
+behavior_key, v_key, mu_key, p_key = jrd.split(agent_key, 4)
+v, v_state = module(
+    eqx.nn.MLP(
+        in_size=obs_size,
+        out_size=1,
+        width_size=cfg.v_width,
+        depth=cfg.v_depth,
+        activation=jax.nn.tanh,
         key=v_key,
     )
-    mu_net = MLP(
-        obs_dim,
-        cfg.mu_hiddens,
-        act_dim,
-        output_gain=0.01,
-        layer_norm=cfg.layer_norm,
+)
+mu, mu_state = module(
+    eqx.nn.MLP(
+        in_size=obs_size,
+        out_size=act_size,
+        width_size=cfg.mu_width,
+        depth=cfg.mu_depth,
+        activation=jax.nn.tanh,
+        final_activation=jax.nn.tanh,
         key=mu_key,
     )
-    p_net = MLP(
-        obs_dim,
-        cfg.p_hiddens,
-        act_dim,
-        output_gain=1.0,
-        layer_norm=cfg.layer_norm,
-        key=a_key,
+)
+p, p_state = module(
+    eqx.nn.MLP(
+        in_size=obs_size,
+        out_size=act_size,
+        width_size=cfg.p_width,
+        depth=cfg.p_depth,
+        activation=jax.nn.tanh,
+        key=p_key,
     )
-    if (
-        not isinstance(v_net, MLP)
-        or not isinstance(mu_net, MLP)
-        or not isinstance(p_net, MLP)
-    ):
-        raise TypeError("Equinox returned an unexpected module type")
+)
+v_head = VHead(net=v)
 
-    agent_state = Agent.State(
-        key=agent_key,
-        v_net=v_net,
-        mu_net=mu_net,
-        p_net=p_net,
-        obs_stats=RunningStats.State(
-            mean=jnp.zeros(obs_dim),
-            var=jnp.ones(obs_dim),
-            count=jnp.float32(1e-4),
-        ),
+
+norm = ObsNorm(
+    stats=RunningStats(clip=10.0),
+    enabled=cfg.norm_obs,
+)
+agent = Quadratic(
+    act_size=act_size,
+    body=norm,
+    value=v_head,
+    loc=mu,
+    p=p,
+    eps=cfg.p_eps,
+)
+agent_state: AgentState = agent.init(
+    body=norm.init((obs_size,)),
+    v=v_head.init(v_state),
+    loc=mu_state,
+    p=p_state,
+)
+
+
+mc = VecMc(mc=Mc(max_eps_len=cfg.max_eps_len, env=env))
+behavior = Ou(
+    agent=agent,
+    theta=cfg.noise_theta,
+    sigma=cfg.noise_scale,
+)
+imc = Imc(agent=behavior, mc=mc)
+roll = Roll(imc=imc, seq_len=cfg.seq_len, seq_axis=1)
+inference = QNextVInference(agent=agent, seq_axis=1)
+
+
+rew_norm = RewardNorm(
+    gamma=cfg.gamma,
+    rms=RunningStats(),
+    seq_axis=1,
+    clip=10.0,
+    enabled=cfg.norm_rew,
+)
+stats = EpisodeStats(seq_axis=1)
+batches = Minibatches(count=cfg.n_batches, sample_ndim=2)
+total_updates = cfg.n_iters * cfg.n_epochs * cfg.n_batches
+learning_rate = (
+    optax.linear_schedule(cfg.lr, 0.0, total_updates)
+    if cfg.lr_schedule == "linear"
+    else cfg.lr
+)
+optim: Any = optax.chain(
+    optax.clip_by_global_norm(cfg.max_grad_norm),
+    optax.adam(learning_rate, eps=1e-5),
+)
+
+
+eval_mc = VecMc(mc=Mc(max_eps_len=cfg.max_eps_len, env=eval_env))
+eval_imc = Imc(agent=agent, mc=eval_mc)
+evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluate = jax.jit(evaluator.evaluate)
+q_lambda = partial(
+    rlax.general_off_policy_returns_from_q_and_v,
+    stop_target_gradients=True,
+)
+
+
+@jax.jit
+def update(state: TrainState) -> tuple[Metrics, TrainState]:
+    """Collect one sequence, freeze Q(λ) targets, and optimize NAF."""
+    seq, roll_state = roll.sample(state.roll)
+    stats_state = stats.update(seq, state.stats)
+    done = seq.term | seq.trun
+    rew, rew_norm_state = rew_norm.update(seq.rew, done, state.rew_norm)
+    seq = replace(seq, rew=rew)
+    agent_state = replace(
+        roll_state.agent.agent,
+        body=norm.update(seq.obs, roll_state.agent.agent.body),
     )
+    infer = inference.apply(seq, agent_state)
 
-    env_keys = jrd.split(env_key, cfg.n_envs)
-    state = State(
-        mc=train_mc.init(
-            jrd.split(key, cfg.n_envs),
-            jax.vmap(env.init)(env_keys),
-        ),
-        agent=agent_state,
-        stats=stats.init(batch_shape=(cfg.n_envs,)),
-        rew_norm=rew_norm.init(batch_shape=(cfg.n_envs,)),
-        opt=tx.init(eqx.filter((v_net, mu_net, p_net), eqx.is_inexact_array)),
+    ret = jax.vmap(q_lambda)(
+        infer.q_t,
+        infer.v_t,
+        seq.rew,
+        cfg.gamma * (~seq.term).astype(seq.rew.dtype),
+        cfg.trace_lambda * (~done[:, :-1]).astype(seq.rew.dtype),
     )
+    batch = Batch(obs=seq.obs, act=seq.act, ret=ret)
+    parts = partition(agent_state)
 
-    @jax.jit
-    def step(state):
-        return train_step(
-            state,
-            agent=agent,
-            imc=train_imc,
-            roll=roll,
-            stats=stats,
-            rew_norm=rew_norm,
-            tx=tx,
-            cfg=cfg,
+    def loss(params: AgentState, batch: Batch) -> tuple[chex.Numeric, Metrics]:
+        q, _ = agent.q(batch.obs, batch.act, combine(params, parts.frozen))
+        q_loss = jnp.mean((q - batch.ret) ** 2)
+        return q_loss, Metrics(
+            loss=q_loss,
+            q_mean=jnp.mean(q),
+            ret_mean=jnp.mean(batch.ret),
         )
 
-    @jax.jit
-    def evaluate(imc_state):
-        return evaluator.evaluate(imc_state)
-
-    print(f"[bold green]{cfg.env_id} NAF[/bold green]")
-    t0 = time.time()
-
-    for i in track(range(cfg.n_iters), description="Training"):
-        state, metrics = step(state)
-
-        if (i + 1) % cfg.eval_freq == 0:
-            eval_key, e_env_key, k = jrd.split(eval_key, 3)
-            eval_env_keys = jrd.split(e_env_key, cfg.eval_envs)
-            eval_mc_state = eval_mc.init(
-                jrd.split(k, cfg.eval_envs),
-                jax.vmap(eval_env.init)(eval_env_keys),
+    def epoch(
+        carry: LearnState,
+        key: jax.Array,
+    ) -> tuple[LearnState, Metrics]:
+        def minibatch(
+            carry: LearnState,
+            batch: Batch,
+        ) -> tuple[LearnState, Metrics]:
+            (_, metrics), grads = jax.value_and_grad(loss, has_aux=True)(
+                carry.params,
+                batch,
             )
-            m, eval_state = evaluate(
+            updates, opt = optim.update(grads, carry.opt, carry.params)
+            return LearnState(
+                params=eqx.apply_updates(carry.params, updates),
+                opt=opt,
+            ), metrics
+
+        return jax.lax.scan(minibatch, carry, batches.shuffle(key, batch))
+
+    key, epoch_key = jrd.split(state.key)
+    learn, metrics = jax.lax.scan(
+        epoch,
+        LearnState(params=parts.params, opt=state.opt),
+        jrd.split(epoch_key, cfg.n_epochs),
+    )
+    agent_state = combine(learn.params, parts.frozen)
+    return jax.tree.map(jnp.mean, metrics), replace(
+        state,
+        key=key,
+        roll=replace(
+            roll_state,
+            agent=replace(roll_state.agent, agent=agent_state),
+        ),
+        opt=learn.opt,
+        stats=stats_state,
+        rew_norm=rew_norm_state,
+    )
+
+
+def train() -> TrainState:
+    """Initialize dynamic state and train the configured NAF recipe."""
+    state = TrainState(
+        key=update_key,
+        roll=imc.init(
+            mc.init(
+                jrd.split(mc_key, cfg.n_envs),
+                jax.vmap(env.init)(jrd.split(env_key, cfg.n_envs)),
+            ),
+            behavior.init(
+                behavior_key,
+                jnp.zeros((cfg.n_envs, act_size)),
+                agent_state,
+            ),
+        ),
+        opt=optim.init(partition(agent_state).params),
+        stats=stats.init((cfg.n_envs,)),
+        rew_norm=rew_norm.init((cfg.n_envs,)),
+    )
+    eval_rng = eval_key
+
+    for iteration in range(1, cfg.n_iters + 1):
+        metrics, state = update(state)
+        if iteration % cfg.eval_freq == 0:
+            train_metrics, stats_state = stats.drain(state.stats)
+            state = replace(state, stats=stats_state)
+
+            eval_rng, env_rng, mc_rng = jrd.split(eval_rng, 3)
+            eval_metrics, eval_state = evaluate(
                 eval_imc.init(
-                    eval_mc_state,
-                    replace(state.agent, key=eval_key),
+                    eval_mc.init(
+                        jrd.split(mc_rng, cfg.n_eval_envs),
+                        jax.vmap(eval_env.init)(
+                            jrd.split(env_rng, cfg.n_eval_envs),
+                        ),
+                    ),
+                    state.roll.agent.agent,
                 )
             )
-            steps = (i + 1) * cfg.n_envs * cfg.seq_len
             print(
-                f"  iter {i + 1:4d}  q_loss={float(metrics['q_loss']):.4f}"
-                f"  sam_rew={float(metrics['sam_rew']):.1f}"
-                f"  rew={float(m.avg_eps_rew):.1f}"
-                f"\u00b1{float(m.std_eps_rew):.1f}"
-                f"  len={float(m.avg_eps_len):.1f}"
-                f"  steps={steps:,}"
-                f"\n         |a|={float(metrics['act_mean']):.2f}"
-                f"  |a|_max={float(metrics['act_max']):.1f}"
-                f"  |μ|={float(metrics['mu_mean']):.2f}"
-                f"  |μ|_max={float(metrics['mu_max']):.1f}"
-                f"  V={float(metrics['v_mean']):.1f}±{float(metrics['v_std']):.1f}"
-                f"  P={float(metrics['p_mean']):.2f}"
-                f"\n         ret={float(metrics['ret_mean']):.1f}±{float(metrics['ret_std']):.1f}"
-                f"  rew_raw={float(metrics['rew_raw_mean']):.3f}"
-                f"  rew_norm={float(metrics['rew_norm_mean']):.3f}"
+                f"iter={iteration:4d}  loss={float(metrics.loss):.3f}"
+                f"  q={float(metrics.q_mean):.1f}"
+                f"  ret={float(metrics.ret_mean):.1f}"
+                f"  train={float(train_metrics.avg_eps_rew):.1f}"
+                f"  eval={float(eval_metrics.avg_eps_rew):.1f}"
             )
             eval_env.close(eval_state.mc.env)
 
-    elapsed = time.time() - t0
-    print(f"\n[bold green]Completed[/bold green] in {elapsed:.1f}s")
-
-    env.close(state.mc.env)
+    env.close(state.roll.mc.env)
     return state
 
 
 if __name__ == "__main__":
-    train(tyro.cli(Config))
+    train()
