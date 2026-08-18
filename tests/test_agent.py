@@ -13,10 +13,10 @@ from jaxtor.agent import (
     DiagNormalHead,
     Model,
     Module,
-    Naf,
     NormModel,
     Param,
     Pi,
+    Quadratic,
     QHead,
     QsaHead,
     VHead,
@@ -235,13 +235,13 @@ def test_norm_model_owns_explicit_normalization_updates():
 
 
 def test_vpi_composes_modules_and_preserves_leading_axes():
-    """A composed value-policy agent needs only apply and act in PPO."""
+    """The joint V/π endpoint shares its body over arbitrary leading axes."""
     body = Module(static=Dense(weight=None, bias=None))
     value_net = Module(static=Dense(weight=None, bias=None))
     logits_net = Module(static=Dense(weight=None, bias=None))
     value = VHead(net=value_net)
     policy = CategoricalHead(n_actions=4, logits=logits_net)
-    agent = VPi(body=body, v=value, pi=policy)
+    agent = VPi(body=body, value=value, policy=policy)
     state = agent.init(
         jax.random.key(0),
         body=body.init(
@@ -260,31 +260,30 @@ def test_vpi_composes_modules_and_preserves_leading_axes():
     )
     obs = jnp.ones((2, 5, 3))
 
-    pred, applied_state = jax.jit(agent.apply)(obs, state)
+    value_policy, applied_state = jax.jit(agent.vpi)(obs, state)
     act, acted_state = jax.jit(agent.act)(obs, state)
 
-    assert pred.v.shape == (2, 5)
-    assert pred.pi.logits.shape == (2, 5, 4)
+    assert value_policy.v.shape == (2, 5)
+    assert value_policy.pi.logits.shape == (2, 5, 4)
     assert act.shape == (2, 5)
     assert jnp.array_equal(applied_state.key, state.key)
     assert not jnp.array_equal(acted_state.key, state.key)
 
 
 def test_pi_exposes_only_policy_dependencies():
-    """A policy-only agent applies and selects stochastic or modal actions."""
+    """A policy-only agent evaluates and selects stochastic or modal actions."""
     zero = Calls(count=jnp.array(0, dtype=jnp.int32))
-    agent = Pi(body=Body(), pi=Policy())
+    agent = Pi(body=Body(), policy=Policy())
     state = agent.init(jax.random.key(0), body=zero, pi=zero)
     obs = jnp.ones((2, 5, 3))
 
-    pred, applied = jax.jit(agent.apply)(obs, state)
+    policy, applied = jax.jit(agent.pi)(obs, state)
     act, acted = jax.jit(agent.act)(obs, state)
-    mode, modal = jax.jit(Pi(body=Body(), pi=Policy(), deterministic=True).act)(
-        obs,
-        state,
+    mode, modal = jax.jit(Pi(body=Body(), policy=Policy(), deterministic=True).act)(
+        obs, state
     )
 
-    chex.assert_shape(pred.pi.logits, (2, 5, 2))
+    chex.assert_shape(policy.logits, (2, 5, 2))
     chex.assert_shape(act, (2, 5))
     assert jnp.array_equal(mode, jnp.zeros((2, 5), dtype=jnp.int32))
     assert applied.body.count == 1
@@ -323,20 +322,18 @@ def test_q_heads_preserve_action_semantics_over_leading_axes():
     assert jnp.allclose(selected, expected)
 
 
-def test_naf_agent_exposes_complete_predictions_and_selective_paths():
-    """NAF exposes a Q-function while acting skips its unused value head."""
+def test_quadratic_agent_exposes_q_v_and_selective_acting():
+    """Quadratic evaluates Q or V directly while acting selects only mu."""
     zero = Calls(count=jnp.array(0, dtype=jnp.int32))
-    agent = Naf(
+    agent = Quadratic(
         act_size=2,
         body=Body(),
-        v=Value(),
+        value=Value(),
         loc=ActionValues(),
         p=ActionValues(),
         eps=0.25,
-        scale=0.1,
     )
     state = agent.init(
-        jax.random.key(0),
         body=zero,
         v=zero,
         loc=zero,
@@ -345,38 +342,34 @@ def test_naf_agent_exposes_complete_predictions_and_selective_paths():
     obs = jnp.arange(12, dtype=jnp.float32).reshape((2, 3, 2)) / 10
     query_act = jnp.zeros_like(obs)
 
-    pred, applied = jax.jit(agent.apply)(obs, state)
+    q, q_state = jax.jit(agent.q)(obs, query_act, state)
+    v, v_state = jax.jit(agent.v)(obs, state)
     act, acted = jax.jit(agent.act)(obs, state)
-    q = jax.jit(lambda qfn, act: qfn.evaluate(act))(pred.qfn, query_act)
-    sample = jax.jit(lambda pi, key: pi.sample(key))(pred.pi, jax.random.key(1))
 
-    chex.assert_shape(pred.v, (2, 3))
     chex.assert_shape(q, (2, 3))
-    chex.assert_shape(pred.pi.loc, (2, 3, 2))
-    chex.assert_shape(pred.pi.cov, (2, 3, 2, 2))
-    chex.assert_shape(pred.qfn.p, (2, 3, 2, 2))
-    chex.assert_shape(pred.pi.evaluate(sample).logp, (2, 3))
+    chex.assert_shape(v, (2, 3))
     chex.assert_shape(act, (2, 3, 2))
-    delta = query_act - pred.pi.loc
+    mu = jnp.stack((obs[..., 0], -obs[..., 0]), axis=-1)
+    diagonal = jax.nn.softplus(jnp.stack((obs[..., 0], -obs[..., 0]), axis=-1)) + 0.25
+    p = jnp.einsum("...i,ij->...ij", diagonal, jnp.eye(2))
+    delta = query_act - mu
     assert jnp.allclose(
-        q,
-        pred.v - 0.5 * jnp.einsum("...i,...ij,...j->...", delta, pred.qfn.p, delta),
+        q, v - 0.5 * jnp.einsum("...i,...ij,...j->...", delta, p, delta)
     )
-    assert jnp.all(jnp.linalg.eigvalsh(pred.qfn.p) > 0)
-    assert jnp.allclose(
-        pred.pi.cov @ pred.qfn.p,
-        0.1**2 * jnp.broadcast_to(jnp.eye(2), pred.qfn.p.shape),
-    )
-    assert jnp.all(jnp.isfinite(pred.pi.evaluate(sample).logp))
-    assert applied.body.count == 1
-    assert applied.v.count == 1
-    assert applied.loc.count == 1
-    assert applied.p.count == 1
+    assert jnp.all(jnp.linalg.eigvalsh(p) > 0)
+    chex.assert_trees_all_close(act, mu)
+    assert q_state.body.count == 1
+    assert q_state.v.count == 1
+    assert q_state.loc.count == 1
+    assert q_state.p.count == 1
+    assert v_state.body.count == 1
+    assert v_state.v.count == 1
+    assert v_state.loc.count == 0
+    assert v_state.p.count == 0
     assert acted.body.count == 1
     assert acted.v.count == 0
     assert acted.loc.count == 1
-    assert acted.p.count == 1
-    assert not jnp.array_equal(acted.key, state.key)
+    assert acted.p.count == 0
 
 
 def test_diag_normal_head_and_model_thread_their_child_states():
@@ -407,16 +400,25 @@ def test_diag_normal_head_and_model_thread_their_child_states():
 def test_vpi_act_evaluates_only_action_dependencies():
     """Acting advances the shared body and policy, but not the value head."""
     zero = Calls(count=jnp.array(0, dtype=jnp.int32))
-    agent = VPi(body=Body(), v=Value(), pi=Policy(), deterministic=True)
+    agent = VPi(
+        body=Body(),
+        value=Value(),
+        policy=Policy(),
+        deterministic=True,
+    )
     state = agent.init(jax.random.key(0), body=zero, v=zero, pi=zero)
 
-    _, applied = jax.jit(agent.apply)(jnp.ones((3, 2)), state)
+    _, applied = jax.jit(agent.vpi)(jnp.ones((3, 2)), state)
+    _, valued = jax.jit(agent.v)(jnp.ones((3, 2)), state)
     act, acted = jax.jit(agent.act)(jnp.ones((3, 2)), state)
 
     assert jnp.array_equal(act, jnp.zeros(3, dtype=jnp.int32))
     assert applied.body.count == 1
     assert applied.v.count == 1
     assert applied.pi.count == 1
+    assert valued.body.count == 1
+    assert valued.v.count == 1
+    assert valued.pi.count == 0
     assert acted.body.count == 1
     assert acted.v.count == 0
     assert acted.pi.count == 1
@@ -427,8 +429,8 @@ def test_vpi_forwards_structured_observations_and_features():
     """Agent composition preserves pytree inputs and intermediate features."""
     agent = VPi(
         body=StructuredBody(),
-        v=StructuredValue(),
-        pi=StructuredPolicy(),
+        value=StructuredValue(),
+        policy=StructuredPolicy(),
         deterministic=True,
     )
     state = agent.init(jax.random.key(0), body=None, v=None, pi=None)
@@ -437,10 +439,10 @@ def test_vpi_forwards_structured_observations_and_features():
         "right": jnp.array([1.0, 3.0]),
     }
 
-    pred, _ = jax.jit(agent.apply)(obs, state)
+    value_policy, _ = jax.jit(agent.vpi)(obs, state)
     act, _ = jax.jit(agent.act)(obs, state)
 
-    assert jnp.array_equal(pred.v, jnp.array([3.0, 4.0]))
+    assert jnp.array_equal(value_policy.v, jnp.array([3.0, 4.0]))
     assert jnp.array_equal(act, jnp.array([0, 0]))
 
 
@@ -449,9 +451,9 @@ def test_vqpi_act_skips_both_unused_value_heads():
     zero = Calls(count=jnp.array(0, dtype=jnp.int32))
     agent = VQPi(
         body=Body(),
-        v=Value(),
-        q=ActionValues(),
-        pi=Policy(),
+        value=Value(),
+        q_values=ActionValues(),
+        policy=Policy(),
         deterministic=True,
     )
     state = agent.init(
@@ -462,10 +464,10 @@ def test_vqpi_act_skips_both_unused_value_heads():
         pi=zero,
     )
 
-    pred, applied = jax.jit(agent.apply)(jnp.ones((3, 2)), state)
+    value_q_policy, applied = jax.jit(agent.vqpi)(jnp.ones((3, 2)), state)
     _, acted = jax.jit(agent.act)(jnp.ones((3, 2)), state)
 
-    chex.assert_shape(pred.q, (3, 2))
+    chex.assert_shape(value_q_policy.q, (3, 2))
     assert applied.v.count == 1
     assert applied.q.count == 1
     assert acted.body.count == 1

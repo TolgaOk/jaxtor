@@ -81,7 +81,12 @@ def combine[S](params: S, frozen: S) -> S:
 
 @runtime_checkable
 class Function[In, Out](Protocol):
-    """Callable capability consumed by :class:`Module`."""
+    """Callable interface used by :class:`Module`.
+
+    Required methods::
+
+        __call__(input) -> output
+    """
 
     def __call__(self, x: In, /) -> Out: ...
 
@@ -93,6 +98,12 @@ class Module[Out]:
     The component holds the non-parameter partition. :class:`State` holds the
     complementary parameter partition under one :class:`Param` marker. This
     supports Equinox modules without making Equinox a core dependency.
+
+    Required protocols::
+
+        static: callable pytree with parameter leaves replaced by None
+        state.params.value: complementary callable pytree partition
+        reconstructed_callable(input) -> output
 
     Attributes:
         static: Callable pytree with parameter leaves replaced by ``None``.
@@ -111,7 +122,11 @@ class Module[Out]:
 
     @dataclass
     class State[Result]:
-        """Dynamic parameter partition of a callable module."""
+        """Dynamic parameter partition of a callable module.
+
+        Attributes:
+            params: Trainable callable partition under a :class:`Param` marker.
+        """
 
         params: Param[Function[jax.Array, Result]]
 
@@ -165,7 +180,12 @@ class Module[Out]:
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation capability consumed by :class:`Model`."""
+    """Stateful transformation interface used by :class:`Model`.
+
+    Required methods::
+
+        apply(input, state) -> (output, state)
+    """
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
@@ -173,6 +193,11 @@ class Transform[In, Out, S](Protocol):
 @dataclass
 class Model[In, Feat, Pred, BodyS, HeadS]:
     """Apply one feature transform followed by one prediction head.
+
+    Required protocols::
+
+        body.apply(input, body_state) -> (features, body_state)
+        head.apply(features, head_state) -> (prediction, head_state)
 
     Attributes:
         body: Transform mapping inputs to hidden representations.
@@ -191,7 +216,12 @@ class Model[In, Feat, Pred, BodyS, HeadS]:
 
     @dataclass
     class State[BodyData, HeadData]:
-        """Shared-body model child-state tree."""
+        """Shared-body model child-state tree.
+
+        Attributes:
+            body: Body-transform state.
+            head: Prediction-head state.
+        """
 
         body: BodyData
         head: HeadData
@@ -216,7 +246,13 @@ class Model[In, Feat, Pred, BodyS, HeadS]:
 
 
 class Normalizer[Value, S](Protocol):
-    """Normalization capability consumed by :class:`NormModel`."""
+    """Normalization interface used by :class:`NormModel`.
+
+    Required methods::
+
+        apply(value, state) -> (normalized_value, state)
+        update(value, state) -> state
+    """
 
     def apply(self, x: Value, state: S, /) -> tuple[Value, S]: ...
 
@@ -230,6 +266,12 @@ class NormModel[In, Pred, NormS, ModelS]:
     Applying the component reads normalization statistics without updating
     them. :meth:`update` explicitly adds observations at the algorithm
     boundary while preserving model state.
+
+    Required protocols::
+
+        norm.apply(input, norm_state) -> (normalized_input, norm_state)
+        norm.update(input, norm_state) -> norm_state
+        model.apply(normalized_input, model_state) -> (prediction, model_state)
 
     Attributes:
         norm: Input normalizer with an explicit update operation.
@@ -249,7 +291,12 @@ class NormModel[In, Pred, NormS, ModelS]:
 
     @dataclass
     class State[NormData, ModelData]:
-        """Normalization and model child-state tree."""
+        """Normalization and model child-state tree.
+
+        Attributes:
+            norm: Normalizer state.
+            model: Model-transform state.
+        """
 
         norm: NormData
         model: ModelData
