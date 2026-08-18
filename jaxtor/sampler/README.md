@@ -1,102 +1,60 @@
-# Sampler API
+# Sampling
+
+Sampling components compose environments, agents, sequences, and episode statistics through small stateful interfaces.
 
 ## Components
 
-- `Mc`: open environment sampler with `observe(state)` and `sample(act, state)`.
-- `VecMc`: `vmap`-based parallel `Mc`.
-- `Imc`: selects one agent action and returns the resulting MC transition.
-- `Roll`: stacks samples from any stateful sampler.
-- `LoadedRoll`: stacks rich agent outputs at both transition endpoints.
-- `EpisodeStats`: accumulates completed episodes from sequences.
-- `Sweep`: stochastic samples over all `(s, a)` pairs.
-- `ExpSweep`: exact forward and backward propagation.
+| Component | Role |
+| --- | --- |
+| `Mc` | Samples an open Markov chain and owns resets and episode limits. |
+| `VecMc` | Vectorizes one `Mc` over independent environment states. |
+| `Imc` | Forms an induced Markov chain by selecting an agent action before each step. |
+| `Roll` | Stacks samples from any stateful sampler into a fixed-length sequence. |
+| `EpisodeStats` | Accumulates completed-episode statistics from sequences. |
+| `Sweep` | Samples every state-action pair of a tabular Markov chain. |
+| `ExpSweep` | Propagates tabular values or occupancy exactly for multiple steps. |
 
-## Minimal interaction
-
-An ordinary `Imc` agent only selects an action. `Imc` and `Roll` return the
-underlying MC transition directly, without another data wrapper.
+## Quickstart
 
 ```python
-@dataclass
-class EGreedy:
-    eps: float
+import jax
 
-    @dataclass
-    class State:
-        key: jax.Array
-        q: jax.Array
+from jaxtor.sampler import Imc, Mc, Roll
 
-    def act(self, obs, state):
-        key, explore_key, act_key = jrd.split(state.key, 3)
-        q = state.q[:, obs]
-        greedy = jnp.argmax(q)
-        random = jrd.randint(act_key, (), 0, q.shape[0])
-        act = jnp.where(jrd.uniform(explore_key) < self.eps, random, greedy)
-        return act, replace(state, key=key)
+mc = Mc(max_eps_len=1_000, env=env)
+imc = Imc(agent=agent, mc=mc)
+roll = Roll(imc=imc, seq_len=2_048)
+
+sequence, state = jax.jit(roll.sample)(state)
 ```
 
-```python
-mc = Mc(max_eps_len=100, env=env)
-imc = Imc(agent=EGreedy(eps=0.1), mc=mc)
-state = imc.init(mc.init(mc_key, env_state), agent_state)
-transition, state = imc.sample(state)
+## Details
 
-roll = Roll(imc=imc, seq_len=20)
-seq, state = roll.sample(state)
-# seq: stacked obs, act, rew, term, trun, nobs
-```
+### Open and induced Markov chains
 
-## Loaded rollout
+`Mc` accepts an action and returns an aligned `obs`, `act`, `rew`, `term`, `trun`, and `nobs` transition.
+`VecMc` applies the same interface to independent environment lanes.
+`Imc` supplies actions through `agent.act` and returns the underlying transition directly.
 
-Use `LoadedRoll` when learning needs agent-defined data such as behavior
-log-probabilities, values, or Q-values at both endpoints.
+For vectorized rollouts, set `seq_axis=1` on `Roll` to produce arrays shaped `(environment, time, ...)`.
 
-```python
-@dataclass
-class Output:
-    act: chex.Array
-    log_mu: chex.Array
-    value: chex.Array
+### Episode statistics
 
-
-class ActorCritic:
-    def apply(self, obs, state):
-        output = Output(...)
-        return output, state
-
-roll = LoadedRoll(agent=ActorCritic(), mc=mc, seq_len=20)
-seq, state = roll.sample(roll.init(mc_state, agent_state))
-
-seq.dec   # T decisions whose actions were consumed
-seq.mc    # T underlying MC transitions
-seq.succ  # T outputs at each true nobs
-```
-
-At a boundary, `succ` describes the true terminal or truncated `nobs`; the next
-`dec` is computed from the reset observation. Normal successors are reused
-inside the scan. No predicted output is persisted between sampling calls, so an
-externally updated agent state cannot leave stale derived data.
-
-With `VecMc`, set `seq_axis=1` for `(N, T, ...)` arrays.
-
-Episode statistics remain alongside the sampler state. Partial episodes carry
-across rollouts, while `drain` clears only completed-episode accumulators.
+Partial episodes remain in state across rollouts.
+`drain` returns statistics for completed episodes and clears only the completed-episode accumulators.
 
 ```python
 stats = EpisodeStats(seq_axis=1)
-stats_state = stats.init(batch_shape=(n_envs,))
-
-seq, state = roll.sample(state)
-stats_state = stats.update(seq.mc, stats_state)  # LoadedRoll
+stats_state = stats.update(sequence, stats_state)
 metrics, stats_state = stats.drain(stats_state)
 ```
 
-## Exact and exhaustive tabular sampling
+### Exact and exhaustive tabular sampling
 
 ```python
-first, mc_states = Sweep(mc=mc).sample(key, env_state)
+transitions, states = Sweep(mc=mc).sample(key, env_state)
 
 exp = ExpSweep(n_step=5)
-q_seq = exp.backward(q, mdp, mu)
-occupancy_seq = exp.forward(initial, mdp, mu)
+q_sequence = exp.backward(q, mdp, policy)
+occupancy_sequence = exp.forward(occupancy, mdp, policy)
 ```
