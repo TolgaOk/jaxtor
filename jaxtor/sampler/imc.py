@@ -6,8 +6,8 @@
     state = imc.init(mc_state, agent_state)
     transition, state = imc.sample(state)
 
-The returned sample is produced by the Markov chain. Use ``LoadedRoll`` when
-collecting richer agent predictions at transition endpoints.
+The returned sample is produced by the Markov chain. Agent predictions needed
+for learning are replayed by a separate inference component.
 """
 
 from __future__ import annotations
