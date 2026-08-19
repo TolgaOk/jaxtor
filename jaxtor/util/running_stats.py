@@ -3,12 +3,10 @@
 Provides batch-updating running statistics and normalization.
 
 Example:
-    >>> rs = RunningStats(clip=10.0)
-    >>> state = RunningStats.State(
-    ...     mean=jnp.zeros(4), var=jnp.ones(4), count=jnp.float32(1e-4)
-    ... )
-    >>> state = rs.update(batch, state)
-    >>> normalized = rs.normalize(obs, state)
+    >>> stats = RunningStats(clip=10.0)
+    >>> state = stats.init((4,))
+    >>> state = stats.update(batch, state)
+    >>> normalized = stats.normalize(obs, state)
 """
 
 from __future__ import annotations

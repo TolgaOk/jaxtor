@@ -17,8 +17,11 @@ Utility components provide explicit state for normalization, running statistics,
 from jaxtor.util import Minibatches, ObsNorm, RewardNorm, RunningStats
 
 obs_norm = ObsNorm(stats=RunningStats(clip=10.0))
-reward_norm = RewardNorm(gamma=0.99, rms=RunningStats(), seq_axis=1)
+reward_norm = RewardNorm(gamma=0.99, stats=RunningStats(), seq_axis=1)
 minibatches = Minibatches(count=4, sample_ndim=2)
+
+obs_state = obs_norm.init(obs_shape)
+reward_state = reward_norm.init(batch_shape)
 ```
 
 ## Details

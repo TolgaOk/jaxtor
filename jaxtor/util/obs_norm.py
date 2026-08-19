@@ -2,20 +2,41 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import jax
 from chex import dataclass
 
-from jaxtor.util.running_stats import RunningStats
+
+class Mean(Protocol):
+    """Statistics state required by ``ObsNorm``."""
+
+    mean: jax.Array
+
+
+class Stats[S: Mean](Protocol):
+    """Statistics component required by ``ObsNorm``."""
+
+    def init(self, shape: tuple[int, ...] = ()) -> S: ...
+    def update(self, batch: jax.Array, state: S) -> S: ...
+    def normalize(self, x: jax.Array, state: S) -> jax.Array: ...
 
 
 @dataclass
-class ObsNorm:
+class ObsNorm[StatsS: Mean]:
     """Normalize observations with explicitly updated running statistics.
 
     ``apply`` only reads the current statistics. Call :meth:`update` at the
     algorithm boundary where newly collected observations should enter the
     estimate. When disabled, both methods are pass-through operations; the
     static branch is removed during JAX tracing.
+
+    Required protocols::
+
+        stats.init(shape) -> stats_state
+        stats.update(batch, stats_state) -> stats_state
+        stats.normalize(value, stats_state) -> normalized_value
+        stats_state.mean: jax.Array
 
     Attributes:
         stats: Running-statistics component used for normalization.
@@ -30,20 +51,20 @@ class ObsNorm:
         update: Add observations to the running statistics.
     """
 
-    stats: RunningStats
+    stats: Stats[StatsS]
     enabled: bool = True
 
     @dataclass
-    class State:
+    class State[StatsData]:
         """Observation-normalization state.
 
         Attributes:
             stats: Running observation statistics.
         """
 
-        stats: RunningStats.State
+        stats: StatsData
 
-    def init(self, shape: tuple[int, ...]) -> ObsNorm.State:
+    def init(self, shape: tuple[int, ...]) -> ObsNorm.State[StatsS]:
         """Initialize unit statistics for one observation shape."""
         return self.State(stats=self.stats.init(shape))
 
@@ -61,8 +82,8 @@ class ObsNorm:
     def apply(
         self,
         observations: jax.Array,
-        state: ObsNorm.State,
-    ) -> tuple[jax.Array, ObsNorm.State]:
+        state: ObsNorm.State[StatsS],
+    ) -> tuple[jax.Array, ObsNorm.State[StatsS]]:
         """Normalize observations without changing their statistics."""
         if self.enabled:
             observations = self.stats.normalize(observations, state.stats)
@@ -71,8 +92,8 @@ class ObsNorm:
     def update(
         self,
         observations: jax.Array,
-        state: ObsNorm.State,
-    ) -> ObsNorm.State:
+        state: ObsNorm.State[StatsS],
+    ) -> ObsNorm.State[StatsS]:
         """Update statistics from arbitrary leading sample axes."""
         if not self.enabled:
             return state

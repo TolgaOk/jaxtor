@@ -5,10 +5,10 @@ discounted return estimate, following Huang et al. (2022).
 
 Example:
     >>> from jaxtor.util import RunningStats
-    >>> rms = RunningStats()
-    >>> rn = RewardNorm(gamma=0.99, clip=10.0, rms=rms, seq_axis=1)
-    >>> state = rn.init(batch_shape=(n_envs,))
-    >>> norm_rewards, state = rn.update(rewards, dones, state)
+    >>> stats = RunningStats()
+    >>> norm = RewardNorm(gamma=0.99, clip=10.0, stats=stats, seq_axis=1)
+    >>> state = norm.init(batch_shape=(n_envs,))
+    >>> norm_rewards, state = norm.update(rewards, dones, state)
 """
 
 from __future__ import annotations
@@ -27,21 +27,26 @@ class Variance(Protocol):
     var: jax.Array
 
 
-class RMS[StateT: Variance](Protocol):
+class Stats[S: Variance](Protocol):
     """Running-statistics capability required by ``RewardNorm``."""
 
-    def init(self, shape: tuple[int, ...] = ()) -> StateT: ...
-
-    def update(self, batch: jax.Array, state: StateT) -> StateT: ...
+    def init(self, shape: tuple[int, ...] = ()) -> S: ...
+    def update(self, batch: jax.Array, state: S) -> S: ...
 
 
 @dataclass
-class RewardNorm[RmsStateT: Variance]:
+class RewardNorm[StatsS: Variance]:
     """Reward normalization via rolling discounted returns.
+
+    Required protocols::
+
+        stats.init(shape) -> stats_state
+        stats.update(batch, stats_state) -> stats_state
+        stats_state.var: jax.Array
 
     Attributes:
         gamma: Discount factor for rolling return estimation.
-        rms: Running mean/variance component following the RMS protocol.
+        stats: Running-statistics component used for return normalization.
         seq_axis: Axis containing consecutive rewards.
         clip: If not None, clip normalized rewards to [-clip, clip].
         enabled: Whether normalization and statistics updates are active.
@@ -55,22 +60,22 @@ class RewardNorm[RmsStateT: Variance]:
     """
 
     gamma: float
-    rms: RMS[RmsStateT]
+    stats: Stats[StatsS]
     seq_axis: int = 0
     clip: float | None = None
     enabled: bool = True
 
     @dataclass
-    class State[StatsT]:
+    class State[StatsData]:
         """Reward normalization state.
 
         Attributes:
             ret: Running discounted returns with the environment batch shape.
-            rms: Running statistics state.
+            stats: Running statistics state.
         """
 
         ret: jax.Array
-        rms: StatsT
+        stats: StatsData
 
     @dataclass
     class _Step:
@@ -89,11 +94,11 @@ class RewardNorm[RmsStateT: Variance]:
     def init(
         self,
         batch_shape: tuple[int, ...] = (),
-    ) -> RewardNorm.State[RmsStateT]:
+    ) -> RewardNorm.State[StatsS]:
         """Initialize one return carry per environment lane."""
         return self.State(
             ret=jnp.zeros(batch_shape),
-            rms=self.rms.init(),
+            stats=self.stats.init(),
         )
 
     def _update_step(
@@ -109,8 +114,8 @@ class RewardNorm[RmsStateT: Variance]:
         self,
         rewards: jax.Array,
         dones: jax.Array,
-        state: RewardNorm.State[RmsStateT],
-    ) -> tuple[jax.Array, RewardNorm.State[RmsStateT]]:
+        state: RewardNorm.State[StatsS],
+    ) -> tuple[jax.Array, RewardNorm.State[StatsS]]:
         """Update rolling return stats and return normalized rewards.
 
         Args:
@@ -123,7 +128,7 @@ class RewardNorm[RmsStateT: Variance]:
         """
 
         if not self.enabled:
-            return rewards, self.State(ret=state.ret, rms=state.rms)
+            return rewards, state
 
         chex.assert_equal_shape([rewards, dones])
 
@@ -138,9 +143,9 @@ class RewardNorm[RmsStateT: Variance]:
             self._Step(rew=rew_t, done=done_t),
         )
 
-        rms = self.rms.update(all_rets.reshape(-1), state.rms)
-        norm_rewards = rewards / jnp.sqrt(rms.var + 1e-8)
+        stats = self.stats.update(all_rets.reshape(-1), state.stats)
+        norm_rewards = rewards / jnp.sqrt(stats.var + 1e-8)
         if self.clip is not None:
             norm_rewards = jnp.clip(norm_rewards, -self.clip, self.clip)
 
-        return norm_rewards, RewardNorm.State(ret=final_ret, rms=rms)
+        return norm_rewards, self.State(ret=final_ret, stats=stats)

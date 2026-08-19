@@ -238,7 +238,7 @@ inference = VPiNextVInference(agent=agent, seq_axis=1)
 
 rew_norm = RewardNorm(
     gamma=cfg.gamma,
-    rms=RunningStats(),
+    stats=RunningStats(),
     seq_axis=1,
     clip=10.0,
 )
