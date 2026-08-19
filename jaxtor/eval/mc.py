@@ -1,11 +1,13 @@
 """Sampling-based evaluation over an induced Markov chain.
 
-``Eval`` derives episode metrics from public transition fields::
+``McEval`` derives episode metrics from public transition fields::
 
-    evaluator = Eval(imc=imc, n_step=500)
+    from jaxtor.eval import McEval
+
+    evaluator = McEval(imc=imc, n_step=500)
     metrics, state = evaluator.evaluate(state)
 
-Each call starts from a fresh episode boundary and advances the sampler state
+Each call requires a sampler state at an episode boundary and advances it
 without exposing its internal structure.
 """
 
@@ -28,14 +30,19 @@ class Transition(Protocol):
 
 
 class Imc[Sample: Transition, S](Protocol):
-    """Single-step sampler surface consumed by ``Eval``."""
+    """Single-step sampler surface consumed by ``McEval``."""
 
     def sample(self, state: S) -> tuple[Sample, S]: ...
 
 
 @dataclass
 class Eval[Sample: Transition, S]:
-    """Evaluate completed episodes from a fixed-length rollout.
+    """Evaluate completed episodes over a fixed-step sampling window.
+
+    Required protocols::
+
+        imc.sample(state) -> (transition, state)
+        transition: rew, term, trun
 
     Attributes:
         imc: Single-step sampler consumed by the evaluator.
@@ -46,7 +53,7 @@ class Eval[Sample: Transition, S]:
         Metrics: Aggregate statistics for completed episodes.
 
     Public methods:
-        evaluate: Evaluate one fresh fixed-step window.
+        evaluate: Evaluate one fixed-step sampling window.
     """
 
     imc: Imc[Sample, S]
@@ -213,7 +220,7 @@ class Eval[Sample: Transition, S]:
         return self._Carry(imc=imc, accumulator=accumulator), None
 
     def evaluate(self, state: S) -> tuple[Eval.Metrics, S]:
-        """Evaluate completed episodes and return the advanced sampler state.
+        """Evaluate one sampling window and return the advanced sampler state.
 
         The input state must begin at an episode boundary. Metrics cover every
         episode completed during this call; incomplete trailing episodes are
@@ -221,7 +228,7 @@ class Eval[Sample: Transition, S]:
         later evaluation call.
 
         Args:
-            state: Freshly initialized sampler state.
+            state: Sampler state at an episode boundary.
 
         Returns:
             Evaluation metrics and the advanced sampler state.
