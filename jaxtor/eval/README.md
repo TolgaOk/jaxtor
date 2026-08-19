@@ -19,7 +19,7 @@ import jax
 
 from jaxtor.eval import McEval
 
-evaluator = McEval(imc=imc, episode_len=1_000)
+evaluator = McEval(imc=imc, n_step=1_000)
 metrics, state = jax.jit(evaluator.evaluate)(state)
 ```
 
@@ -29,6 +29,7 @@ metrics, state = jax.jit(evaluator.evaluate)(state)
 
 `McEval` advances its sampler state and reports statistics for episodes that finish during the evaluation window.
 Metrics include mean, standard deviation, minimum, and maximum return, mean episode length, completed episode count, and truncation rate.
+Each evaluation must start from a fresh episode boundary because an incomplete trailing episode is not carried into the next call.
 
 ### Tabular convergence
 

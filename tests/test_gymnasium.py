@@ -7,7 +7,7 @@ import jax.random as jrd
 import pytest
 from chex import dataclass
 from jaxtor.env import gymnasium
-from jaxtor.eval.mc import Eval as McEval
+from jaxtor.eval import McEval
 from jaxtor.sampler.stats import EpisodeStats
 from jaxtor.sampler.mc import Mc, VecMc
 from jaxtor.sampler.imc import Imc
@@ -752,7 +752,7 @@ def test_eval_returns_live_runtime_state():
     vec_mc, mc_state = _init_vec(key, env)
     imc = Imc(agent=RandomAgent(), mc=vec_mc)
     state = imc.init(mc=mc_state, agent=AgentState(key=key))
-    evaluator = McEval(imc=imc, episode_len=4)
+    evaluator = McEval(imc=imc, n_step=4)
 
     _, state = jax.jit(evaluator.evaluate)(state)
     _, state = jax.jit(imc.sample)(state)

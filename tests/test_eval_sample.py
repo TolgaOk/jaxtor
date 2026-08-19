@@ -6,9 +6,10 @@ import chex
 import jax
 import jax.numpy as jnp
 import jax.random as jrd
+import pytest
 from chex import dataclass
 from jaxtor.env import tabular
-from jaxtor.eval.mc import Eval as SampleEval
+from jaxtor.eval import McEval
 from jaxtor.sampler.mc import Mc
 from jaxtor.sampler.imc import Imc
 
@@ -105,7 +106,7 @@ def test_sample_deterministic_one_step_goal():
     mc = Mc(max_eps_len=10, env=env)
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=50)
+    evaluator = McEval(imc=imc, n_step=50)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -133,7 +134,7 @@ def test_sample_truncation_rate_dead_end():
 
     mc = Mc(max_eps_len=5, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=20)
+    evaluator = McEval(imc=imc, n_step=20)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -160,8 +161,8 @@ def test_sample_more_episodes_gives_more_data():
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
-    eval_short = SampleEval(imc=imc, episode_len=30)
-    eval_long = SampleEval(imc=imc, episode_len=100)
+    eval_short = McEval(imc=imc, n_step=30)
+    eval_long = McEval(imc=imc, n_step=100)
 
     env_key, mc_key1, mc_key2 = jrd.split(key, 3)
     env_state = env.init(env_key)
@@ -185,7 +186,7 @@ def test_sample_jit_compilation():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=20)
+    evaluator = McEval(imc=imc, n_step=20)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -207,7 +208,7 @@ def test_sample_key_determinism():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=20)
+    evaluator = McEval(imc=imc, n_step=20)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -240,7 +241,7 @@ def test_sample_truncation_rate_zero_when_all_terminate():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=50)
+    evaluator = McEval(imc=imc, n_step=50)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -266,7 +267,7 @@ def test_sample_dead_end_episode_length_equals_max():
 
     mc = Mc(max_eps_len=max_len, env=env)
     imc = Imc(agent=GoLeftAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=max_len * 3)
+    evaluator = McEval(imc=imc, n_step=max_len * 3)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -291,7 +292,7 @@ def test_sample_std_zero_for_identical_episodes():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=50)
+    evaluator = McEval(imc=imc, n_step=50)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -317,7 +318,7 @@ def test_sample_metrics_include_all_completed_episodes():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=100)
+    evaluator = McEval(imc=imc, n_step=100)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -368,9 +369,9 @@ def test_sample_episode_count_matches_expected():
     agent = GoRightAgent()
     imc = Imc(agent=agent, mc=mc)
 
-    evaluator = SampleEval(imc=imc, episode_len=50)
+    evaluator = McEval(imc=imc, n_step=50)
 
-    # The rollout runs for episode_len = 50 steps
+    # The evaluation runs for n_step = 50 transitions.
     # Each episode is 1 step, so done_count should be 50
     init_key, env_key, agent_key = jrd.split(key, 3)
     env_state = env.init(env_key)
@@ -393,7 +394,7 @@ def test_sample_metrics_all_scalar():
 
     mc = Mc(max_eps_len=10, env=env)
     imc = Imc(agent=GoRightAgent(), mc=mc)
-    evaluator = SampleEval(imc=imc, episode_len=20)
+    evaluator = McEval(imc=imc, n_step=20)
 
     env_key, mc_key = jrd.split(key)
     env_state = env.init(env_key)
@@ -414,7 +415,7 @@ def test_sample_metrics_all_scalar():
 def test_sample_threads_opaque_state_without_inner_access():
     """Evaluation works through its protocol and returns the advanced state."""
     sampler = OpaqueImc(batch_shape=(3,))
-    evaluator = SampleEval(imc=sampler, episode_len=4)
+    evaluator = McEval(imc=sampler, n_step=4)
     state = sampler.State(step=jnp.array(0))
 
     metrics, state = jax.jit(evaluator.evaluate)(state)
@@ -423,3 +424,23 @@ def test_sample_threads_opaque_state_without_inner_access():
     assert metrics.n_episodes == 12
     assert metrics.avg_eps_rew == 1
     assert metrics.avg_eps_len == 1
+
+
+def test_sample_unroll_factor_preserves_results():
+    """Changing scan unrolling does not change evaluation results."""
+    sampler = OpaqueImc(batch_shape=(3,))
+    state = sampler.State(step=jnp.array(0))
+
+    expected = McEval(imc=sampler, n_step=6).evaluate(state)
+    actual = McEval(imc=sampler, n_step=6, _unroll=3).evaluate(state)
+
+    chex.assert_trees_all_equal(expected, actual)
+
+
+@pytest.mark.parametrize("field", ["n_step", "_unroll"])
+def test_sample_requires_positive_scan_config(field):
+    """McEval validates its static scan configuration when constructed."""
+    kwargs = {"n_step": 1, "_unroll": 1, field: 0}
+
+    with pytest.raises(ValueError, match=f"{field} must be positive"):
+        McEval(imc=OpaqueImc(batch_shape=()), **kwargs)
