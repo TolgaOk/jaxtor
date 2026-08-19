@@ -1,7 +1,7 @@
 [project]
 name = "jaxtor"
 version = "0.2.0"
-description = "JAX-based sampling and evaluation utilities for reinforcement learning environments"
+description = "JAX-based, composable reinforcement learning components to streamline experimentation"
 readme = "README.md"
 authors = [
     { name = "TolgaOk", email = "tolgaokk@gmail.com" }
@@ -10,7 +10,6 @@ requires-python = ">=3.13"
 dependencies = [
     "chex>=0.1.91",
     "jax>=0.8.0",
-    "jaxtyping>=0.3.3",
 ]
 
 [build-system]
@@ -30,16 +29,15 @@ env = [
     "gymnasium[mujoco]>=1.2.3",
     "gymnax>=0.0.9",
     "jaxdp",
+    "jaxtyping>=0.3.3",
     "mujoco-mjx==3.5.0",
 ]
 example = [
-    "distrax>=0.1.7",
     "gymnasium[mujoco]>=1.2.3",
     "gymnax>=0.0.9",
     "jaxdp",
     "equinox>=0.13.4",
     "optax>=0.2.7",
-    "rich>=14.2.0",
     "rlax>=0.1.8",
     "tyro>=1.0.6",
 ]
