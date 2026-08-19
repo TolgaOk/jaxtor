@@ -7,19 +7,14 @@ Components:
     RunningStats: Online mean/variance tracking (Welford algorithm).
 """
 
-from jaxtor.util import minibatches, obs_norm, reward_norm, running_stats
 from jaxtor.util.minibatches import Minibatches
 from jaxtor.util.obs_norm import ObsNorm
 from jaxtor.util.reward_norm import RewardNorm
 from jaxtor.util.running_stats import RunningStats
 
 __all__ = [
-    "minibatches",
-    "obs_norm",
-    "reward_norm",
-    "running_stats",
-    "ObsNorm",
     "Minibatches",
+    "ObsNorm",
     "RewardNorm",
     "RunningStats",
 ]

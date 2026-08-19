@@ -71,7 +71,7 @@ from jaxtor.agent import (
     partition,
 )
 from jaxtor.env import gymnax
-from jaxtor.eval.mc import Eval
+from jaxtor.eval import McEval
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 
 
@@ -183,7 +183,7 @@ optim: Any = optax.chain(
 
 
 eval_imc = Imc(agent=replace(agent, deterministic=True), mc=mc)
-evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluator = McEval(imc=eval_imc, n_step=cfg.max_eps_len)
 evaluate = jax.jit(evaluator.evaluate)
 
 

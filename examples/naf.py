@@ -97,7 +97,7 @@ from jaxtor.agent import (
     partition,
 )
 from jaxtor.env import gymnasium
-from jaxtor.eval.mc import Eval
+from jaxtor.eval import McEval
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 from jaxtor.util import Minibatches, ObsNorm, RewardNorm, RunningStats
 
@@ -293,7 +293,7 @@ inference = QNextVInference(agent=agent, seq_axis=1)
 
 rew_norm = RewardNorm(
     gamma=cfg.gamma,
-    rms=RunningStats(),
+    stats=RunningStats(),
     seq_axis=1,
     clip=10.0,
     enabled=cfg.norm_rew,
@@ -314,7 +314,7 @@ optim: Any = optax.chain(
 
 eval_mc = VecMc(mc=Mc(max_eps_len=cfg.max_eps_len, env=eval_env))
 eval_imc = Imc(agent=agent, mc=eval_mc)
-evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluator = McEval(imc=eval_imc, n_step=cfg.max_eps_len)
 evaluate = jax.jit(evaluator.evaluate)
 q_lambda = partial(
     rlax.general_off_policy_returns_from_q_and_v,

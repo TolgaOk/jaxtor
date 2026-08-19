@@ -93,7 +93,7 @@ from jaxtor.agent import (
     partition,
 )
 from jaxtor.env import gymnax
-from jaxtor.eval.mc import Eval
+from jaxtor.eval import McEval
 from jaxtor.sampler import EpisodeStats, Imc, Mc, Roll, VecMc
 from jaxtor.util import Minibatches, ObsNorm, RewardNorm, RunningStats
 
@@ -238,7 +238,7 @@ inference = VPiNextVInference(agent=agent, seq_axis=1)
 
 rew_norm = RewardNorm(
     gamma=cfg.gamma,
-    rms=RunningStats(),
+    stats=RunningStats(),
     seq_axis=1,
     clip=10.0,
 )
@@ -251,7 +251,7 @@ optim: Any = optax.chain(
 
 
 eval_imc = Imc(agent=replace(agent, deterministic=True), mc=mc)
-evaluator = Eval(imc=eval_imc, episode_len=cfg.max_eps_len)
+evaluator = McEval(imc=eval_imc, n_step=cfg.max_eps_len)
 evaluate = jax.jit(evaluator.evaluate)
 
 

@@ -1,11 +1,14 @@
 """Sampling-based evaluation over an induced Markov chain.
 
-``Eval`` derives episode metrics from public transition fields::
+``McEval`` derives episode metrics from public transition fields::
 
-    evaluator = Eval(imc=imc, episode_len=500)
+    from jaxtor.eval import McEval
+
+    evaluator = McEval(imc=imc, n_step=500)
     metrics, state = evaluator.evaluate(state)
 
-The sampler state is advanced without exposing its internal structure.
+Each call requires a sampler state at an episode boundary and advances it
+without exposing its internal structure.
 """
 
 from __future__ import annotations
@@ -27,24 +30,35 @@ class Transition(Protocol):
 
 
 class Imc[Sample: Transition, S](Protocol):
-    """Single-step sampler surface consumed by ``Eval``."""
+    """Single-step sampler surface consumed by ``McEval``."""
 
     def sample(self, state: S) -> tuple[Sample, S]: ...
 
 
 @dataclass
 class Eval[Sample: Transition, S]:
-    """Evaluate completed episodes from a fixed-length rollout.
+    """Evaluate completed episodes over a fixed-step sampling window.
+
+    Required protocols::
+
+        imc.sample(state) -> (transition, state)
+        transition: rew, term, trun
 
     Attributes:
         imc: Single-step sampler consumed by the evaluator.
-        episode_len: Number of environment steps per evaluation.
-        unroll: Loop unroll factor for ``jax.lax.scan``.
+        n_step: Number of environment steps per evaluation.
+        _unroll: Loop-unroll factor passed to :func:`jax.lax.scan`.
+
+    Public dataclasses:
+        Metrics: Aggregate statistics for completed episodes.
+
+    Public methods:
+        evaluate: Evaluate one fixed-step sampling window.
     """
 
     imc: Imc[Sample, S]
-    episode_len: int
-    unroll: int = 1
+    n_step: int
+    _unroll: int = 1
 
     @dataclass
     class _Accumulator:
@@ -105,6 +119,13 @@ class Eval[Sample: Transition, S]:
         max_eps_rew: jax.Array
         n_episodes: jax.Array
         trun_rate: jax.Array
+
+    def __post_init__(self) -> None:
+        """Validate the static scan configuration."""
+        if self.n_step < 1:
+            raise ValueError("n_step must be positive")
+        if self._unroll < 1:
+            raise ValueError("_unroll must be positive")
 
     @staticmethod
     def _init_accumulator(reward: jax.Array) -> Eval._Accumulator:
@@ -199,23 +220,19 @@ class Eval[Sample: Transition, S]:
         return self._Carry(imc=imc, accumulator=accumulator), None
 
     def evaluate(self, state: S) -> tuple[Eval.Metrics, S]:
-        """Evaluate completed episodes and return the advanced sampler state.
+        """Evaluate one sampling window and return the advanced sampler state.
 
-        The input state is expected to begin at an episode boundary. Metrics
-        cover every episode completed during this call; incomplete trailing
-        episodes are excluded.
+        The input state must begin at an episode boundary. Metrics cover every
+        episode completed during this call; incomplete trailing episodes are
+        excluded. The returned state may be mid-episode and should not seed a
+        later evaluation call.
 
         Args:
-            state: Freshly initialized sampler state.
+            state: Sampler state at an episode boundary.
 
         Returns:
             Evaluation metrics and the advanced sampler state.
         """
-        if self.episode_len < 1:
-            raise ValueError("episode_len must be positive")
-        if self.unroll < 1:
-            raise ValueError("unroll must be positive")
-
         transition, state = self.imc.sample(state)
         accumulator, _ = self._accumulate(
             self._init_accumulator(transition.rew),
@@ -225,7 +242,7 @@ class Eval[Sample: Transition, S]:
             self._step,
             self._Carry(imc=state, accumulator=accumulator),
             None,
-            length=self.episode_len - 1,
-            unroll=self.unroll,
+            length=self.n_step - 1,
+            unroll=self._unroll,
         )
         return self._summarize(carry.accumulator), carry.imc

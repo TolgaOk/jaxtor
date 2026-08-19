@@ -3,7 +3,8 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from jaxtor.util.running_stats import RunningStats
+
+from jaxtor.util import RunningStats
 
 
 # =============================================================================
@@ -109,8 +110,8 @@ def test_negative_clip_is_rejected():
         RunningStats(clip=-1.0)
 
 
-def test_update_matches_ppo_inline():
-    """Update output matches the inline version from ppo.py."""
+def test_update_matches_parallel_welford_formula():
+    """Update output matches a direct parallel Welford calculation."""
     rs = RunningStats()
     state = RunningStats.State(
         mean=jnp.zeros(3), var=jnp.ones(3), count=jnp.float32(1e-4)
@@ -118,7 +119,7 @@ def test_update_matches_ppo_inline():
     key = jax.random.PRNGKey(42)
     batch = jax.random.normal(key, (100, 3))
 
-    # Inline version from ppo.py
+    # Parallel Welford merge.
     batch_mean = jnp.mean(batch, axis=0)
     batch_var = jnp.var(batch, axis=0)
     batch_count = batch.shape[0]
@@ -175,8 +176,8 @@ def test_normalize_without_clip():
     assert normed[0] > 10.0
 
 
-def test_normalize_matches_ppo_inline():
-    """Normalize with clip=10 matches ppo.py's normalize_obs."""
+def test_normalize_matches_reference_formula():
+    """Normalization matches a direct calculation with clipping."""
     rs = RunningStats(clip=10.0)
     state = RunningStats.State(
         mean=jnp.array([1.0, 2.0]),
@@ -185,7 +186,7 @@ def test_normalize_matches_ppo_inline():
     )
     x = jnp.array([3.0, 4.0])
 
-    # Inline version from ppo.py
+    # Direct normalization.
     expected = (x - state.mean) / jnp.sqrt(state.var + 1e-8)
     expected = jnp.clip(expected, -10.0, 10.0)
 
