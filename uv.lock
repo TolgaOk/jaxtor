@@ -540,7 +540,6 @@ source = { editable = "." }
 dependencies = [
     { name = "chex" },
     { name = "jax" },
-    { name = "jaxtyping" },
 ]
 
 [package.optional-dependencies]
@@ -550,16 +549,15 @@ env = [
     { name = "gymnasium", extra = ["mujoco"] },
     { name = "gymnax" },
     { name = "jaxdp" },
+    { name = "jaxtyping" },
     { name = "mujoco-mjx" },
 ]
 example = [
-    { name = "distrax" },
     { name = "equinox" },
     { name = "gymnasium", extra = ["mujoco"] },
     { name = "gymnax" },
     { name = "jaxdp" },
     { name = "optax" },
-    { name = "rich" },
     { name = "rlax" },
     { name = "tyro" },
 ]
@@ -575,7 +573,6 @@ dev = [
 requires-dist = [
     { name = "chex", specifier = ">=0.1.91" },
     { name = "distrax", marker = "extra == 'env'", specifier = ">=0.1.7" },
-    { name = "distrax", marker = "extra == 'example'", specifier = ">=0.1.7" },
     { name = "envpool", marker = "extra == 'env'", specifier = ">=1.2.5" },
     { name = "equinox", marker = "extra == 'example'", specifier = ">=0.13.4" },
     { name = "gymnasium", extras = ["mujoco"], marker = "extra == 'env'", specifier = ">=1.2.3" },
@@ -585,10 +582,9 @@ requires-dist = [
     { name = "jax", specifier = ">=0.8.0" },
     { name = "jaxdp", marker = "extra == 'env'", git = "https://github.com/TolgaOk/jaxdp?rev=v0.3.0" },
     { name = "jaxdp", marker = "extra == 'example'", git = "https://github.com/TolgaOk/jaxdp?rev=v0.3.0" },
-    { name = "jaxtyping", specifier = ">=0.3.3" },
+    { name = "jaxtyping", marker = "extra == 'env'", specifier = ">=0.3.3" },
     { name = "mujoco-mjx", marker = "extra == 'env'", specifier = "==3.5.0" },
     { name = "optax", marker = "extra == 'example'", specifier = ">=0.2.7" },
-    { name = "rich", marker = "extra == 'example'", specifier = ">=14.2.0" },
     { name = "rlax", marker = "extra == 'example'", specifier = ">=0.1.8" },
     { name = "tyro", marker = "extra == 'example'", specifier = ">=1.0.6" },
 ]
