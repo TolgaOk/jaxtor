@@ -30,7 +30,7 @@ Components::
     │   └── RunningStats
     ├── stats: EpisodeStats
     ├── batches: Minibatches
-    └── Eval
+    └── McEval
         └── Imc
             ├── deterministic agent
             └── mc

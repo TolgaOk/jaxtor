@@ -81,12 +81,7 @@ def combine[S](params: S, frozen: S) -> S:
 
 @runtime_checkable
 class Function[In, Out](Protocol):
-    """Callable interface used by :class:`Module`.
-
-    Required methods::
-
-        __call__(input) -> output
-    """
+    """Callable consumed by :class:`Module`."""
 
     def __call__(self, x: In, /) -> Out: ...
 
@@ -180,12 +175,7 @@ class Module[Out]:
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation interface used by :class:`Model`.
-
-    Required methods::
-
-        apply(input, state) -> (output, state)
-    """
+    """Stateful transform consumed by :class:`Model`."""
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
@@ -246,16 +236,9 @@ class Model[In, Feat, Pred, BodyS, HeadS]:
 
 
 class Normalizer[Value, S](Protocol):
-    """Normalization interface used by :class:`NormModel`.
-
-    Required methods::
-
-        apply(value, state) -> (normalized_value, state)
-        update(value, state) -> state
-    """
+    """Stateful normalizer consumed by :class:`NormModel`."""
 
     def apply(self, x: Value, state: S, /) -> tuple[Value, S]: ...
-
     def update(self, x: Value, state: S, /) -> S: ...
 
 

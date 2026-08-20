@@ -102,8 +102,23 @@ class MdpConfig(Protocol):
 class TabularEnv:
     """Index-based tabular MDP environment.
 
+    Required protocols::
+
+        config.max_eps_len: int
+        config.init_mdp(key) -> mdp
+
     Attributes:
         config: MDP configuration used to initialize dynamics and truncation.
+
+    Public dataclasses:
+        State: MDP arrays, current state index, and episode step.
+        Step: One environment transition.
+
+    Public methods:
+        init: Initialize an MDP and environment state.
+        reset: Sample an initial state.
+        step: Advance the MDP once.
+        obs: Read the current state index.
     """
 
     @dataclass

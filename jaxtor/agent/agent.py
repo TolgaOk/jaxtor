@@ -38,14 +38,7 @@ from chex import dataclass
 
 
 class Distribution[Act, Eval](Protocol):
-    """Action-distribution interface used by policy agents.
-
-    Required methods::
-
-        sample(key) -> action
-        evaluate(action) -> evaluation
-        mode() -> action
-    """
+    """Action distribution consumed by policy agents."""
 
     def sample(self, key: jax.Array) -> Act: ...
     def evaluate(self, act: Act) -> Eval: ...
@@ -53,23 +46,13 @@ class Distribution[Act, Eval](Protocol):
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation interface used by composed agents.
-
-    Required methods::
-
-        apply(input, state) -> (output, state)
-    """
+    """Stateful transform consumed by composed agents."""
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 
 
 class Agent[Obs, S](Protocol):
-    """Action-selection interface wrapped by :class:`Ou`.
-
-    Required methods::
-
-        act(obs, state) -> (action, state)
-    """
+    """Action selector wrapped by :class:`Ou`."""
 
     def act(self, obs: Obs, state: S) -> tuple[jax.Array, S]: ...
 

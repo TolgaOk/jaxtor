@@ -28,6 +28,10 @@ class Sampler[Sample, S](Protocol):
 class Roll[Sample, S]:
     """Stack samples from a stateful sampler along one sequence axis.
 
+    Required protocols::
+
+        imc.sample(sampler_state) -> (sample, sampler_state)
+
     Attributes:
         imc: Stateful single-step sampler.
         seq_len: Number of samples in the sequence.

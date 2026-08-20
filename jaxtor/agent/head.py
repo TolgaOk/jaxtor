@@ -37,12 +37,7 @@ def _assert_value(value: jax.Array, features: jax.Array) -> None:
 
 
 class Transform[In, Out, S](Protocol):
-    """Stateful transformation interface used by semantic heads.
-
-    Required methods::
-
-        apply(input, state) -> (output, state)
-    """
+    """Stateful transform consumed by semantic heads."""
 
     def apply(self, x: In, state: S, /) -> tuple[Out, S]: ...
 

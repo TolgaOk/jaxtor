@@ -21,7 +21,7 @@ Components::
     │       ├── agent
     │       └── mc
     ├── stats: EpisodeStats
-    └── Eval
+    └── McEval
         └── Imc
             ├── deterministic agent
             └── mc

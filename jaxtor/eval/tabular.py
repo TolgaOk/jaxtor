@@ -1,9 +1,11 @@
 """Convergence evaluation for tabular value-learning agents.
 
-``Eval`` compares an agent's Q-values with their previous values, the Bellman
+``TabularEval`` compares an agent's Q-values with their previous values, the Bellman
 optimality target, and known optimal Q-values::
 
-    evaluator = Eval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    from jaxtor.eval import TabularEval
+
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
     state = evaluator.init(agent_state)
     metrics, state = evaluator.evaluate(agent_state, state)
 """
@@ -68,7 +70,7 @@ def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
 
 
 class Agent[S](Protocol):
-    """Finite-action value interface consumed by ``Eval``."""
+    """Finite-action value agent consumed by ``TabularEval``."""
 
     def qvec(self, obs: jax.Array, state: S) -> jax.Array: ...
 
@@ -77,11 +79,23 @@ class Agent[S](Protocol):
 class Eval[AgentS]:
     """Evaluate convergence of a tabular value-learning agent.
 
+    Required protocols::
+
+        agent.qvec(observations, agent_state) -> q_values
+
     Attributes:
         mdp: Tabular MDP being solved.
         gamma: Discount factor.
         agent: Agent exposing Q-values for arbitrary state indices.
         opt_q: Reference optimal Q-values with shape ``(A, S)``.
+
+    Public dataclasses:
+        State: Previous Q-values and evaluation count.
+        Metrics: Convergence and greedy-policy diagnostics.
+
+    Public methods:
+        init: Initialize convergence history.
+        evaluate: Evaluate the current agent and advance history.
     """
 
     mdp: Mdp

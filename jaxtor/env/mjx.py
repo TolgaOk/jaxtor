@@ -67,11 +67,9 @@ class Task(Protocol):
     """Per-environment observation, reward, and termination semantics."""
 
     def obs(self, data: mjx.Data) -> chex.Array: ...
-
     def reward(
         self, x_velocity: chex.Numeric, act: chex.Array, data: mjx.Data
     ) -> chex.Array: ...
-
     def terminal(self, data: mjx.Data) -> chex.Array: ...
 
 
@@ -174,6 +172,12 @@ class Backend:
 class MjxEnv:
     """Adapter for a single MJX MuJoCo environment.
 
+    Required protocols::
+
+        task.obs(data) -> observation
+        task.reward(x_velocity, action, data) -> reward
+        task.terminal(data) -> termination
+
     Attributes:
         mjx_model: Device-resident MJX model.
         task: Per-environment observation/reward/termination semantics.
@@ -186,6 +190,16 @@ class MjxEnv:
             reset perturbation.
         reset_qvel_gaussian: Sample reset ``qvel`` from a scaled Gaussian
             (HalfCheetah/Ant) instead of the uniform default.
+
+    Public dataclasses:
+        State: MJX physics data.
+        Step: One environment transition.
+
+    Public methods:
+        init: Initialize physics state.
+        reset: Reset physics state.
+        step: Advance one control step.
+        obs: Read the current observation.
     """
 
     mjx_model: mjx.Model

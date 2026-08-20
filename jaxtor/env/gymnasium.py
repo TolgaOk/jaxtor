@@ -358,9 +358,7 @@ class CallbackIO:
         )
         initial_obs = np.asarray(initial_obs, dtype=self.schema.obs_dtype)
         expected_shape = (
-            (capacity, *self.schema.obs_shape)
-            if vectorized
-            else self.schema.obs_shape
+            (capacity, *self.schema.obs_shape) if vectorized else self.schema.obs_shape
         )
         if initial_obs.shape != expected_shape:
             runtime_env.close()
