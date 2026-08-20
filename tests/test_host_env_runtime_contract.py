@@ -48,9 +48,7 @@ def test_nested_vmap_is_lazy_and_compiled_calls_route_independent_runtimes():
     with ExitStack() as cleanup:
         cleanup.callback(env.close, first)
         cleanup.callback(equivalent_env.close, second)
-        first_step, first_next = _ready(
-            compiled_step(step_keys_2d, actions_2d, first)
-        )
+        first_step, first_next = _ready(compiled_step(step_keys_2d, actions_2d, first))
         second_step, second_next = _ready(
             compiled_step(_keys(3, (2, 3)), actions_2d, second)
         )
@@ -155,9 +153,7 @@ def test_vec_mc_threads_each_lane_of_a_mapped_environment_state():
     vec_mc = VecMc(mc=mc)
 
     try:
-        sampler_state = _ready(
-            jax.jit(vec_mc.init)(_keys(31, (3,)), env_state)
-        )
+        sampler_state = _ready(jax.jit(vec_mc.init)(_keys(31, (3,)), env_state))
 
         # A lane-wise composition retains one mapped axis; broadcasting the
         # complete environment state would introduce a second axis here.
@@ -165,9 +161,7 @@ def test_vec_mc_threads_each_lane_of_a_mapped_environment_state():
         assert env.obs(sampler_state.env).shape == (3, 4)
 
         transition, sampler_next = _ready(
-            jax.jit(vec_mc.sample)(
-                jnp.zeros((3,), dtype=jnp.int32), sampler_state
-            )
+            jax.jit(vec_mc.sample)(jnp.zeros((3,), dtype=jnp.int32), sampler_state)
         )
 
         assert transition.obs.shape == (3, 4)
