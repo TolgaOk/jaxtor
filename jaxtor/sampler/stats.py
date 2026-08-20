@@ -12,21 +12,11 @@ from chex import dataclass
 
 
 class Sequence(Protocol):
-    """Sequence fields consumed by ``EpisodeStats``.
+    """Transition sequence consumed by ``EpisodeStats``."""
 
-    Each field has the same shape and contains at least one sequence axis. A
-    scalar sequence uses ``(T,)``. A vector sequence commonly uses ``(N, T)``
-    with ``EpisodeStats(seq_axis=1)``.
-
-    Attributes:
-        rew: Rewards with minimum shape ``(T,)``.
-        term: Termination flags with the same shape as ``rew``.
-        trun: Truncation flags with the same shape as ``rew``.
-    """
-
-    rew: jax.Array  # Minimum (T,); commonly (N, T) when seq_axis=1.
-    term: jax.Array  # Same shape as rew.
-    trun: jax.Array  # Same shape as rew.
+    rew: jax.Array
+    term: jax.Array
+    trun: jax.Array
 
 
 @dataclass
@@ -36,6 +26,12 @@ class EpisodeStats:
     ``seq_axis`` identifies the sequence time axis. Every other axis in the
     reward and boundary arrays identifies an independent environment lane.
     Partial episodes remain in state across calls to :meth:`update`.
+
+    Required protocols::
+
+        seq.rew: jax.Array
+        seq.term: jax.Array
+        seq.trun: jax.Array
 
     Attributes:
         seq_axis: Axis containing consecutive environment transitions.

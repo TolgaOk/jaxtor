@@ -45,6 +45,12 @@ class Mc[EnvS, Step: EnvStep]:
     Its state keeps the current observation and episode index so
     :meth:`observe` does not inspect backend-specific environment state.
 
+    Required protocols::
+
+        env.reset(key, env_state) -> (observation, env_state)
+        env.step(key, action, env_state) -> (transition, env_state)
+        transition: nobs, rew, term, trun
+
     Attributes:
         max_eps_len: Maximum number of transitions in one episode.
         env: Environment implementing ``reset`` and non-autoreset ``step``.

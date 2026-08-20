@@ -30,6 +30,16 @@ class GymnaxEnv:
     Attributes:
         env: Gymnax environment instance.
         params: Environment parameters.
+
+    Public dataclasses:
+        State: Wrapped Gymnax state.
+        Step: One environment transition.
+
+    Public methods:
+        init: Initialize environment state.
+        reset: Reset to a new episode.
+        step: Advance once without autoreset.
+        obs: Read the current observation.
     """
 
     env: Environment

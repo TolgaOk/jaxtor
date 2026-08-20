@@ -34,6 +34,12 @@ class Agent[Obs, Act, S](Protocol):
 class Imc[Obs, Act, Sample, AgentS, McS]:
     """Join an action-selecting agent to a Markov chain for one step.
 
+    Required protocols::
+
+        agent.act(observation, agent_state) -> (action, agent_state)
+        mc.observe(mc_state) -> observation
+        mc.sample(action, mc_state) -> (transition, mc_state)
+
     Attributes:
         agent: Agent that selects an action from the current observation.
         mc: Open Markov-chain sampler advanced by that action.

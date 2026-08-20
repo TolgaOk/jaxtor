@@ -28,54 +28,28 @@ from chex import dataclass
 
 
 class ValuePolicy[Pi](Protocol):
-    """Joint value-policy result consumed by value-policy inference.
-
-    Required attributes::
-
-        v: jax.Array
-        pi: Pi
-    """
+    """Joint value-policy result consumed by inference."""
 
     v: jax.Array
     pi: Pi
 
 
 class VPiAgent[Pi, S](Protocol):
-    """Value-policy interface used by joint policy and value inference.
-
-    Required methods::
-
-        v(obs, agent_state) -> (value: jax.Array, agent_state)
-        vpi(obs, agent_state) -> (value_policy: ValuePolicy, agent_state)
-    """
+    """Value-policy agent consumed by inference."""
 
     def v(self, obs: jax.Array, state: S) -> tuple[jax.Array, S]: ...
     def vpi(self, obs: jax.Array, state: S) -> tuple[ValuePolicy[Pi], S]: ...
 
 
 class QVAgent[S](Protocol):
-    """Action-value and value interface used by Q/V inference.
-
-    Required methods::
-
-        q(obs, action, agent_state) -> (q: jax.Array, agent_state)
-        v(obs, agent_state) -> (value: jax.Array, agent_state)
-    """
+    """Action-value and value agent consumed by inference."""
 
     def q(self, obs: jax.Array, act: jax.Array, state: S) -> tuple[jax.Array, S]: ...
     def v(self, obs: jax.Array, state: S) -> tuple[jax.Array, S]: ...
 
 
 class Sequence(Protocol):
-    """Transition sequence interface used by value inference.
-
-    Required attributes::
-
-        obs: jax.Array
-        nobs: jax.Array
-        term: jax.Array
-        trun: jax.Array
-    """
+    """Transition sequence consumed by value-policy inference."""
 
     obs: jax.Array
     nobs: jax.Array
@@ -84,16 +58,7 @@ class Sequence(Protocol):
 
 
 class ActionSequence(Protocol):
-    """Transition sequence interface used by action-value inference.
-
-    Required attributes::
-
-        obs: jax.Array
-        act: jax.Array
-        nobs: jax.Array
-        term: jax.Array
-        trun: jax.Array
-    """
+    """Transition sequence consumed by action-value inference."""
 
     obs: jax.Array
     act: jax.Array
