@@ -65,18 +65,20 @@ class GymMujocoEnv(Protocol):
     model: GymModel
     init_qpos: np.ndarray
     init_qvel: np.ndarray
-    is_healthy: bool
 
     def reset(self, *, seed: int | None = None): ...
-
     def step(
         self,
         action: np.ndarray,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]: ...
-
     def set_state(self, qpos: np.ndarray, qvel: np.ndarray) -> None: ...
-
     def _get_obs(self) -> np.ndarray: ...
+
+
+class HealthyGymMujocoEnv(GymMujocoEnv, Protocol):
+    """Gymnasium MuJoCo environment exposing health termination."""
+
+    is_healthy: bool
 
 
 def _is_gym_mujoco(env: object) -> TypeGuard[GymMujocoEnv]:
@@ -88,13 +90,17 @@ def _is_gym_mujoco(env: object) -> TypeGuard[GymMujocoEnv]:
             "model",
             "init_qpos",
             "init_qvel",
-            "is_healthy",
             "reset",
             "step",
             "set_state",
             "_get_obs",
         )
     )
+
+
+def _has_health(env: GymMujocoEnv) -> TypeGuard[HealthyGymMujocoEnv]:
+    """Check whether an environment exposes health termination."""
+    return hasattr(env, "is_healthy")
 
 
 def _gym_mujoco(name: str) -> GymMujocoEnv:
@@ -209,6 +215,8 @@ def test_obs_termination_parity_random_states(name, nu, obs_dim, terminates, cli
 
             max_obs = max(max_obs, np.abs(obs_g - obs_m).max())
             if terminates:
+                if not _has_health(raw):
+                    raise TypeError(f"{name!r} does not expose is_healthy")
                 term_g = not raw.is_healthy
                 term_mismatch += int(term_g != term_m)
                 saw_unhealthy = saw_unhealthy or term_g
