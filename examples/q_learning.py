@@ -13,7 +13,6 @@ Components::
     │   └── mc: Mc
     │       └── TabularEnv
     └── evaluator: TabularEval
-        └── agent
 
 State::
 
@@ -153,7 +152,6 @@ opt_rho = float(jnp.sum(env_state.mdp.initial * jnp.max(opt_q, axis=0)))
 evaluator = TabularEval(
     mdp=env_state.mdp,
     gamma=cfg.gamma,
-    agent=agent,
     opt_q=opt_q,
 )
 evaluate = jax.jit(evaluator.evaluate)
@@ -183,13 +181,13 @@ def train() -> TrainState:
         mc=mc.init(mc_key, env_state),
         agent=agent_state,
     )
-    eval_state = evaluator.init(agent_state)
+    eval_state = evaluator.init(agent_state.q)
 
     print(f"Q-learning on {cfg.env_name} ({state_size}S, {action_size}A)")
     for step in range(1, cfg.n_steps + 1):
         state = update(state, step - 1)
         if step % cfg.eval_freq == 0:
-            metrics, eval_state = evaluate(state.agent, eval_state)
+            metrics, eval_state = evaluate(state.agent.q, eval_state)
             print(
                 f"step={step:7d}"
                 f"  bellman={float(metrics.bellman_linf):.4f}"

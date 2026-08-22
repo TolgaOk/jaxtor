@@ -1,18 +1,16 @@
-"""Convergence evaluation for tabular value-learning agents.
+"""Convergence evaluation for tabular Q-values.
 
-``TabularEval`` compares an agent's Q-values with their previous values, the Bellman
-optimality target, and known optimal Q-values::
+``TabularEval`` compares a Q-table with its previous value, the Bellman optimality
+target, and known optimal Q-values::
 
     from jaxtor.eval import TabularEval
 
-    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
-    state = evaluator.init(agent_state)
-    metrics, state = evaluator.evaluate(agent_state, state)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
+    state = evaluator.init(q)
+    metrics, state = evaluator.evaluate(q, state)
 """
 
 from __future__ import annotations
-
-from typing import Protocol
 
 import chex
 import jax
@@ -69,24 +67,13 @@ def optimal_q(mdp: Mdp, gamma: float, n_iters: int = 20) -> jax.Array:
     return q
 
 
-class Agent[S](Protocol):
-    """Finite-action value agent consumed by ``TabularEval``."""
-
-    def qvec(self, obs: jax.Array, state: S) -> jax.Array: ...
-
-
 @dataclass
-class Eval[AgentS]:
-    """Evaluate convergence of a tabular value-learning agent.
-
-    Required protocols::
-
-        agent.qvec(observations, agent_state) -> q_values
+class Eval:
+    """Evaluate convergence of tabular Q-values.
 
     Attributes:
         mdp: Tabular MDP being solved.
         gamma: Discount factor.
-        agent: Agent exposing Q-values for arbitrary state indices.
         opt_q: Reference optimal Q-values with shape ``(A, S)``.
 
     Public dataclasses:
@@ -95,12 +82,11 @@ class Eval[AgentS]:
 
     Public methods:
         init: Initialize convergence history.
-        evaluate: Evaluate the current agent and advance history.
+        evaluate: Evaluate the current Q-table and advance history.
     """
 
     mdp: Mdp
     gamma: float
-    agent: Agent[AgentS]
     opt_q: jax.Array
 
     @dataclass
@@ -147,60 +133,51 @@ class Eval[AgentS]:
         pi_diff_linf: jax.Array
         iteration: jax.Array
 
-    def _q_values(self, agent_state: AgentS) -> jax.Array:
-        """Read the complete Q-table through the agent protocol."""
-        all_states = jnp.arange(self.mdp.state_size)
-        q_values = self.agent.qvec(all_states, agent_state)
-        chex.assert_shape(
-            q_values,
-            (self.mdp.action_size, self.mdp.state_size),
-        )
-        return q_values
-
-    def init(self, agent_state: AgentS) -> Eval.State:
-        """Initialize convergence history from an agent state.
+    def init(self, q: jax.Array) -> Eval.State:
+        """Initialize convergence history from a Q-table.
 
         Args:
-            agent_state: Agent state providing the initial Q-values.
+            q: Initial Q-values with shape ``(A, S)``.
 
         Returns:
             Initial evaluator state.
         """
+        chex.assert_shape(q, (self.mdp.action_size, self.mdp.state_size))
         return self.State(
-            prev_q=self._q_values(agent_state),
+            prev_q=q,
             step=jnp.zeros((), dtype=jnp.int32),
         )
 
     def evaluate(
         self,
-        agent_state: AgentS,
+        q: jax.Array,
         state: Eval.State,
     ) -> tuple[Eval.Metrics, Eval.State]:
-        """Evaluate the current agent and advance convergence history.
+        """Evaluate a Q-table and advance convergence history.
 
         Args:
-            agent_state: Agent state to evaluate.
+            q: Current Q-values with shape ``(A, S)``.
             state: Current evaluator state.
 
         Returns:
             Convergence metrics and the advanced evaluator state.
         """
-        new_q = self._q_values(agent_state)
-        chex.assert_equal_shape([new_q, state.prev_q, self.opt_q])
+        chex.assert_shape(q, (self.mdp.action_size, self.mdp.state_size))
+        chex.assert_equal_shape([q, state.prev_q, self.opt_q])
 
         non_term = (1 - self.mdp.terminal)[None, :]
         n_non_term = jnp.sum(non_term)
 
-        diff = new_q - state.prev_q
+        diff = q - state.prev_q
         diff_l1 = jnp.sum(jnp.abs(diff) * non_term) / n_non_term
         diff_linf = jnp.max(jnp.abs(diff) * non_term)
 
-        bellman_target = _bellman_optimality(self.mdp, new_q, self.gamma)
-        bellman_error = new_q - bellman_target
+        bellman_target = _bellman_optimality(self.mdp, q, self.gamma)
+        bellman_error = q - bellman_target
         bellman_l1 = jnp.sum(jnp.abs(bellman_error) * non_term) / n_non_term
         bellman_linf = jnp.max(jnp.abs(bellman_error) * non_term)
 
-        value_error = new_q - self.opt_q
+        value_error = q - self.opt_q
         value_l1 = jnp.sum(jnp.abs(value_error) * non_term) / n_non_term
         value_linf = jnp.max(jnp.abs(value_error) * non_term)
         value_norm = jnp.linalg.norm(value_error * non_term) / jnp.linalg.norm(
@@ -208,7 +185,7 @@ class Eval[AgentS]:
         )
 
         prev_pi = _greedy_policy(state.prev_q)
-        new_pi = _greedy_policy(new_q)
+        new_pi = _greedy_policy(q)
         pi_diff = new_pi - prev_pi
         pi_diff_l1 = jnp.sum(jnp.abs(pi_diff) * non_term) / n_non_term
         pi_diff_linf = jnp.max(jnp.abs(pi_diff) * non_term)
@@ -233,5 +210,5 @@ class Eval[AgentS]:
                 pi_diff_linf=pi_diff_linf,
                 iteration=next_step,
             ),
-            self.State(prev_q=new_q, step=next_step),
+            self.State(prev_q=q, step=next_step),
         )

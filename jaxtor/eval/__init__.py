@@ -2,7 +2,7 @@
 
 Components:
     McEval: Sampling-based evaluator with batched environment support.
-    TabularEval: Convergence diagnostics for tabular value-learning agents
+    TabularEval: Convergence diagnostics for tabular Q-values
         (requires ``jaxtor[env]``).
     optimal_q: Optimal Q-values via policy iteration
         (requires ``jaxtor[env]``).
