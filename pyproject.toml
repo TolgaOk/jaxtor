@@ -3,6 +3,8 @@ name = "jaxtor"
 version = "0.2.0"
 description = "JAX-based, composable reinforcement learning components to streamline experimentation"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "TolgaOk", email = "tolgaokk@gmail.com" }
 ]
@@ -16,9 +18,6 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.hatch.build.targets.wheel]
 packages = ["jaxtor"]
 
@@ -28,19 +27,23 @@ env = [
     "envpool>=1.2.5",
     "gymnasium[mujoco]>=1.2.3",
     "gymnax>=0.0.9",
-    "jaxdp",
+    "jaxdp>=0.3.0,<0.4.0",
     "jaxtyping>=0.3.3",
     "mujoco-mjx==3.5.0",
 ]
 example = [
     "gymnasium[mujoco]>=1.2.3",
     "gymnax>=0.0.9",
-    "jaxdp",
+    "jaxdp>=0.3.0,<0.4.0",
     "equinox>=0.13.4",
     "optax>=0.2.7",
     "rlax>=0.1.8",
     "tyro>=1.0.6",
 ]
+
+[project.urls]
+Repository = "https://github.com/TolgaOk/jaxtor"
+Issues = "https://github.com/TolgaOk/jaxtor/issues"
 
 [dependency-groups]
 dev = [
