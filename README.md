@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TolgaOk/jaxtor/main/doc/jaxtor-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/TolgaOk/jaxtor/main/doc/jaxtor-light.svg">
-  <img alt="jaxtor" src="https://raw.githubusercontent.com/TolgaOk/jaxtor/main/doc/jaxtor-light.svg" width="640">
+  <source media="(prefers-color-scheme: dark)" srcset="doc/jaxtor-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="doc/jaxtor-light.svg">
+  <img alt="jaxtor" src="doc/jaxtor-light.svg" width="640">
 </picture>
 
 <br>
@@ -12,31 +12,24 @@
 
 Composable components for building reinforcement learning algorithms and experiments in <img src="https://raw.githubusercontent.com/jax-ml/jax/main/images/jax_logo_250px.png" height="16" alt="JAX" style="vertical-align: middle">.
 
-![Gridworld, parallel environment rollouts, replay buffer, continuous control, and evaluation returns](https://raw.githubusercontent.com/TolgaOk/jaxtor/main/doc/banner.svg)
+![Gridworld, parallel environment rollouts, replay buffer, continuous control, and evaluation returns](doc/banner.svg)
 
 `jaxtor` handles reinforcement learning (RL) boilerplate so you can focus on the experiment itself.
 Pair it with a neural network library such as [`equinox`](https://github.com/patrick-kidger/equinox) and an RL library such as [`rlax`](https://github.com/deepmind/rlax) to build your own experiments.
 
 ## Installation
 
-Install the core library.
+Choose the installation option that matches your needs:
 
 ```bash
-uv add jaxtor
-```
+# Core library
+uv add "jaxtor @ git+https://github.com/TolgaOk/jaxtor@v0.2.0"
 
-The optional extras require `jaxdp 0.3.x`.
-Install it from Git until version `0.3.x` is available on PyPI.
+# Core library with all environment adapters
+uv add "jaxtor[env] @ git+https://github.com/TolgaOk/jaxtor@v0.2.0"
 
-```bash
-uv add "jaxdp @ git+https://github.com/TolgaOk/jaxdp@v0.3.0"
-```
-
-Install all environment adapters or the dependencies used by the examples.
-
-```bash
-uv add "jaxtor[env]"
-uv add "jaxtor[example]"
+# Core library with the dependencies used by the examples
+uv add "jaxtor[example] @ git+https://github.com/TolgaOk/jaxtor@v0.2.0"
 ```
 
 ## Usage
@@ -66,7 +59,7 @@ sequence, state = jax.jit(roll.sample)(state)
 `jaxtor` uses **dependency injection** through local `Protocol`s.
 Most components are independent and do not import other `jaxtor` modules.
 Each declares the minimal interface it expects from its dependencies.
-For example, `Imc` only expects its agent to provide an `act` method (see [`imc.py`](https://github.com/TolgaOk/jaxtor/blob/main/jaxtor/sampler/imc.py)).
+For example, `Imc` only expects its agent to provide an `act` method (see [`imc.py`](jaxtor/sampler/imc.py)).
 This design removes the need for bulky or heavy-duty classes and keeps components independent, specialized, and lightweight.
 
 When a sampler needs a new feature, such as retaining the `logp` produced by the agent for `act`, that feature is added as another component instead of extending an existing one.
@@ -76,7 +69,7 @@ This allows `jaxtor` to scale horizontally.
 
 Single-script implementations of common RL algorithms.
 
-- [`examples/q_learning.py`](https://github.com/TolgaOk/jaxtor/blob/main/examples/q_learning.py): tabular Q-learning on Garnet MDP (`jaxdp`)
-- [`examples/reinforce.py`](https://github.com/TolgaOk/jaxtor/blob/main/examples/reinforce.py): REINFORCE on CartPole-v1 (`gymnax`)
-- [`examples/naf.py`](https://github.com/TolgaOk/jaxtor/blob/main/examples/naf.py): [NAF](https://arxiv.org/abs/1603.00748) on continuous-control environments (`gymnasium` or `envpool`)
-- [`examples/ppo.py`](https://github.com/TolgaOk/jaxtor/blob/main/examples/ppo.py): [PPO](https://arxiv.org/abs/1707.06347) on CartPole-v1 (`gymnax`)
+- [`examples/q_learning.py`](examples/q_learning.py): tabular Q-learning on Garnet MDP (`jaxdp`)
+- [`examples/reinforce.py`](examples/reinforce.py): REINFORCE on CartPole-v1 (`gymnax`)
+- [`examples/naf.py`](examples/naf.py): [NAF](https://arxiv.org/abs/1603.00748) on continuous-control environments (`gymnasium` or `envpool`)
+- [`examples/ppo.py`](examples/ppo.py): [PPO](https://arxiv.org/abs/1707.06347) on CartPole-v1 (`gymnax`)
