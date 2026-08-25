@@ -7,7 +7,7 @@ Evaluation components produce metrics while threading the evaluated state explic
 | Component | Role |
 | --- | --- |
 | `McEval` | Samples an induced Markov chain for a fixed number of steps and summarizes completed episodes. |
-| `TabularEval` | Measures convergence of a tabular Q-value agent. |
+| `TabularEval` | Measures convergence of a tabular Q-table. |
 | `optimal_q` | Computes reference optimal Q-values by policy iteration. |
 
 `TabularEval` and `optimal_q` require the `env` optional dependency.
@@ -33,15 +33,14 @@ Each evaluation must start from a fresh episode boundary because an incomplete t
 
 ### Tabular convergence
 
-`TabularEval` consumes an agent with `qvec(observations, state)`.
-It compares the current Q-table with its previous value, the Bellman optimality target, and known optimal Q-values.
+`TabularEval` compares the current Q-table with its previous value, the Bellman optimality target, and known optimal Q-values.
 
 ```python
 q_star = optimal_q(mdp, gamma=0.99)
-evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=q_star)
-state = evaluator.init(agent_state)
+evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=q_star)
+state = evaluator.init(q)
 
-metrics, state = evaluator.evaluate(updated_agent_state, state)
+metrics, state = evaluator.evaluate(updated_q, state)
 ```
 
 The metrics cover Q-value change, Bellman error, error against `q_star`, and the quality and stability of the greedy policy.

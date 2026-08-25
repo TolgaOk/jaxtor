@@ -4,28 +4,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from chex import dataclass
+import pytest
 from jaxtor.env import tabular
 from jaxtor.eval import TabularEval
 from jaxtor.eval import tabular as tabular_eval
-
-
-# =============================================================================
-# Fake agents
-# =============================================================================
-
-
-class TableAgent:
-    """Agent that returns a preloaded Q-table for any observation."""
-
-    @dataclass
-    class State:
-        q: jax.Array
-
-    def qvec(self, obs: jax.Array, state: TableAgent.State) -> jax.Array:
-        """Return the stored Q-table for the requested state indices."""
-        del obs
-        return state.q
 
 
 # =============================================================================
@@ -68,7 +50,7 @@ def _make_mdp(
 # =============================================================================
 
 
-def test_tabular_converged_agent_zero_error():
+def test_tabular_converged_values_zero_error():
     """Optimal Q-values produce zero error across all metrics."""
     key = jax.random.PRNGKey(0)
 
@@ -79,13 +61,10 @@ def test_tabular_converged_agent_zero_error():
     gamma = 0.99
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     assert jnp.allclose(metrics.diff_l1, 0.0, atol=1e-5)
     assert jnp.allclose(metrics.diff_linf, 0.0, atol=1e-5)
@@ -109,14 +88,10 @@ def test_tabular_known_offset_from_optimal():
     offset = 0.5
     shifted_q = opt_q + offset
 
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(shifted_q)
 
-    prev_state = TableAgent.State(q=shifted_q)
-    agent_state = TableAgent.State(q=shifted_q)
-    state = evaluator.init(prev_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(shifted_q, state)
 
     # L1 sums |error| over actions and averages over non-terminal states
     expected_l1 = offset * mdp.action_size
@@ -143,14 +118,10 @@ def test_tabular_terminal_states_masked():
     # Inject large error ONLY in terminal state (index 2)
     bad_q = opt_q.at[:, 2].set(999.0)
 
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    prev_state = TableAgent.State(q=opt_q)
-    agent_state = TableAgent.State(q=bad_q)
-    state = evaluator.init(prev_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(bad_q, state)
 
     # Value and diff metrics only reflect non-terminal states (which match opt_q)
     assert jnp.allclose(metrics.value_l1, 0.0, atol=1e-4)
@@ -170,20 +141,17 @@ def test_tabular_step_counter_increments():
     gamma = 0.99
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
-
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
     assert isinstance(state.step, jax.Array)
     assert state.step.shape == ()
     assert int(state.step) == 0
 
-    _, state = evaluator.evaluate(agent_state, state)
+    _, state = evaluator.evaluate(opt_q, state)
     assert state.step == 1
 
-    _, state = evaluator.evaluate(agent_state, state)
+    _, state = evaluator.evaluate(opt_q, state)
     assert state.step == 2
 
 
@@ -201,17 +169,15 @@ def test_tabular_previous_q_updated():
     q2 = jnp.ones((mdp.action_size, mdp.state_size)) * 2.0
     opt_q = _opt_q(mdp, gamma)
 
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
-
-    state = evaluator.init(TableAgent.State(q=q1))
-    _, state = evaluator.evaluate(TableAgent.State(q=q2), state)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(q1)
+    _, state = evaluator.evaluate(q2, state)
 
     assert jnp.array_equal(state.prev_q, q2)
 
 
-def test_tabular_same_agent_twice_zero_diff():
-    """Evaluating same agent state consecutively gives zero diff metrics."""
+def test_tabular_same_q_twice_zero_diff():
+    """Evaluating the same Q-table consecutively gives zero diff metrics."""
     key = jax.random.PRNGKey(5)
 
     config = tabular.garnet.Config(state_size=10, action_size=4)
@@ -221,16 +187,14 @@ def test_tabular_same_agent_twice_zero_diff():
     gamma = 0.99
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
-
-    agent_state = TableAgent.State(q=opt_q * 0.5)
-    state = evaluator.init(agent_state)
+    q = opt_q * 0.5
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(q)
 
     # First evaluation stores the current Q-values.
-    _, state = evaluator.evaluate(agent_state, state)
+    _, state = evaluator.evaluate(q, state)
     # Re-evaluating the same values produces zero change.
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(q, state)
 
     assert jnp.allclose(metrics.diff_l1, 0.0, atol=1e-6)
     assert jnp.allclose(metrics.diff_linf, 0.0, atol=1e-6)
@@ -249,13 +213,10 @@ def test_tabular_bellman_fixed_point():
     gamma = 0.99
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     assert jnp.allclose(metrics.bellman_l1, 0.0, atol=1e-2)
     assert jnp.allclose(metrics.bellman_linf, 0.0, atol=1e-2)
@@ -280,11 +241,9 @@ def test_tabular_policy_change_detected():
     q2 = q2.at[1, :].set(1.0)
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
-
-    state = evaluator.init(TableAgent.State(q=q1))
-    metrics, state = evaluator.evaluate(TableAgent.State(q=q2), state)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(q1)
+    metrics, state = evaluator.evaluate(q2, state)
 
     assert metrics.pi_diff_l1 > 0
     assert metrics.pi_diff_linf > 0
@@ -301,14 +260,11 @@ def test_tabular_jit_compilation():
     gamma = 0.99
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
-
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
     jit_evaluate = jax.jit(evaluator.evaluate)
-    metrics, state = jit_evaluate(agent_state, state)
+    metrics, state = jit_evaluate(opt_q, state)
 
     assert metrics.iteration == 1
     assert metrics.bellman_l1.shape == ()
@@ -325,13 +281,10 @@ def test_tabular_zero_discount():
     gamma = 0.0
 
     opt_q = _opt_q(mdp, gamma)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=gamma, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=gamma, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     assert jnp.allclose(metrics.bellman_l1, 0.0, atol=1e-5)
     assert jnp.allclose(metrics.value_l1, 0.0, atol=1e-5)
@@ -347,13 +300,10 @@ def test_tabular_all_terminal_produces_nan():
     mdp = _make_mdp(state_size=3, action_size=2, terminal=jnp.ones(3))
 
     opt_q = jnp.zeros((2, 3))
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     assert jnp.isnan(metrics.diff_l1)
     assert jnp.isnan(metrics.bellman_l1)
@@ -361,18 +311,16 @@ def test_tabular_all_terminal_produces_nan():
 
 
 def test_tabular_value_norm_inf_when_optimal_is_zero():
-    """value_norm is inf when opt_q is all zeros and agent Q is nonzero."""
+    """value_norm is inf when opt_q is all zeros and Q is nonzero."""
     mdp = _make_mdp(state_size=3, action_size=2)
 
     opt_q = jnp.zeros((2, 3))
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
 
-    agent_q = jnp.ones((2, 3))
-    agent_state = TableAgent.State(q=agent_q)
-    state = evaluator.init(agent_state)
+    q = jnp.ones((2, 3))
+    state = evaluator.init(q)
 
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(q, state)
 
     assert jnp.isinf(metrics.value_norm)
 
@@ -390,13 +338,10 @@ def test_tabular_single_state_single_action():
     )
 
     opt_q = _opt_q(mdp, gamma=0.99)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     # All metrics should be scalar with no crashes
     assert metrics.diff_l1.shape == ()
@@ -433,8 +378,8 @@ def test_tabular_non_term_mask_shape_and_values():
     assert jnp.sum(non_term) == 2.0
 
 
-def test_tabular_qvec_returns_full_table():
-    """agent.qvec returns every finite-action value for all state indices."""
+def test_tabular_rejects_wrong_q_shape():
+    """Evaluator rejects Q-values that do not match the MDP."""
     key = jax.random.PRNGKey(21)
 
     config = tabular.garnet.Config(state_size=5, action_size=3)
@@ -442,15 +387,12 @@ def test_tabular_qvec_returns_full_table():
     env_state = env.init(key)
     mdp = env_state.mdp
 
-    q = jnp.arange(15, dtype=jnp.float32).reshape(3, 5)
-    agent = TableAgent()
-    agent_state = TableAgent.State(q=q)
+    opt_q = _opt_q(mdp, 0.99)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
+    q = jnp.zeros((mdp.state_size, mdp.action_size))
 
-    all_states = jnp.arange(mdp.state_size)
-    result = agent.qvec(all_states, agent_state)
-
-    assert result.shape == (mdp.action_size, mdp.state_size)
-    assert jnp.array_equal(result, q)
+    with pytest.raises(AssertionError):
+        evaluator.init(q)
 
 
 def test_tabular_bellman_target_shape():
@@ -510,13 +452,10 @@ def test_tabular_pi_eval_rho_uses_initial_distribution():
     mdp = env_state.mdp
 
     opt_q = _opt_q(mdp, 0.99)
-    agent = TableAgent()
-    evaluator = TabularEval(mdp=mdp, gamma=0.99, agent=agent, opt_q=opt_q)
+    evaluator = TabularEval(mdp=mdp, gamma=0.99, opt_q=opt_q)
+    state = evaluator.init(opt_q)
 
-    agent_state = TableAgent.State(q=opt_q)
-    state = evaluator.init(agent_state)
-
-    metrics, state = evaluator.evaluate(agent_state, state)
+    metrics, state = evaluator.evaluate(opt_q, state)
 
     # Recompute pi_eval_rho manually
     pi = tabular_eval._greedy_policy(opt_q)
