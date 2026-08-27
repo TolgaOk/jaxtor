@@ -73,3 +73,17 @@ Single-script implementations of common RL algorithms.
 - [`examples/reinforce.py`](examples/reinforce.py): REINFORCE on CartPole-v1 (`gymnax`)
 - [`examples/naf.py`](examples/naf.py): [NAF](https://arxiv.org/abs/1603.00748) on continuous-control environments (`gymnasium` or `envpool`)
 - [`examples/ppo.py`](examples/ppo.py): [PPO](https://arxiv.org/abs/1707.06347) on CartPole-v1 (`gymnax`)
+
+## Citation
+
+If you use `jaxtor` in your research, please cite:
+
+```bibtex
+@software{tolgaok_jaxtor_2026,
+  author  = {Tolga Ok},
+  title   = {{Jaxtor}: A composable component library for reinforcement learning experiments},
+  year    = {2026},
+  version = {0.2.0},
+  url     = {https://github.com/TolgaOk/jaxtor},
+}
+```
