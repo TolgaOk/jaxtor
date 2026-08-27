@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use Jaxtor in your research, please cite it as below."
+type: software
+title: "Jaxtor: A composable component library for reinforcement learning experiments"
+authors:
+  - given-names: "Tolga"
+    family-names: "Ok"
+version: "0.2.0"
+date-released: 2026-08-25
+repository-code: "https://github.com/TolgaOk/jaxtor"
+url: "https://github.com/TolgaOk/jaxtor/releases/tag/v0.2.0"
+license: MIT
