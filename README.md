@@ -74,6 +74,12 @@ Single-script implementations of common RL algorithms.
 - [`examples/naf.py`](examples/naf.py): [NAF](https://arxiv.org/abs/1603.00748) on continuous-control environments (`gymnasium` or `envpool`)
 - [`examples/ppo.py`](examples/ppo.py): [PPO](https://arxiv.org/abs/1707.06347) on CartPole-v1 (`gymnax`)
 
+PPO keeps construction, its compiled update, and the run loop inside
+`train(Config(...))`. Importing the example does not create an environment.
+The update exposes fixed targets, the clipped loss, minibatch epochs, and the
+commit of learned parameters and observation statistics. Reward normalization,
+entropy regularization, and deterministic evaluation remain part of the recipe.
+
 ## Citation
 
 If you use `jaxtor` in your research, please cite:
